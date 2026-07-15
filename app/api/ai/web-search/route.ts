@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/backend/lib/auth";
-import { consumeFeatureRateLimit, type FeatureRateLimitResult } from "@/backend/lib/featureRateLimit";
 import {
   getAiUserMessage,
   isAiBusyError,
@@ -13,22 +12,9 @@ export const runtime = "nodejs";
 
 const QUERY_MIN_CHARS = 3;
 const QUERY_MAX_CHARS = 500;
-const WEB_SEARCH_LIMIT = 10;
-const WEB_SEARCH_WINDOW_MS = 60_000;
 
-function apiError(message: string, status: number, headers?: HeadersInit) {
-  return NextResponse.json({ error: message }, { status, headers });
-}
-
-function rateLimitHeaders(result: FeatureRateLimitResult) {
-  const headers = new Headers({
-    "Cache-Control": "private, no-store",
-    "X-RateLimit-Limit": String(result.limit),
-    "X-RateLimit-Remaining": String(result.remaining),
-    "X-RateLimit-Reset": String(Math.ceil(result.resetAt / 1_000)),
-  });
-  if (!result.allowed) headers.set("Retry-After", String(result.retryAfterSeconds));
-  return headers;
+function apiError(message: string, status: number) {
+  return NextResponse.json({ error: message }, { status });
 }
 
 function normalizeQuery(value: unknown) {
@@ -81,24 +67,14 @@ export async function POST(request: Request) {
     return apiError(`Web search queries must be ${QUERY_MAX_CHARS} characters or fewer.`, 400);
   }
 
-  const rateLimit = consumeFeatureRateLimit({
-    key: `web-search:${user.id}`,
-    limit: WEB_SEARCH_LIMIT,
-    windowMs: WEB_SEARCH_WINDOW_MS,
-  });
-  const headers = rateLimitHeaders(rateLimit);
-  if (!rateLimit.allowed) {
-    return apiError("Too many web searches. Please wait and try again.", 429, headers);
-  }
-
   try {
     const answer = await answerWebSearch(query, request.signal);
-    return NextResponse.json({ answer }, { headers });
+    return NextResponse.json({ answer });
   } catch (error) {
     if (error instanceof WebSearchError) {
-      return apiError(error.message, error.status, headers);
+      return apiError(error.message, error.status);
     }
     const normalized = normalizeUnexpectedError(error);
-    return apiError(normalized.message, normalized.status, headers);
+    return apiError(normalized.message, normalized.status);
   }
 }

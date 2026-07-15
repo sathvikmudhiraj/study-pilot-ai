@@ -4,6 +4,7 @@ import { buildAnswerKey, generateQuiz, type QuizDifficulty, type QuizQuestionTyp
 import { processStudyMaterial } from "@/backend/lib/studyMaterial";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { getAiUserMessage, isAiBusyError, isAiQuotaError } from "@/backend/lib/aiProvider";
+import { sanitizeQuizForClient } from "@/backend/lib/quizSecurity";
 
 export const runtime = "nodejs";
 
@@ -360,7 +361,7 @@ export async function GET() {
 
   const result = await supabase
     .from("quizzes")
-    .select("id, user_id, file_id, note_id, quiz_title, title, difficulty, questions, answer_key, created_at, updated_at")
+    .select("id, user_id, file_id, note_id, quiz_title, title, difficulty, questions, created_at, updated_at")
     .eq("user_id", user.id)
     .order("created_at", { ascending: false })
     .limit(20);
@@ -370,7 +371,9 @@ export async function GET() {
     return errorResponse("Could not load saved quizzes.", 500, { dbError: result.error.message });
   }
 
-  return NextResponse.json({ quizzes: result.data ?? [] });
+  return NextResponse.json({
+    quizzes: (result.data ?? []).map((quiz) => sanitizeQuizForClient(quiz as Record<string, unknown>)),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -426,16 +429,19 @@ export async function POST(request: Request) {
     devLog("quiz saved", { quizId: saved.id });
 
     return NextResponse.json({
-      quiz: {
-        ...saved,
-        // Merge validated fields on top for consistent typing on the client.
-        title: quiz.title,
-        quiz_title: quiz.title,
-        difficulty: quiz.difficulty,
-        questions: quiz.questions,
-        answer_key: buildAnswerKey(quiz.questions),
-        source_summary: quiz.source_summary,
-      },
+      quiz: sanitizeQuizForClient(
+        {
+          ...saved,
+          // Merge validated fields on top for consistent typing on the client.
+          title: quiz.title,
+          quiz_title: quiz.title,
+          difficulty: quiz.difficulty,
+        },
+        {
+          questions: quiz.questions,
+          source_summary: quiz.source_summary,
+        },
+      ),
     });
   } catch (error) {
     if (error instanceof BadRequestError) {

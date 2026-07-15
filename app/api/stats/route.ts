@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireUser } from "@/backend/lib/auth";
+import { requireAdmin } from "@/backend/lib/auth";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 
 async function countRows(supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>, table: string) {
@@ -12,8 +12,8 @@ async function countRows(supabase: Awaited<ReturnType<typeof createServerSupabas
 }
 
 export async function GET() {
-  const user = await requireUser("admin");
-  if (!user) return NextResponse.json({ error: "Admin access required." }, { status: 403 });
+  const admin = await requireAdmin();
+  if (!admin.ok) return NextResponse.json({ error: admin.message }, { status: admin.status });
 
   const supabase = await createServerSupabaseClient();
   if (!supabase) return NextResponse.json({ error: "Supabase is not configured." }, { status: 500 });

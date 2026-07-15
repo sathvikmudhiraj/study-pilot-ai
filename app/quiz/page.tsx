@@ -4,21 +4,12 @@ import { PageHeader } from "@/frontend/components/ui";
 import { getCurrentUser } from "@/backend/lib/auth";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { buildQuizAnalytics, emptyQuizAnalytics } from "@/backend/lib/quizAnalytics";
+import { sanitizeQuizForClient, type ClientQuiz } from "@/backend/lib/quizSecurity";
 import { supabaseSetupMessage } from "@/frontend/lib/supabase/errors";
 
 export const dynamic = "force-dynamic";
 
-type SavedQuiz = {
-  id: string;
-  file_id: string | null;
-  note_id: string | null;
-  quiz_title: string | null;
-  title: string | null;
-  difficulty: string | null;
-  questions: unknown;
-  answer_key: unknown;
-  created_at: string;
-};
+const QUIZ_SOURCE_LIMIT = 100;
 
 type QuizSearchParams = {
   fileId?: string | string[];
@@ -44,7 +35,7 @@ export default async function QuizPage({ searchParams }: { searchParams?: Promis
   const user = await getCurrentUser();
   const supabase = await createServerSupabaseClient();
 
-  let savedQuizzes: SavedQuiz[] = [];
+  let savedQuizzes: ClientQuiz[] = [];
   let quizAnalytics = emptyQuizAnalytics;
   const sources = { files: [] as { value: string; label: string }[], notes: [] as { value: string; label: string }[], summaries: [] as { value: string; label: string }[] };
   let error = "";
@@ -53,7 +44,7 @@ export default async function QuizPage({ searchParams }: { searchParams?: Promis
     const [quizzesResult, filesResult, notesResult, summariesResult, attemptsResult] = await Promise.all([
       supabase
         .from("quizzes")
-        .select("id, file_id, note_id, quiz_title, title, difficulty, questions, answer_key, created_at")
+        .select("id, file_id, note_id, quiz_title, title, difficulty, questions, created_at")
         .eq("user_id", user.id)
         .order("created_at", { ascending: false })
         .limit(20),
@@ -63,8 +54,14 @@ export default async function QuizPage({ searchParams }: { searchParams?: Promis
         .from("files")
         .select("id, file_name")
         .eq("user_id", user.id)
-        .order("created_at", { ascending: false }),
-      supabase.from("notes").select("id, title, topic").eq("user_id", user.id).order("created_at", { ascending: false }),
+        .order("created_at", { ascending: false })
+        .limit(QUIZ_SOURCE_LIMIT),
+      supabase
+        .from("notes")
+        .select("id, title, topic")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false })
+        .limit(QUIZ_SOURCE_LIMIT),
       supabase
         .from("ai_outputs")
         .select("id, suggested_title")
@@ -82,7 +79,7 @@ export default async function QuizPage({ searchParams }: { searchParams?: Promis
     if (quizzesResult.error) {
       error = supabaseSetupMessage(quizzesResult.error.message);
     } else {
-      savedQuizzes = (quizzesResult.data ?? []) as SavedQuiz[];
+      savedQuizzes = (quizzesResult.data ?? []).map((quiz) => sanitizeQuizForClient(quiz as Record<string, unknown>));
     }
 
     (filesResult.data ?? []).forEach((file) => {

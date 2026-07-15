@@ -1,23 +1,40 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/backend/lib/auth";
 import { buildQuizAnalytics, gradeQuizAttempt } from "@/backend/lib/quizAnalytics";
+import { buildReviewAnswerKey, findUnknownAnswerQuestionIds, normalizeSubmittedAnswers } from "@/backend/lib/quizSecurity";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 
 export const runtime = "nodejs";
 
+type QuizAttemptRequestBody = {
+  quizId?: string;
+  fileId?: string | null;
+  answers?: unknown;
+  score?: unknown;
+};
+
+type CorrectAnswerResult = {
+  questionId: string;
+  userAnswer: string;
+};
+
+type WrongAnswerResult = {
+  questionId: string;
+  question: string;
+  userAnswer: string;
+  correctAnswer: string;
+};
+
+type SecureQuizGradeResponse = {
+  score: number;
+  totalQuestions: number;
+  percentage: number;
+  correctAnswers: CorrectAnswerResult[];
+  wrongAnswers: WrongAnswerResult[];
+};
+
 function apiError(message: string, status = 500) {
   return NextResponse.json({ error: message }, { status });
-}
-
-function cleanAnswers(value: unknown) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
-      .map(([key, answer]) => [key.trim(), String(answer ?? "").trim().slice(0, 2000)] as const)
-      .filter(([key]) => Boolean(key))
-      .slice(0, 50),
-  );
 }
 
 function attemptStorageError(message: string) {
@@ -65,31 +82,42 @@ export async function POST(request: Request) {
   const supabase = await createServerSupabaseClient();
   if (!supabase) return apiError("Supabase is not configured.", 500);
 
-  let body: { quizId?: string; answers?: unknown };
+  let body: QuizAttemptRequestBody;
   try {
     body = await request.json();
   } catch {
     return apiError("Invalid request body.", 400);
   }
 
+  if (Object.prototype.hasOwnProperty.call(body, "score")) {
+    return apiError("Client-provided scores are not accepted.", 400);
+  }
+
   const quizId = body.quizId?.trim();
-  const answers = cleanAnswers(body.answers);
+  const fileId = typeof body.fileId === "string" && body.fileId.trim() ? body.fileId.trim() : null;
+  const submitted = normalizeSubmittedAnswers(body.answers);
   if (!quizId) return apiError("Choose a quiz first.", 400);
+  if (submitted.invalid) return apiError("Submit answers as questionId and selectedAnswer pairs.", 400);
+  if (submitted.duplicateQuestionIds.length) return apiError("Duplicate question IDs are not allowed.", 400);
 
   const quizResult = await supabase
     .from("quizzes")
-    .select("id, questions, answer_key")
+    .select("id, file_id, questions, answer_key")
     .eq("id", quizId)
     .eq("user_id", user.id)
     .maybeSingle();
 
   if (quizResult.error) return apiError("Could not load this quiz.", 500);
   if (!quizResult.data) return apiError("Quiz not found or you do not have access to it.", 404);
+  if (fileId && quizResult.data.file_id !== fileId) return apiError("Quiz file context does not match this attempt.", 400);
+
+  const unknownQuestionIds = findUnknownAnswerQuestionIds(quizResult.data.questions, submitted.answers);
+  if (unknownQuestionIds.length) return apiError("Submitted answers contain unknown questions.", 400);
 
   const graded = gradeQuizAttempt({
     questions: quizResult.data.questions,
     answerKey: quizResult.data.answer_key,
-    answers,
+    answers: submitted.answers,
   });
 
   if (!graded.total_questions) return apiError("This quiz has no readable questions.", 400);
@@ -109,10 +137,37 @@ export async function POST(request: Request) {
 
   if (saved.error) return apiError(attemptStorageError(saved.error.message), 500);
 
+  const attempt = {
+    ...saved.data,
+    user_answers: graded.user_answers,
+    wrong_questions: graded.wrong_questions,
+  };
+  const gradeResponse: SecureQuizGradeResponse = {
+    score: graded.score,
+    totalQuestions: graded.total_questions,
+    percentage: graded.percentage,
+    correctAnswers: graded.user_answers
+      .filter((answer) => answer.is_correct)
+      .map((answer) => ({
+        questionId: answer.question_id,
+        userAnswer: answer.user_answer,
+      })),
+    wrongAnswers: graded.wrong_questions.map((answer) => ({
+      questionId: answer.question_id,
+      question: answer.question,
+      userAnswer: answer.user_answer,
+      correctAnswer: answer.correct_answer,
+    })),
+  };
+  const answerKey = buildReviewAnswerKey({
+    questions: quizResult.data.questions,
+    answerKey: quizResult.data.answer_key,
+  });
+
   try {
     const analytics = await loadAnalytics(supabase, user.id);
-    return NextResponse.json({ attempt: saved.data, analytics });
+    return NextResponse.json({ ...gradeResponse, attempt, answer_key: answerKey, analytics });
   } catch {
-    return NextResponse.json({ attempt: saved.data, analytics: null });
+    return NextResponse.json({ ...gradeResponse, attempt, answer_key: answerKey, analytics: null });
   }
 }

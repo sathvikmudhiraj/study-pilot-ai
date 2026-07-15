@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/backend/lib/auth";
-import { answerStudyQuestion, type StructuredChatAnswer } from "@/backend/lib/aiChat";
+import { answerLearnStepByStep, answerStudyQuestion, type StructuredChatAnswer } from "@/backend/lib/aiChat";
 import { estimateChunks } from "@/backend/lib/pdfText";
 import { processStudyMaterial } from "@/backend/lib/studyMaterial";
 import {
@@ -20,6 +20,7 @@ type AskBody = {
   question?: string;
   fileIds?: string[];
   noteIds?: string[];
+  mode?: "study" | "learn_step_by_step";
   /** Optional. When supplied the exchange is stored inside this conversation. */
   conversationId?: string;
 };
@@ -445,37 +446,54 @@ function summaryToContextText(summary: Record<string, unknown>) {
     .join("\n\n");
 }
 
-async function getLatestSummaryText({
+async function getLatestSummaryTextByFileId({
   supabase,
   userId,
-  fileId,
+  fileIds,
 }: {
   supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>;
   userId: string;
-  fileId: string;
+  fileIds: string[];
 }) {
-  if (!supabase) return "";
+  const summaries = new Map<string, string>();
+  if (!supabase || !fileIds.length) return summaries;
 
-  const base = await supabase
+  const uniqueFileIds = Array.from(new Set(fileIds));
+  const fullColumns =
+    "id, suggested_title, short_summary, key_points, important_concepts, file_id, created_at, content, module_overview, covered_topics, topic_wise_summary, exam_focus_points";
+  const baseColumns = "id, suggested_title, short_summary, key_points, important_concepts, file_id, created_at";
+
+  const fullResult = await supabase
     .from("ai_outputs")
-    .select("id, suggested_title, short_summary, key_points, important_concepts, file_id, created_at")
+    .select(fullColumns)
     .eq("user_id", userId)
-    .eq("file_id", fileId)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .in("file_id", uniqueFileIds)
+    .order("created_at", { ascending: false });
 
-  if (base.error || !base.data) return "";
+  let rows = (fullResult.data ?? []) as Record<string, unknown>[];
 
-  const optional = await supabase
-    .from("ai_outputs")
-    .select("content, module_overview, covered_topics, topic_wise_summary, exam_focus_points")
-    .eq("user_id", userId)
-    .eq("id", base.data.id)
-    .maybeSingle();
+  if (fullResult.error) {
+    const baseResult = await supabase
+      .from("ai_outputs")
+      .select(baseColumns)
+      .eq("user_id", userId)
+      .in("file_id", uniqueFileIds)
+      .order("created_at", { ascending: false });
 
-  const summary = optional.error ? base.data : { ...base.data, ...optional.data };
-  return summaryToContextText(summary as Record<string, unknown>);
+    if (baseResult.error) return summaries;
+    rows = (baseResult.data ?? []) as Record<string, unknown>[];
+  }
+
+  for (const row of rows) {
+    const fileId = typeof row.file_id === "string" ? row.file_id : "";
+    if (!fileId || summaries.has(fileId)) continue;
+
+    const text = summaryToContextText(row);
+    if (text) summaries.set(fileId, text);
+    if (summaries.size === uniqueFileIds.length) break;
+  }
+
+  return summaries;
 }
 
 function prepareCitedContext(items: ContextItem[], question: string) {
@@ -552,14 +570,15 @@ async function getSelectedFileContext({
   if (error) throw error;
 
   const items: ContextItem[] = [];
+  const summaryTextByFileId = await getLatestSummaryTextByFileId({
+    supabase,
+    userId,
+    fileIds: (data ?? []).map((file) => file.id),
+  });
 
   for (const file of data ?? []) {
     let text = String(file.extracted_text ?? "").trim();
-    const summaryText = await getLatestSummaryText({
-      supabase,
-      userId,
-      fileId: file.id,
-    });
+    const summaryText = summaryTextByFileId.get(file.id) ?? "";
 
     if (!text && file.storage_path) {
       devLog("selected file needs extraction", { fileId: file.id, fileName: file.file_name });
@@ -893,9 +912,10 @@ export async function POST(request: Request) {
   }
 
   const question = body.question?.trim();
-  const fileIds = cleanIds(body.fileIds);
-  const noteIds = cleanIds(body.noteIds);
-  const debug: Record<string, unknown> = { fileCount: fileIds.length, noteCount: noteIds.length };
+  const requestMode = body.mode === "learn_step_by_step" ? "learn_step_by_step" : "study";
+  let fileIds = cleanIds(body.fileIds);
+  let noteIds = cleanIds(body.noteIds);
+  const debug: Record<string, unknown> = { fileCount: fileIds.length, noteCount: noteIds.length, requestMode };
 
   if (!question) return apiError("Ask a question first.", 400);
 
@@ -905,6 +925,7 @@ export async function POST(request: Request) {
   // silently ignored, which would cause messages to float into the legacy pool.
   const rawConversationId = body.conversationId?.trim() ?? null;
   let conversationId: string | null = null;
+  let conversationContextMode: string | null = null;
 
   if (rawConversationId) {
     if (!CONVERSATION_ID_RE.test(rawConversationId)) {
@@ -913,7 +934,7 @@ export async function POST(request: Request) {
     // Double-check ownership (RLS also enforces this, but we want a clean 404).
     const { data: convo, error: convoError } = await supabase
       .from("conversations")
-      .select("id")
+      .select("id, context_mode, active_file_ids, active_note_ids")
       .eq("id", rawConversationId)
       .eq("user_id", user.id)
       .maybeSingle();
@@ -925,6 +946,18 @@ export async function POST(request: Request) {
       return apiError("Conversation not found.", 404);
     }
     conversationId = rawConversationId;
+    conversationContextMode = typeof convo.context_mode === "string" ? convo.context_mode : "general";
+
+    if (conversationContextMode === "file" || conversationContextMode === "image") {
+      fileIds = cleanIds(convo.active_file_ids);
+      noteIds = cleanIds(convo.active_note_ids);
+    } else {
+      fileIds = [];
+      noteIds = [];
+    }
+    debug.fileCount = fileIds.length;
+    debug.noteCount = noteIds.length;
+    debug.contextMode = conversationContextMode;
   }
   // ──────────────────────────────────────────────────────────────────────
 
@@ -988,9 +1021,11 @@ export async function POST(request: Request) {
     ];
     const keywordContext = selectedContext.length
       ? []
-      : await getKeywordContext({ supabase, userId: user.id, question });
+      : conversationId
+        ? []
+        : await getKeywordContext({ supabase, userId: user.id, question });
     const contextItems = selectedContext.length ? selectedContext : keywordContext;
-    const cached = broadAttachedFileQuestion
+    const cached = requestMode === "learn_step_by_step" || broadAttachedFileQuestion
       ? null
       : await getCachedAnswer({
           supabase,
@@ -1017,7 +1052,7 @@ export async function POST(request: Request) {
       question,
       conversationId,
     });
-    const preparedContext = prepareCitedContext(contextItems, question);
+    const preparedContext = prepareCitedContext([...contextItems, ...previousContext], question);
 
     debug.contextItemCount = contextItems.length;
     debug.previousAnswerContextCount = previousContext.length;
@@ -1030,7 +1065,9 @@ export async function POST(request: Request) {
 
     try {
       answer = {
-        ...(await answerStudyQuestion({ question, context: preparedContext.text })),
+        ...(requestMode === "learn_step_by_step"
+          ? await answerLearnStepByStep({ question, context: preparedContext.text })
+          : await answerStudyQuestion({ question, context: preparedContext.text })),
         response_mode: "ai",
         source_citations: preparedContext.citations,
       };

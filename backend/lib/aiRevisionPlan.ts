@@ -1,6 +1,6 @@
 import "server-only";
 
-import { generateAIText } from "./aiProvider";
+import { generateAIText, getAIProviderRuntimeInfo, type AIProviderTelemetryEvent } from "./aiProvider";
 import { STUDYPILOT_TUTOR_INSTRUCTION } from "./tutorPrompt";
 
 // ---------------------------------------------------------------------------
@@ -88,7 +88,15 @@ export type RevisionPlan = {
 // Constants
 // ---------------------------------------------------------------------------
 
+const MAX_TEXT_PER_FILE_WITH_SUMMARIES = 700;
+const MAX_TEXT_PER_FILE_WITHOUT_SUMMARIES = 1600;
 const MAX_TEXT_PER_FILE = 3000;
+const MAX_TOTAL_FILE_TEXT_WITH_SUMMARIES = 3500;
+const MAX_TOTAL_FILE_TEXT_WITHOUT_SUMMARIES = 9000;
+const MAX_TEXT_PER_NOTE = 1000;
+const MAX_TOTAL_NOTE_TEXT = 4500;
+const MAX_REVISION_SUMMARIES = 12;
+const MAX_SUMMARY_ITEMS = 8;
 const DEFAULT_PLAN_DAYS = 7;
 
 // ---------------------------------------------------------------------------
@@ -98,6 +106,10 @@ const DEFAULT_PLAN_DAYS = 7;
 function devLog(message: string, details?: Record<string, unknown>) {
   if (process.env.NODE_ENV === "production") return;
   console.log(`[aiRevisionPlan] ${message}`, details ?? "");
+}
+
+function telemetryLog(message: string, details?: Record<string, unknown>) {
+  console.info(`[aiRevisionPlan] ${message}`, details ?? {});
 }
 
 function truncate(text: string, max: number) {
@@ -122,6 +134,75 @@ function stringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map((item) => String(item ?? "").trim()).filter(Boolean);
 }
+
+function charCount(values: string[]) {
+  return values.reduce((total, value) => total + value.length, 0);
+}
+
+function textChars(value: string | null | undefined) {
+  return String(value ?? "").trim().length;
+}
+
+function scoreTextForTerms(text: string, terms: string[]) {
+  const lower = text.toLowerCase();
+  return terms.reduce((score, term) => score + (term && lower.includes(term) ? 1 : 0), 0);
+}
+
+function priorityTerms(ctx: StudyContext) {
+  return uniqueStrings(
+    [
+      ...ctx.quiz_analytics.weak_topics,
+      ...ctx.summaries.flatMap((summary) => summary.covered_topics.slice(0, 4)),
+      ...ctx.summaries.flatMap((summary) => summary.important_concepts.slice(0, 4)),
+    ],
+    30,
+  ).map((term) => term.toLowerCase());
+}
+
+function summaryTextForScoring(summary: StudySummary) {
+  return [
+    summary.suggested_title ?? "",
+    ...summary.covered_topics,
+    ...summary.key_points,
+    ...summary.exam_focus_points,
+    ...summary.important_concepts,
+    ...summary.common_mistakes,
+    ...summary.memory_lines,
+  ].join("\n");
+}
+
+function selectedSummaries(ctx: StudyContext) {
+  const terms = priorityTerms(ctx);
+  return ctx.summaries
+    .map((summary, index) => ({
+      summary,
+      index,
+      score: scoreTextForTerms(summaryTextForScoring(summary), terms),
+    }))
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .slice(0, MAX_REVISION_SUMMARIES)
+    .map(({ summary }) => summary);
+}
+
+function listLine(label: string, values: string[], limit = MAX_SUMMARY_ITEMS) {
+  const items = uniqueStrings(values, limit);
+  return items.length ? `${label}: ${items.join("; ")}` : "";
+}
+
+type RevisionContextStats = {
+  fileCount: number;
+  noteCount: number;
+  summaryCount: number;
+  selectedSummaryCount: number;
+  quizCount: number;
+  originalFileTextChars: number;
+  includedFileTextChars: number;
+  originalNoteTextChars: number;
+  includedNoteTextChars: number;
+  contextChars: number;
+  largestFileTextChars: number;
+  fullExtractedTextSent: boolean;
+};
 
 // ---------------------------------------------------------------------------
 // JSON parsing (reuse the robust pattern from aiSummary)
@@ -267,6 +348,120 @@ function buildStudyContextText(ctx: StudyContext): string {
   return sections.join("\n\n======\n\n");
 }
 
+function buildReducedStudyContextText(ctx: StudyContext): { text: string; stats: RevisionContextStats & { legacyContextChars: number } } {
+  const sections: string[] = [];
+  const summaries = selectedSummaries(ctx);
+  const hasStructuredSummaries = summaries.length > 0;
+  const perFileLimit = hasStructuredSummaries ? MAX_TEXT_PER_FILE_WITH_SUMMARIES : MAX_TEXT_PER_FILE_WITHOUT_SUMMARIES;
+  const totalFileLimit = hasStructuredSummaries ? MAX_TOTAL_FILE_TEXT_WITH_SUMMARIES : MAX_TOTAL_FILE_TEXT_WITHOUT_SUMMARIES;
+  const fileOriginalLengths = ctx.files.map((file) => textChars(file.extracted_text));
+  let remainingFileChars = totalFileLimit;
+  let includedFileTextChars = 0;
+  let includedNoteTextChars = 0;
+
+  if (summaries.length) {
+    const summaryLines = summaries.map((summary) => {
+      const parts = [
+        summary.suggested_title ? `Title: ${summary.suggested_title}` : "",
+        listLine("Topics", summary.covered_topics, 12),
+        listLine("Key points", summary.key_points),
+        listLine("Exam focus", summary.exam_focus_points),
+        listLine("Important concepts", summary.important_concepts),
+        listLine("Common mistakes", summary.common_mistakes, 6),
+        listLine("Memory lines", summary.memory_lines, 6),
+        listLine("Action items", summary.action_items, 6),
+      ].filter(Boolean);
+      return parts.join("\n");
+    });
+    sections.push(`SELECTED AI SUMMARIES AND KEY POINTS (${summaries.length} of ${ctx.summaries.length}):\n${summaryLines.join("\n\n---\n\n")}`);
+  }
+
+  if (ctx.files.length) {
+    const fileLines: string[] = [];
+    for (const file of ctx.files) {
+      const rawText = file.extracted_text.trim();
+      if (!rawText || remainingFileChars <= 0) {
+        fileLines.push(`File: "${file.file_name}" (${file.content_type ?? "unknown"})`);
+        continue;
+      }
+
+      const excerptLimit = Math.min(perFileLimit, remainingFileChars);
+      const includedChars = Math.min(rawText.length, excerptLimit);
+      includedFileTextChars += includedChars;
+      remainingFileChars -= includedChars;
+      fileLines.push(
+        `File: "${file.file_name}" (${file.content_type ?? "unknown"})\nRelevant excerpt (${includedChars} of ${rawText.length} chars):\n${truncate(rawText, excerptLimit)}`,
+      );
+    }
+    sections.push(`UPLOADED FILES (${ctx.files.length}, bounded excerpts):\n${fileLines.join("\n\n---\n\n")}`);
+  }
+
+  if (ctx.notes.length) {
+    const noteLines: string[] = [];
+    let remainingNoteChars = MAX_TOTAL_NOTE_TEXT;
+    for (const note of ctx.notes) {
+      const rawText = note.raw_notes.trim();
+      const noteTitle = `Note: "${note.title}"${note.topic ? ` - Topic: ${note.topic}` : ""}`;
+      if (!rawText || remainingNoteChars <= 0) {
+        noteLines.push(noteTitle);
+        continue;
+      }
+
+      const excerptLimit = Math.min(MAX_TEXT_PER_NOTE, remainingNoteChars);
+      const includedChars = Math.min(rawText.length, excerptLimit);
+      includedNoteTextChars += includedChars;
+      remainingNoteChars -= includedChars;
+      noteLines.push(`${noteTitle}\n${truncate(rawText, excerptLimit)}`);
+    }
+    sections.push(`MANUAL NOTES (${ctx.notes.length}, bounded excerpts):\n${noteLines.join("\n\n---\n\n")}`);
+  }
+
+  if (ctx.quizzes.length) {
+    const quizLines = ctx.quizzes.map((quiz) => {
+      const parts: string[] = [];
+      if (quiz.title) parts.push(`Quiz: ${quiz.title}`);
+      if (quiz.difficulty) parts.push(`Difficulty: ${quiz.difficulty}`);
+      parts.push(`Questions: ${quiz.question_count}`);
+      return parts.join(" | ");
+    });
+    sections.push(`QUIZZES (${ctx.quizzes.length}):\n${quizLines.join("\n")}`);
+  }
+
+  if (ctx.quiz_analytics.attempt_count) {
+    const last = ctx.quiz_analytics.last_quiz_score;
+    sections.push(
+      [
+        "QUIZ PERFORMANCE (use this to set revision priority):",
+        last ? `Last quiz score: ${last.score}/${last.total} (${Math.round(last.percentage)}%)` : "",
+        ctx.quiz_analytics.weak_topics.length ? `Weak topics: ${ctx.quiz_analytics.weak_topics.join(", ")}` : "Weak topics: none tracked",
+        ctx.quiz_analytics.strong_topics.length ? `Strong topics: ${ctx.quiz_analytics.strong_topics.join(", ")}` : "Strong topics: none tracked",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    );
+  }
+
+  const text = sections.join("\n\n======\n\n");
+  return {
+    text,
+    stats: {
+      fileCount: ctx.files.length,
+      noteCount: ctx.notes.length,
+      summaryCount: ctx.summaries.length,
+      selectedSummaryCount: summaries.length,
+      quizCount: ctx.quizzes.length,
+      originalFileTextChars: charCount(ctx.files.map((file) => file.extracted_text)),
+      includedFileTextChars,
+      originalNoteTextChars: charCount(ctx.notes.map((note) => note.raw_notes)),
+      includedNoteTextChars,
+      contextChars: text.length,
+      largestFileTextChars: fileOriginalLengths.length ? Math.max(...fileOriginalLengths) : 0,
+      fullExtractedTextSent: fileOriginalLengths.some((length) => length > totalFileLimit && includedFileTextChars >= length),
+      legacyContextChars: buildStudyContextText(ctx).length,
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Validate and normalize Gemini response into RevisionPlan
 // ---------------------------------------------------------------------------
@@ -364,7 +559,13 @@ function validateRevisionPlan(record: Record<string, unknown>, ctx: StudyContext
 // ---------------------------------------------------------------------------
 
 export async function generateRevisionPlan(ctx: StudyContext): Promise<RevisionPlan> {
-  const contextText = buildStudyContextText(ctx);
+  const { text: contextText, stats } = buildReducedStudyContextText(ctx);
+  const providerInfo = getAIProviderRuntimeInfo("default");
+  const telemetryEvents: AIProviderTelemetryEvent[] = [];
+  let actualProvider = providerInfo.primaryProvider;
+  let actualModel = providerInfo.primaryModel;
+  let actualTimeoutMs = providerInfo.fastFallbackTimeoutMs;
+  let aiLatencyMs = 0;
 
   devLog("generating revision plan", {
     fileCount: ctx.files.length,
@@ -372,6 +573,16 @@ export async function generateRevisionPlan(ctx: StudyContext): Promise<RevisionP
     summaryCount: ctx.summaries.length,
     quizCount: ctx.quizzes.length,
     contextLength: contextText.length,
+  });
+  telemetryLog("revision context prepared", {
+    provider: providerInfo.configuredProvider,
+    primaryProvider: providerInfo.primaryProvider,
+    primaryModel: providerInfo.primaryModel,
+    fallbackProvider: providerInfo.fallbackProvider,
+    fallbackModel: providerInfo.fallbackModel,
+    timeoutMs: providerInfo.timeoutMs,
+    fastFallbackTimeoutMs: providerInfo.fastFallbackTimeoutMs,
+    ...stats,
   });
 
   const today = new Date();
@@ -420,16 +631,73 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
   }
 }`;
 
-  const response = await generateAIText(prompt, {
-    temperature: 0.25,
-    maxOutputTokens: 6000,
-    responseMimeType: "application/json",
+  telemetryLog("revision ai request started", {
+    provider: providerInfo.configuredProvider,
+    primaryProvider: providerInfo.primaryProvider,
+    primaryModel: providerInfo.primaryModel,
+    fallbackProvider: providerInfo.fallbackProvider,
+    fallbackModel: providerInfo.fallbackModel,
+    timeoutMs: providerInfo.timeoutMs,
+    promptChars: prompt.length,
+    contextChars: stats.contextChars,
+    originalFileTextChars: stats.originalFileTextChars,
+    includedFileTextChars: stats.includedFileTextChars,
+    fullExtractedTextSent: stats.fullExtractedTextSent,
   });
 
-  devLog("Gemini response received", { rawLength: response.length });
+  const aiStartedAt = Date.now();
+  let response = "";
+  try {
+    response = await generateAIText(prompt, {
+      temperature: 0.25,
+      maxOutputTokens: 6000,
+      responseMimeType: "application/json",
+      telemetry(event) {
+        telemetryEvents.push(event);
+        if (event.event === "provider_started" || event.event === "final_provider") {
+          if (event.provider !== "auto") actualProvider = event.provider;
+          if (event.model) actualModel = event.model;
+          if (event.timeoutMs) actualTimeoutMs = event.timeoutMs;
+        }
+        if (event.event === "provider_finished" && typeof event.durationMs === "number") {
+          aiLatencyMs = event.durationMs;
+        }
+      },
+    });
+  } catch (error) {
+    const failed = telemetryEvents.findLast((event) => event.event === "provider_failed");
+    telemetryLog("revision ai request failed", {
+      provider: failed?.provider ?? actualProvider,
+      model: failed?.model ?? actualModel,
+      timeoutMs: failed?.timeoutMs ?? actualTimeoutMs,
+      aiLatencyMs: failed?.durationMs ?? Date.now() - aiStartedAt,
+      promptChars: prompt.length,
+      contextChars: stats.contextChars,
+      originalFileTextChars: stats.originalFileTextChars,
+      includedFileTextChars: stats.includedFileTextChars,
+      fullExtractedTextSent: stats.fullExtractedTextSent,
+      errorKind: failed?.errorKind ?? "request",
+    });
+    throw error;
+  }
+
+  telemetryLog("revision ai request completed", {
+    provider: actualProvider,
+    model: actualModel,
+    timeoutMs: actualTimeoutMs,
+    aiLatencyMs: aiLatencyMs || Date.now() - aiStartedAt,
+    promptChars: prompt.length,
+    contextChars: stats.contextChars,
+    responseChars: response.length,
+    originalFileTextChars: stats.originalFileTextChars,
+    includedFileTextChars: stats.includedFileTextChars,
+    fullExtractedTextSent: stats.fullExtractedTextSent,
+  });
+
+  devLog("AI response received", { rawLength: response.length });
 
   const parsed = tryParseJson(response);
-  if (!parsed) throw new Error("Gemini returned a plan format StudyPilot could not read. Please try again.");
+  if (!parsed) throw new Error("AI returned a plan format StudyPilot could not read. Please try again.");
 
   const plan = validateRevisionPlan(parsed, ctx);
 

@@ -5,7 +5,6 @@ import {
   generateGroundedDiagram,
   validateDiagramGenerationInput,
 } from "@/backend/lib/diagramGeneration";
-import { consumeFeatureRateLimit, type FeatureRateLimitResult } from "@/backend/lib/featureRateLimit";
 import {
   getAiUserMessage,
   isAiBusyError,
@@ -16,22 +15,8 @@ import {
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-const DIAGRAM_LIMIT = 5;
-const DIAGRAM_WINDOW_MS = 5 * 60_000;
-
-function apiError(message: string, status: number, headers?: HeadersInit) {
-  return NextResponse.json({ error: message }, { status, headers });
-}
-
-function rateLimitHeaders(result: FeatureRateLimitResult) {
-  const headers = new Headers({
-    "Cache-Control": "private, no-store",
-    "X-RateLimit-Limit": String(result.limit),
-    "X-RateLimit-Remaining": String(result.remaining),
-    "X-RateLimit-Reset": String(Math.ceil(result.resetAt / 1_000)),
-  });
-  if (!result.allowed) headers.set("Retry-After", String(result.retryAfterSeconds));
-  return headers;
+function apiError(message: string, status: number) {
+  return NextResponse.json({ error: message }, { status });
 }
 
 function normalizeProviderError(error: unknown) {
@@ -67,6 +52,7 @@ export async function POST(request: Request) {
   }
 
   let input;
+  const requestSizeBytes = Buffer.byteLength(JSON.stringify(body ?? {}), "utf8");
   try {
     input = validateDiagramGenerationInput(body);
   } catch (error) {
@@ -76,24 +62,14 @@ export async function POST(request: Request) {
     return apiError("Invalid diagram request.", 400);
   }
 
-  const rateLimit = consumeFeatureRateLimit({
-    key: `diagram:${user.id}`,
-    limit: DIAGRAM_LIMIT,
-    windowMs: DIAGRAM_WINDOW_MS,
-  });
-  const headers = rateLimitHeaders(rateLimit);
-  if (!rateLimit.allowed) {
-    return apiError("Too many diagram requests. Please wait and try again.", 429, headers);
-  }
-
   try {
-    const diagram = await generateGroundedDiagram(user.id, input, request.signal);
-    return NextResponse.json({ diagram }, { headers });
+    const diagram = await generateGroundedDiagram(user.id, input, request.signal, { requestSizeBytes });
+    return NextResponse.json({ diagram });
   } catch (error) {
     if (error instanceof DiagramGenerationError) {
-      return apiError(error.message, error.status, headers);
+      return apiError(error.message, error.status);
     }
     const normalized = normalizeProviderError(error);
-    return apiError(normalized.message, normalized.status, headers);
+    return apiError(normalized.message, normalized.status);
   }
 }

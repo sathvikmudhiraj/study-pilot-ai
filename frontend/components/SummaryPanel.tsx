@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   normalizeSourceCitations,
@@ -27,6 +27,16 @@ type Summary = {
   suggested_title: string | null;
   suggested_next_step: string | null;
   source_citations?: SourceCitationValue[] | null;
+  generation_metadata?: GenerationMetadata | null;
+};
+
+type GenerationMetadata = {
+  attemptedChunks: number;
+  successfulChunks: number[];
+  failedChunks: number[];
+  failureCategories: string[];
+  partialCoverage: boolean;
+  sourceTextLength: number;
 };
 
 type TopicSummary = {
@@ -37,6 +47,15 @@ type TopicSummary = {
 
 const FULL_EXTRACTION_INCOMPLETE_MESSAGE =
   "Full file extraction is incomplete. Re-extract the file or upload the original PPTX/DOCX.";
+const STALE_SUMMARY_NOTICE =
+  "Summary regeneration failed. The displayed summary is an older saved version.";
+const SUMMARY_IN_PROGRESS_NOTICE =
+  "A summary is already being generated for this file. Please wait for it to finish, then check the result.";
+
+function formatElapsed(ms: number) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
 
 function list(value: unknown) {
   return Array.isArray(value) ? value.filter(Boolean) : [];
@@ -76,6 +95,39 @@ function parseContentSummary(summary: Summary | null) {
   }
 }
 
+function normalizeGenerationMetadata(value: unknown): GenerationMetadata | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const attempted = Number(record.attemptedChunks ?? record.attempted_chunks ?? 0);
+  const successful = Array.isArray(record.successfulChunks ?? record.successful_chunks)
+    ? (record.successfulChunks as unknown[] ?? record.successful_chunks as unknown[])
+        .map((n) => Number(n))
+        .filter((n) => Number.isFinite(n))
+    : [];
+  const failed = Array.isArray(record.failedChunks ?? record.failed_chunks)
+    ? (record.failedChunks as unknown[] ?? record.failed_chunks as unknown[])
+        .map((n) => Number(n))
+        .filter((n) => Number.isFinite(n))
+    : [];
+  const categories = Array.isArray(record.failureCategories ?? record.failure_categories)
+    ? (record.failureCategories as unknown[] ?? record.failure_categories as unknown[])
+        .map((c) => String(c ?? "").trim())
+        .filter(Boolean)
+    : [];
+  const partial = Boolean(record.partialCoverage ?? record.partial_coverage);
+  const sourceLen = Number(record.sourceTextLength ?? record.source_text_length ?? 0);
+
+  if (!attempted && !successful.length && !failed.length && !partial) return null;
+  return {
+    attemptedChunks: attempted,
+    successfulChunks: successful,
+    failedChunks: failed,
+    failureCategories: categories,
+    partialCoverage: partial,
+    sourceTextLength: Number.isFinite(sourceLen) ? sourceLen : 0,
+  };
+}
+
 function normalizeSummary(summary: Summary | null): Summary | null {
   if (!summary) return null;
   const content = parseContentSummary(summary);
@@ -90,6 +142,7 @@ function normalizeSummary(summary: Summary | null): Summary | null {
     memory_lines: stringList(merged.memory_lines ?? content?.memory_lines),
     common_mistakes: stringList(merged.common_mistakes ?? content?.common_mistakes),
     source_citations: normalizeSourceCitations(merged.source_citations ?? content?.source_citations),
+    generation_metadata: normalizeGenerationMetadata(merged.generation_metadata ?? content?.generation_metadata),
   };
 }
 
@@ -128,6 +181,17 @@ export function SummaryPanel({
   const [noteDraft, setNoteDraft] = useState<StudyNoteDraft | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [staleSummary, setStaleSummary] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [finalElapsedMs, setFinalElapsedMs] = useState<number | null>(null);
+  const summaryStartedAtRef = useRef<number | null>(null);
+
+  // Mounted state is initialised from the latest initialSummary prop, so when
+  // the parent (file-detail RSC) re-mounts the panel via a `key` change after
+  // router.refresh(), the freshly-loaded DB summary is shown. We deliberately
+  // do NOT sync prop changes into useState from an effect or in render: the
+  // parent passes a stable key that changes precisely when the displayed
+  // summary row changes, causing a clean remount with the new prop.
 
   const readText = useMemo(() => {
     if (!summary) return "";
@@ -146,7 +210,26 @@ export function SummaryPanel({
       .join(". ");
   }, [summary]);
 
+  // User-visible progress: tick an elapsed-time counter every second while a
+  // summary job is running. Cleared on settle (success/loading-end). This gives
+  // the user concrete feedback that the job is progressing rather than hung.
+  useEffect(() => {
+    if (!loading) return;
+    summaryStartedAtRef.current = Date.now();
+    const interval = window.setInterval(() => {
+      if (summaryStartedAtRef.current) {
+        setElapsedSeconds(Math.floor((Date.now() - summaryStartedAtRef.current) / 1000));
+      }
+    }, 1000);
+    return () => {
+      window.clearInterval(interval);
+      summaryStartedAtRef.current = null;
+    };
+  }, [loading]);
+
   async function generateSummary() {
+    setFinalElapsedMs(null);
+    setElapsedSeconds(0);
     setLoading(true);
     setError("");
     setNotice("");
@@ -157,21 +240,60 @@ export function SummaryPanel({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ fileId, noteId }),
       });
-      const data = await response.json();
+      const data: Record<string, unknown> = await response.json();
 
-      if (!response.ok) {
-        throw new Error(data.error || "Network or AI request failed.");
+      const staleFlag = data.staleSummary === true;
+      const regenerationSucceeded = data.regenerationSucceeded !== false && response.ok;
+      const partialFlag = data.partialCoverage === true;
+      const dataNotice = typeof data.notice === "string" ? data.notice : "";
+
+      // Failure or stale-summary response.
+      if (!regenerationSucceeded || staleFlag) {
+        const serverError = typeof data.error === "string" ? data.error : "";
+        const isAlreadyInProgress =
+          response.status === 409 || serverError.toLowerCase().includes("already being generated");
+        if (isAlreadyInProgress) {
+          setNotice(SUMMARY_IN_PROGRESS_NOTICE);
+          return;
+        }
+        const message = serverError || (staleFlag ? STALE_SUMMARY_NOTICE : "Summary regeneration failed.");
+
+        if (message === FULL_EXTRACTION_INCOMPLETE_MESSAGE) {
+          setNotice(message);
+        } else {
+          // The displayed summary is now known to be a stale saved row.
+          setStaleSummary(true);
+          setNotice(dataNotice || (staleFlag ? STALE_SUMMARY_NOTICE : `Could not refresh the summary. ${message}`));
+        }
+        return;
       }
 
-      setSummary(normalizeSummary(data.summary));
+      // Success (full or partial). Replace the displayed summary from the
+      // response body and clear the stale flag.
+      setSummary(normalizeSummary((data.summary as Summary) ?? null));
+      setStaleSummary(false);
       setError("");
-      setNotice(typeof data.notice === "string" ? data.notice : "");
+      if (typeof data.elapsedMs === "number" && data.elapsedMs > 0) {
+        setFinalElapsedMs(data.elapsedMs);
+      }
+      if (partialFlag) {
+        const meta = (data.summary as Summary | undefined)?.generation_metadata;
+        const succeeded = meta?.successfulChunks?.length ?? 0;
+        const attempted = meta?.attemptedChunks ?? 0;
+        setNotice(
+          dataNotice ||
+            `Partial summary saved: ${succeeded} of ${attempted} source sections processed. Some source sections were unavailable. Regenerate to retry the full module.`,
+        );
+      } else {
+        setNotice(dataNotice);
+      }
       router.refresh();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Network or AI request failed.";
       if (message === FULL_EXTRACTION_INCOMPLETE_MESSAGE) {
         setNotice(message);
       } else if (summary) {
+        setStaleSummary(true);
         setNotice(`Could not refresh the summary. Your saved summary is still shown. ${message}`);
       } else {
         setError(message);
@@ -196,6 +318,7 @@ export function SummaryPanel({
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "File re-extraction failed.");
 
+      setStaleSummary(false);
       setNotice(
         typeof data.notice === "string"
           ? data.notice
@@ -316,6 +439,24 @@ export function SummaryPanel({
         </div>
       ) : null}
 
+      {staleSummary && !loading ? (
+        <div className="mt-5 rounded-lg border border-amber-500/40 bg-amber-500/15 p-4 text-sm leading-6 text-amber-100">
+          <p className="font-semibold">Older summary shown</p>
+          <p className="mt-1">{STALE_SUMMARY_NOTICE} Click <span className="font-semibold">Regenerate Summary</span> to retry, or <span className="font-semibold">Re-extract file</span> if the extracted text itself may be stale.</p>
+        </div>
+      ) : null}
+
+      {summary?.generation_metadata?.partialCoverage ? (
+        <div className="mt-5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 p-4 text-sm leading-6 text-cyan-100">
+          <p className="font-semibold">Partial coverage saved</p>
+          <p className="mt-1">
+            This summary was produced from {summary.generation_metadata.successfulChunks.length} of {summary.generation_metadata.attemptedChunks} source sections.
+            Some source sections were unavailable.
+            Regenerate to retry the full module.
+          </p>
+        </div>
+      ) : null}
+
       {notice ? (
         <div className="mt-5 rounded-lg border border-amber-300/30 bg-amber-300/10 p-4 text-sm leading-6 text-amber-100">
           {notice}
@@ -324,13 +465,27 @@ export function SummaryPanel({
 
       {!summary && !loading && !extracting ? (
         <div className="mt-5 rounded-lg border border-dashed border-white/15 bg-slate-950/70 p-6 text-sm leading-6 text-slate-400">
-          Generate a structured summary from this material. StudyPilot will extract readable file text if needed, summarize large files in chunks, and save the result here.
+          Generate a structured summary from this material. StudyPilot will extract readable file text if needed, process large files safely, and save the result here.
         </div>
       ) : null}
 
       {loading ? (
-        <div className="mt-5 rounded-lg border border-emerald-300/20 bg-emerald-300/10 p-5 text-sm text-emerald-100">
-          Extracting and summarizing your study material...
+        <div
+          className="mt-5 rounded-lg border border-emerald-300/20 bg-emerald-300/10 p-5 text-sm text-emerald-100"
+          role="status"
+          aria-live="polite"
+        >
+          <p>Extracting and summarizing your study material...</p>
+          <p className="mt-2 text-xs text-emerald-200/80">
+            Elapsed {formatElapsed(elapsedSeconds * 1000)}
+            {elapsedSeconds >= 60 ? " — this is taking longer than usual; please keep this page open." : ""}
+          </p>
+        </div>
+      ) : null}
+
+      {finalElapsedMs !== null && !loading ? (
+        <div className="mt-3 text-xs text-slate-500" aria-live="polite">
+          Last summary generated in {formatElapsed(finalElapsedMs)}.
         </div>
       ) : null}
 

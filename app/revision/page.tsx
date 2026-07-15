@@ -15,7 +15,7 @@ export default async function RevisionPage() {
   if (supabase && user) {
     const result = await supabase
       .from("revision_plans")
-      .select("*")
+      .select("id, title, important_topics, revise_first, pending_topics, daily_plan, plan, starts_on, ends_on, created_at")
       .eq("user_id", user.id)
       .order("created_at", { ascending: false })
       .limit(1)

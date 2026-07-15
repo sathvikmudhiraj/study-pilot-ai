@@ -66,7 +66,7 @@ export function activeContextLabel(
   fileNames: string[],
 ): string {
   const baseLabel = contextModeLabel(mode);
-  if (mode === "file" && fileNames.length > 0) {
+  if ((mode === "file" || mode === "image") && fileNames.length > 0) {
     return `Using ${fileNames.join(", ")}`;
   }
   return baseLabel;

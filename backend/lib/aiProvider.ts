@@ -16,7 +16,11 @@ type TextGenerationConfig = {
   temperature?: number;
   maxOutputTokens?: number;
   responseMimeType?: "application/json" | "text/plain";
+  timeoutMs?: number;
+  maxAttempts?: number;
+  disableProviderFallback?: boolean;
   signal?: AbortSignal;
+  telemetry?: (event: AIProviderTelemetryEvent) => void;
 };
 
 const DEFAULT_PROVIDER_TIMEOUT_MS = 30000;
@@ -32,6 +36,18 @@ type ProviderRuntimeConfig = {
   fastFallbackTimeoutMs: number;
   nvidiaModel: string;
   timeoutMessage: string;
+};
+
+export type AIProviderTelemetryEvent = {
+  event: "selected" | "provider_started" | "provider_finished" | "provider_failed" | "fallback_triggered" | "final_provider";
+  profile: AIProviderProfile;
+  provider: Exclude<AIProvider, "auto"> | "auto";
+  model?: string;
+  timeoutMs?: number;
+  durationMs?: number;
+  fallbackTriggered?: boolean;
+  retryCount?: number;
+  errorKind?: AIErrorKind | "gemini";
 };
 
 class AIProviderError extends Error {
@@ -70,6 +86,16 @@ function configuredTimeout(value: string | undefined, fallback: number) {
   return fallback;
 }
 
+function boundedTimeout(value: number | undefined, fallback: number) {
+  if (!Number.isFinite(value) || !value || value < 1000) return fallback;
+  return Math.min(Math.round(value), fallback);
+}
+
+function boundedMaxAttempts(value: number | undefined, fallback: number) {
+  if (!Number.isFinite(value) || !value) return fallback;
+  return Math.max(1, Math.min(5, Math.trunc(value)));
+}
+
 function getProviderTimeoutMs() {
   return configuredTimeout(process.env.AI_PROVIDER_TIMEOUT_MS, DEFAULT_PROVIDER_TIMEOUT_MS);
 }
@@ -96,6 +122,29 @@ function getRuntimeConfig(profile: AIProviderProfile): ProviderRuntimeConfig {
     nvidiaModel: process.env.NVIDIA_MODEL || DEFAULT_NVIDIA_MODEL,
     timeoutMessage: TIMEOUT_MESSAGE,
   };
+}
+
+export function getAIProviderRuntimeInfo(profile: AIProviderProfile = "default") {
+  const runtime = getRuntimeConfig(profile);
+  const geminiModel = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  return {
+    profile,
+    configuredProvider: runtime.provider,
+    primaryProvider: runtime.provider === "auto" ? "gemini" : runtime.provider,
+    primaryModel: runtime.provider === "nvidia" ? runtime.nvidiaModel : geminiModel,
+    fallbackProvider: runtime.provider === "auto" ? "nvidia" : null,
+    fallbackModel: runtime.provider === "auto" ? runtime.nvidiaModel : null,
+    timeoutMs: runtime.timeoutMs,
+    fastFallbackTimeoutMs: runtime.fastFallbackTimeoutMs,
+  };
+}
+
+function emitTelemetry(generationConfig: TextGenerationConfig | undefined, event: AIProviderTelemetryEvent) {
+  try {
+    generationConfig?.telemetry?.(event);
+  } catch {
+    // Telemetry must never affect AI generation.
+  }
 }
 
 function classifyProviderError(status: number, detail: string): AIErrorKind {
@@ -293,36 +342,121 @@ async function generateAITextForProfile(
   generationConfig?: TextGenerationConfig,
 ) {
   const runtime = getRuntimeConfig(profile);
-  const { provider, timeoutMs } = runtime;
+  const callTimeoutMs = boundedTimeout(generationConfig?.timeoutMs, runtime.timeoutMs);
+  const callRuntime: ProviderRuntimeConfig = {
+    ...runtime,
+    timeoutMs: callTimeoutMs,
+    fastFallbackTimeoutMs: Math.min(runtime.fastFallbackTimeoutMs, callTimeoutMs),
+  };
+  const { provider, timeoutMs } = callRuntime;
   const geminiModel = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const providerGenerationConfig = {
+    temperature: generationConfig?.temperature,
+    maxOutputTokens: generationConfig?.maxOutputTokens,
+    responseMimeType: generationConfig?.responseMimeType,
+    maxAttempts: generationConfig?.maxAttempts,
+    signal: generationConfig?.signal,
+  };
+  const retryCount = Math.max(
+    0,
+    boundedMaxAttempts(generationConfig?.maxAttempts, provider === "gemini" ? 3 : 1) - 1,
+  );
   devLog("selected provider", {
     profile,
     provider,
     timeoutMs,
-    nvidiaModel: runtime.nvidiaModel,
+    nvidiaModel: callRuntime.nvidiaModel,
+    retryCount,
+  });
+  emitTelemetry(generationConfig, {
+    event: "selected",
+    profile,
+    provider,
+    model: provider === "nvidia" ? callRuntime.nvidiaModel : provider === "gemini" ? geminiModel : undefined,
+    timeoutMs,
+    retryCount,
   });
 
   if (provider === "gemini") {
     const startedAt = Date.now();
     devLog("provider started", { profile, provider: "gemini", model: geminiModel, timeoutMs });
+    emitTelemetry(generationConfig, { event: "provider_started", profile, provider: "gemini", model: geminiModel, timeoutMs });
     try {
-      const response = await askGemini(prompt, { ...generationConfig, timeoutMs });
+      const response = await askGemini(prompt, { ...providerGenerationConfig, timeoutMs });
       devLog("final provider used", { profile, provider: "gemini", model: geminiModel, fallbackTriggered: false });
+      emitTelemetry(generationConfig, {
+        event: "provider_finished",
+        profile,
+        provider: "gemini",
+        model: geminiModel,
+        timeoutMs,
+        durationMs: Date.now() - startedAt,
+        fallbackTriggered: false,
+      });
+      emitTelemetry(generationConfig, {
+        event: "final_provider",
+        profile,
+        provider: "gemini",
+        model: geminiModel,
+        fallbackTriggered: false,
+      });
       return response;
+    } catch (error) {
+      emitTelemetry(generationConfig, {
+        event: "provider_failed",
+        profile,
+        provider: "gemini",
+        model: geminiModel,
+        timeoutMs,
+        durationMs: Date.now() - startedAt,
+        errorKind: getGeminiErrorCategory(error) === "timeout" ? "timeout" : "gemini",
+      });
+      throw error;
     } finally {
       devLog("provider duration", { profile, provider: "gemini", model: geminiModel, durationMs: Date.now() - startedAt });
     }
   }
 
   if (provider === "nvidia") {
-    const response = await askNvidia(prompt, generationConfig, runtime);
-    devLog("final provider used", {
-      profile,
-      provider: "nvidia",
-      model: runtime.nvidiaModel,
-      fallbackTriggered: false,
-    });
-    return response;
+    const startedAt = Date.now();
+    emitTelemetry(generationConfig, { event: "provider_started", profile, provider: "nvidia", model: callRuntime.nvidiaModel, timeoutMs });
+    try {
+      const response = await askNvidia(prompt, providerGenerationConfig, callRuntime);
+      emitTelemetry(generationConfig, {
+        event: "provider_finished",
+        profile,
+        provider: "nvidia",
+        model: callRuntime.nvidiaModel,
+        timeoutMs,
+        durationMs: Date.now() - startedAt,
+        fallbackTriggered: false,
+      });
+      emitTelemetry(generationConfig, {
+        event: "final_provider",
+        profile,
+        provider: "nvidia",
+        model: callRuntime.nvidiaModel,
+        fallbackTriggered: false,
+      });
+      devLog("final provider used", {
+        profile,
+        provider: "nvidia",
+        model: callRuntime.nvidiaModel,
+        fallbackTriggered: false,
+      });
+      return response;
+    } catch (error) {
+      emitTelemetry(generationConfig, {
+        event: "provider_failed",
+        profile,
+        provider: "nvidia",
+        model: callRuntime.nvidiaModel,
+        timeoutMs,
+        durationMs: Date.now() - startedAt,
+        errorKind: error instanceof AIProviderError ? error.kind : "request",
+      });
+      throw error;
+    }
   }
 
   try {
@@ -331,33 +465,71 @@ async function generateAITextForProfile(
       profile,
       provider: "gemini",
       model: geminiModel,
-      timeoutMs: runtime.fastFallbackTimeoutMs,
+      timeoutMs: callRuntime.fastFallbackTimeoutMs,
+      retryCount: 0,
       fastFallback: true,
+    });
+    emitTelemetry(generationConfig, {
+      event: "provider_started",
+      profile,
+      provider: "gemini",
+      model: geminiModel,
+      timeoutMs: callRuntime.fastFallbackTimeoutMs,
+      fallbackTriggered: false,
+      retryCount: 0,
     });
     try {
       const response = await askGemini(prompt, {
-        ...generationConfig,
-        timeoutMs: runtime.fastFallbackTimeoutMs,
+        ...providerGenerationConfig,
+        timeoutMs: callRuntime.fastFallbackTimeoutMs,
         maxAttempts: 1,
         disableModelFallback: true,
       });
       devLog("fallback triggered", { profile, fallbackTriggered: false });
       devLog("final provider used", { profile, provider: "gemini", model: geminiModel, fallbackTriggered: false });
+      emitTelemetry(generationConfig, {
+        event: "provider_finished",
+        profile,
+        provider: "gemini",
+        model: geminiModel,
+        timeoutMs: callRuntime.fastFallbackTimeoutMs,
+        durationMs: Date.now() - startedAt,
+        fallbackTriggered: false,
+      });
+      emitTelemetry(generationConfig, {
+        event: "final_provider",
+        profile,
+        provider: "gemini",
+        model: geminiModel,
+        fallbackTriggered: false,
+      });
       return response;
+    } catch (error) {
+      emitTelemetry(generationConfig, {
+        event: "provider_failed",
+        profile,
+        provider: "gemini",
+        model: geminiModel,
+        timeoutMs: callRuntime.fastFallbackTimeoutMs,
+        durationMs: Date.now() - startedAt,
+        errorKind: getGeminiErrorCategory(error) === "timeout" ? "timeout" : "gemini",
+      });
+      throw error;
     } finally {
       devLog("provider duration", { profile, provider: "gemini", model: geminiModel, durationMs: Date.now() - startedAt });
     }
   } catch (error) {
     const fallbackAllowed = shouldFallbackFromGemini(error, profile);
+    const providerFallbackAllowed = fallbackAllowed && !generationConfig?.disableProviderFallback;
     const geminiCategory = getGeminiErrorCategory(error);
     devLog("gemini attempt failed", {
       profile,
-      fallbackTriggered: fallbackAllowed,
+      fallbackTriggered: providerFallbackAllowed,
       providerErrorCategory:
         isGeminiQuotaError(error) ? "quota" : geminiCategory === "timeout" ? "timeout" : isGeminiBusyError(error) ? "busy" : geminiCategory,
     });
 
-    if (!fallbackAllowed) throw error;
+    if (!providerFallbackAllowed) throw error;
 
     try {
       devLog("fallback triggered", {
@@ -365,13 +537,46 @@ async function generateAITextForProfile(
         fallbackTriggered: true,
         fromProvider: "gemini",
         toProvider: "nvidia",
-        model: runtime.nvidiaModel,
+        model: callRuntime.nvidiaModel,
       });
-      const response = await askNvidia(prompt, generationConfig, runtime);
+      emitTelemetry(generationConfig, {
+        event: "fallback_triggered",
+        profile,
+        provider: "nvidia",
+        model: callRuntime.nvidiaModel,
+        timeoutMs: callRuntime.timeoutMs,
+        fallbackTriggered: true,
+      });
+      const fallbackStartedAt = Date.now();
+      emitTelemetry(generationConfig, {
+        event: "provider_started",
+        profile,
+        provider: "nvidia",
+        model: callRuntime.nvidiaModel,
+        timeoutMs: callRuntime.timeoutMs,
+        fallbackTriggered: true,
+      });
+      const response = await askNvidia(prompt, providerGenerationConfig, callRuntime);
       devLog("final provider used", {
         profile,
         provider: "nvidia",
-        model: runtime.nvidiaModel,
+        model: callRuntime.nvidiaModel,
+        fallbackTriggered: true,
+      });
+      emitTelemetry(generationConfig, {
+        event: "provider_finished",
+        profile,
+        provider: "nvidia",
+        model: callRuntime.nvidiaModel,
+        timeoutMs: callRuntime.timeoutMs,
+        durationMs: Date.now() - fallbackStartedAt,
+        fallbackTriggered: true,
+      });
+      emitTelemetry(generationConfig, {
+        event: "final_provider",
+        profile,
+        provider: "nvidia",
+        model: callRuntime.nvidiaModel,
         fallbackTriggered: true,
       });
       return response;
@@ -379,9 +584,18 @@ async function generateAITextForProfile(
       devLog("fallback provider failed", {
         profile,
         provider: "nvidia",
-        model: runtime.nvidiaModel,
+        model: callRuntime.nvidiaModel,
         providerErrorCategory:
           fallbackError instanceof AIProviderError ? fallbackError.kind : "request",
+      });
+      emitTelemetry(generationConfig, {
+        event: "provider_failed",
+        profile,
+        provider: "nvidia",
+        model: callRuntime.nvidiaModel,
+        timeoutMs: callRuntime.timeoutMs,
+        errorKind: fallbackError instanceof AIProviderError ? fallbackError.kind : "request",
+        fallbackTriggered: true,
       });
       throw fallbackError;
     }

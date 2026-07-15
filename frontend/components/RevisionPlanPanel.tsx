@@ -262,7 +262,11 @@ export function RevisionPlanPanel({ initialPlan }: { initialPlan: RevisionPlan |
 
       {/* Loading */}
       {loading ? (
-        <div className="rounded-lg border border-emerald-300/20 bg-emerald-300/10 p-5 text-sm text-emerald-100">
+        <div
+          className="rounded-lg border border-emerald-300/20 bg-emerald-300/10 p-5 text-sm text-emerald-100"
+          role="status"
+          aria-live="polite"
+        >
           Analyzing your study material and generating a revision plan...
         </div>
       ) : null}

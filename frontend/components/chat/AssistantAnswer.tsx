@@ -14,6 +14,7 @@ export type ChatAnswer = {
   practice_question?: string;
   related_files_notes?: string[];
   next_step?: string;
+  learning_step?: unknown;
   source_chips?: { id?: string; label: string; type: string }[];
   source_citations?: SourceCitationValue[];
 };

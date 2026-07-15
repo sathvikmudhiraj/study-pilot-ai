@@ -1,6 +1,6 @@
 import "server-only";
 
-import { generateSummaryAIText } from "./aiProvider";
+import { generateSummaryAIText, isAiBusyError, isAiQuotaError, isAiTimeoutError } from "./aiProvider";
 import {
   formatCitationLocator,
   segmentTextWithCitations,
@@ -14,6 +14,15 @@ export type TopicSummary = {
   topic: string;
   explanation: string;
   important_points: string[];
+};
+
+export type SummaryGenerationMetadata = {
+  attemptedChunks: number;
+  successfulChunks: number[];
+  failedChunks: number[];
+  failureCategories: string[];
+  partialCoverage: boolean;
+  sourceTextLength: number;
 };
 
 export type StructuredSummary = {
@@ -31,6 +40,7 @@ export type StructuredSummary = {
   suggested_tags: string[];
   suggested_next_step: string;
   source_citations: SourceCitation[];
+  generation_metadata: SummaryGenerationMetadata;
 };
 
 type ChunkMap = {
@@ -59,7 +69,10 @@ const MAX_CHUNK_CHARS = 12000;
 // to drop later topics like the classical ciphers.
 const SYNTHESIS_TOKEN_BASE = 4200;
 const SYNTHESIS_TOKEN_PER_CHUNK = 500;
-const SYNTHESIS_TOKEN_MAX = 7000;
+// 8192 is the conventional gemini-2.5-flash output ceiling. Using it ensures a
+// 14-topic CNS module synthesis is not starved into dropping early or late
+// topics from covered_topics / topic_wise_summary.
+const SYNTHESIS_TOKEN_MAX = 8192;
 
 // When this many detected source topics are missing from Gemini's first
 // synthesis pass, run one targeted retry that explicitly names the gaps.
@@ -335,6 +348,122 @@ function uniqueList(values: string[], limit = 24) {
   return items;
 }
 
+const INTERNAL_SUMMARY_KEYS = [
+  "chunk_number",
+  "chunk_total",
+  "chunkNumber",
+  "chunkTotal",
+  "heading",
+  "topics",
+  "CHUNK_MAPS",
+  "TOTAL_CHUNKS",
+  "ALL_DETECTED_TOPICS",
+  "ALL_DETECTED_CONCEPTS",
+];
+
+const INTERNAL_KEY_PATTERN = new RegExp(
+  `(?:^|[\\s"'{}\\[\\],])(?:${INTERNAL_SUMMARY_KEYS.map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\s*[:=]`,
+  "i",
+);
+
+function stripJsonFragments(value: string) {
+  return value
+    .replace(/```(?:json)?[\s\S]*?```/gi, " ")
+    .replace(/"?(?:chunk_number|chunk_total|chunkNumber|chunkTotal|heading|topics)"?\s*:\s*(?:"[^"]*"|\[[\s\S]*?\]|\{[\s\S]*?\}|[^,\n}\]]+)/gi, " ")
+    .replace(/\{[\s\S]*?\}/g, " ")
+    .replace(/\[[\s\S]*?\]/g, " ");
+}
+
+function cleanSummaryText(value: string, fallback = "") {
+  const stripped = stripJsonFragments(String(value ?? ""));
+  const cleaned = stripped
+    .replace(/[{}[\]]/g, " ")
+    .replace(/^\s*["',:;|-]+|["',:;|-]+\s*$/g, "")
+    .replace(/\b(?:chunk_number|chunk_total|chunkNumber|chunkTotal|heading|topics)\b\s*[:=]?/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!cleaned || INTERNAL_KEY_PATTERN.test(cleaned)) return fallback;
+  return cleaned;
+}
+
+function cleanSummaryList(values: string[], limit = 24) {
+  return uniqueList(
+    values
+      .map((value) => cleanSummaryText(value))
+      .filter(Boolean),
+    limit,
+  );
+}
+
+function cleanTopicSummaries(values: TopicSummary[], limit = 18) {
+  const seen = new Set<string>();
+  const cleaned: TopicSummary[] = [];
+
+  for (const item of values) {
+    const topic = cleanSummaryText(item.topic);
+    const explanation = cleanSummaryText(item.explanation);
+    const importantPoints = cleanSummaryList(item.important_points, 8);
+    const key = normalizeKey(topic || explanation);
+    if (!key || seen.has(key)) continue;
+    if (!topic && !explanation && !importantPoints.length) continue;
+    seen.add(key);
+    cleaned.push({
+      topic: topic || "Important concept",
+      explanation,
+      important_points: importantPoints,
+    });
+    if (cleaned.length >= limit) break;
+  }
+
+  return cleaned;
+}
+
+function sanitizeUserFacingSummary(summary: StructuredSummary): StructuredSummary {
+  const coveredTopics = cleanSummaryList(summary.covered_topics, 30);
+  const keyPoints = cleanSummaryList(summary.key_points, 24);
+  const topicWiseSummary = cleanTopicSummaries(summary.topic_wise_summary, 24);
+  const importantConcepts = cleanSummaryList(
+    [
+      ...summary.important_concepts,
+      ...coveredTopics,
+      ...topicWiseSummary.map((item) => item.topic),
+    ],
+    28,
+  );
+  const actionItems = cleanSummaryList(summary.action_items, 16);
+  const suggestedTags = cleanSummaryList(summary.suggested_tags, 12)
+    .map((tag) => tag.replace(/^#/, "").trim())
+    .filter(Boolean);
+
+  const sanitized: StructuredSummary = {
+    ...summary,
+    suggested_title: cleanSummaryText(summary.suggested_title, "Study summary"),
+    short_summary: cleanSummaryText(summary.short_summary, keyPoints.slice(0, 3).join(" ")),
+    module_overview: cleanSummaryText(summary.module_overview, summary.short_summary),
+    covered_topics: coveredTopics,
+    key_points: keyPoints,
+    topic_wise_summary: topicWiseSummary,
+    exam_focus_points: cleanSummaryList(summary.exam_focus_points, 20),
+    memory_lines: cleanSummaryList(summary.memory_lines, 14),
+    common_mistakes: cleanSummaryList(summary.common_mistakes, 14),
+    important_concepts: importantConcepts,
+    action_items: actionItems,
+    suggested_tags: uniqueList(suggestedTags, 12),
+    suggested_next_step: cleanSummaryText(summary.suggested_next_step, "Review the key points, then generate a quiz to check your understanding."),
+  };
+
+  if (!sanitized.short_summary) sanitized.short_summary = "StudyPilot generated a structured summary from the provided study material.";
+  if (!sanitized.module_overview) sanitized.module_overview = sanitized.short_summary;
+  if (!sanitized.covered_topics.length) sanitized.covered_topics = sanitized.important_concepts.slice(0, 12);
+  if (!sanitized.key_points.length) sanitized.key_points = sanitized.covered_topics.map((topic) => `Review ${topic}.`).slice(0, 8);
+  if (!sanitized.action_items.length) sanitized.action_items = ["Review the key points.", "Practice recall with a short quiz."];
+  if (!sanitized.important_concepts.length) sanitized.important_concepts = sanitized.covered_topics;
+  if (!sanitized.suggested_tags.length) sanitized.suggested_tags = sanitized.covered_topics.slice(0, 5);
+
+  return sanitized;
+}
+
 function missingTopics(baseTopics: string[], candidateTopics: string[]) {
   const baseKeys = baseTopics.map(normalizeKey).filter(Boolean);
   return candidateTopics.filter((topic) => {
@@ -397,6 +526,16 @@ function validateSummary(value: unknown): StructuredSummary | null {
     // Citations are attached deterministically from source segments after the
     // model response is validated. Model-provided page numbers are ignored.
     source_citations: [],
+    // generation_metadata is filled in by the orchestrator after synthesis,
+    // not by the AI model itself.
+    generation_metadata: {
+      attemptedChunks: 0,
+      successfulChunks: [],
+      failedChunks: [],
+      failureCategories: [],
+      partialCoverage: false,
+      sourceTextLength: 0,
+    },
   };
 
   if (!summary.short_summary) summary.short_summary = summary.module_overview || summary.key_points.slice(0, 3).join(" ");
@@ -453,16 +592,16 @@ function parseSummaryJson(raw: string) {
 function validateChunkMap(value: unknown, index: number, total: number, citation: SourceCitation): ChunkMap | null {
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
-  const topics = uniqueList(arrayValue(record, "topics", "covered_topics", "coveredTopics", "main_topics", "mainTopics"), 12);
+  const topics = uniqueList(arrayValue(record, "study_areas", "studyAreas", "main_ideas", "mainIdeas", "topics", "covered_topics", "coveredTopics", "main_topics", "mainTopics"), 12);
   const importantPoints = uniqueList(arrayValue(record, "important_points", "importantPoints", "key_points", "keyPoints", "points"), 16);
   const importantConcepts = uniqueList(arrayValue(record, "important_concepts", "importantConcepts", "concepts"), 12);
 
   if (!topics.length && !importantPoints.length && !importantConcepts.length) return null;
 
   return {
-    chunk_number: Number(record.chunk_number ?? record.chunkNumber ?? index + 1) || index + 1,
-    chunk_total: Number(record.chunk_total ?? record.chunkTotal ?? total) || total,
-    heading: textValue(record, "heading", "title", "section_title", "sectionTitle") || `Chunk ${index + 1}`,
+    chunk_number: index + 1,
+    chunk_total: total,
+    heading: cleanSummaryText(textValue(record, "section_title", "sectionTitle", "title")) || `Study section ${index + 1}`,
     topics,
     important_points: importantPoints,
     exam_focus_points: uniqueList(arrayValue(record, "exam_focus_points", "examFocusPoints", "exam_points", "examPoints"), 12),
@@ -524,31 +663,24 @@ function fallbackChunkMap(raw: string, index: number, total: number, citation: S
   };
 }
 
-function chunkMapsToMaterial(chunkMaps: ChunkMap[]) {
-  const allTopics = uniqueList(chunkMaps.flatMap((chunk) => chunk.topics.length ? chunk.topics : [chunk.heading]), 40);
-  const allConcepts = uniqueList(chunkMaps.flatMap((chunk) => chunk.important_concepts), 40);
+function chunkMapsToCleanStudyMaterial(chunkMaps: ChunkMap[]) {
+  const allTopics = cleanSummaryList(chunkMaps.flatMap((chunk) => chunk.topics.length ? chunk.topics : [chunk.heading]), 40);
+  const allConcepts = cleanSummaryList(chunkMaps.flatMap((chunk) => chunk.important_concepts), 40);
+  const allPoints = cleanSummaryList(chunkMaps.flatMap((chunk) => chunk.important_points), 80);
+  const examFocus = cleanSummaryList(chunkMaps.flatMap((chunk) => chunk.exam_focus_points), 40);
+  const memoryLines = cleanSummaryList(chunkMaps.flatMap((chunk) => chunk.memory_lines), 24);
+  const commonMistakes = cleanSummaryList(chunkMaps.flatMap((chunk) => chunk.common_mistakes), 24);
 
   return [
-    `TOTAL_CHUNKS: ${chunkMaps.length}`,
-    allTopics.length ? `ALL_DETECTED_TOPICS:\n${allTopics.map((topic) => `- ${topic}`).join("\n")}` : "",
-    allConcepts.length ? `ALL_DETECTED_CONCEPTS:\n${allConcepts.map((concept) => `- ${concept}`).join("\n")}` : "",
-    "CHUNK_MAPS:",
-    ...chunkMaps.map((chunk) =>
-      [
-        `Chunk ${chunk.chunk_number} of ${chunk.chunk_total}`,
-        `Source: ${formatCitationLocator(chunk.citation)}`,
-        `Heading: ${chunk.heading}`,
-        chunk.topics.length ? `Topics:\n${chunk.topics.map((topic) => `- ${topic}`).join("\n")}` : "",
-        chunk.important_points.length ? `Important points:\n${chunk.important_points.map((point) => `- ${point}`).join("\n")}` : "",
-        chunk.exam_focus_points.length ? `Exam focus:\n${chunk.exam_focus_points.map((point) => `- ${point}`).join("\n")}` : "",
-        chunk.important_concepts.length ? `Important concepts:\n${chunk.important_concepts.map((concept) => `- ${concept}`).join("\n")}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n"),
-    ),
+    allTopics.length ? `Major study areas:\n${allTopics.map((topic) => `- ${topic}`).join("\n")}` : "",
+    allConcepts.length ? `Important concepts:\n${allConcepts.map((concept) => `- ${concept}`).join("\n")}` : "",
+    allPoints.length ? `Key educational points:\n${allPoints.map((point) => `- ${point}`).join("\n")}` : "",
+    examFocus.length ? `Exam focus:\n${examFocus.map((point) => `- ${point}`).join("\n")}` : "",
+    memoryLines.length ? `Memory lines:\n${memoryLines.map((line) => `- ${line}`).join("\n")}` : "",
+    commonMistakes.length ? `Common mistakes:\n${commonMistakes.map((mistake) => `- ${mistake}`).join("\n")}` : "",
   ]
     .filter(Boolean)
-    .join("\n\n---\n\n");
+    .join("\n\n");
 }
 
 function ensureFullModuleCoverage(summary: StructuredSummary, chunkMaps: ChunkMap[]) {
@@ -563,7 +695,7 @@ function ensureFullModuleCoverage(summary: StructuredSummary, chunkMaps: ChunkMa
     const topics = chunk.topics.length ? chunk.topics : [chunk.heading];
     return topics.map((topic) => ({
       topic,
-      explanation: `From chunk ${chunk.chunk_number}: ${chunk.important_points.slice(0, 3).join(" ")}`,
+      explanation: `From source material: ${chunk.important_points.slice(0, 3).join(" ")}`,
       important_points: chunk.important_points.slice(0, 5),
     }));
   });
@@ -575,7 +707,7 @@ function ensureFullModuleCoverage(summary: StructuredSummary, chunkMaps: ChunkMa
     ...summary,
     module_overview:
       summary.module_overview ||
-      `This full-module summary was synthesized from ${chunkMaps.length} chunks of the uploaded material.`,
+      "This full-module summary was synthesized from the uploaded study material.",
     covered_topics: uniqueList([...summary.covered_topics, ...missing], 30),
     key_points: uniqueList([...summary.key_points, ...chunkMaps.flatMap((chunk) => chunk.important_points)], 24),
     topic_wise_summary: [...summary.topic_wise_summary, ...supplementalTopics].slice(0, 24),
@@ -590,16 +722,13 @@ async function summarizeChunk(chunk: string, index: number, total: number, citat
   const response = await generateSummaryAIText(
     `${STUDYPILOT_TUTOR_INSTRUCTION}
 
-You are preparing a compact map for ONE chunk of a larger module.
-Do not summarize it as the whole file. Capture only what is present in this chunk.
+You are preparing a compact study map for ONE source section of a larger module.
+Do not summarize it as the whole file. Capture only what is present in this source section.
 
 Return strict JSON only. Do not include markdown.
 The JSON shape must be:
 {
-  "chunk_number": ${index + 1},
-  "chunk_total": ${total},
-  "heading": "string",
-  "topics": ["string"],
+  "study_areas": ["string"],
   "important_points": ["string"],
   "exam_focus_points": ["string"],
   "important_concepts": ["string"],
@@ -612,7 +741,7 @@ ${CNS_TOPIC_HINT}
 SOURCE LOCATOR:
 ${formatCitationLocator(citation)}
 
-CHUNK TEXT:
+SOURCE SECTION TEXT:
 ${chunk}`,
     {
       temperature: 0.2,
@@ -636,13 +765,61 @@ ${chunk}`,
   return fallbackChunkMap(response, index, total, citation);
 }
 
+/**
+ * Classify a chunk-level AI failure into a short, safe category string. Never
+ * returns provider messages, stack traces, or secrets — only a label that can
+ * be surfaced inside generation_metadata for diagnostics and UI warnings.
+ */
+function classifyChunkFailure(error: unknown): string {
+  if (isAiTimeoutError(error)) return "timeout";
+  if (isAiQuotaError(error)) return "quota";
+  if (isAiBusyError(error)) return "busy";
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase();
+    if (message.includes("json parse") || message.includes("json")) return "invalid-json";
+    if (message.includes("empty")) return "empty-response";
+  }
+  return "provider-error";
+}
+
+type ChunkAttemptResult =
+  | { ok: true; chunkMap: ChunkMap }
+  | { ok: false; chunkNumber: number; failureCategory: string };
+
+/**
+ * Run a single chunk summary with isolated error handling. A failure here is
+ * recorded as a partial-coverage signal rather than aborting the whole
+ * summarization, so a transient timeout on chunk 1 cannot starve chunks 2 and
+ * 3 of the contribution to the merged summary.
+ */
+async function attemptSummarizeChunk(
+  chunk: string,
+  index: number,
+  total: number,
+  citation: SourceCitation,
+): Promise<ChunkAttemptResult> {
+  try {
+    const chunkMap = await summarizeChunk(chunk, index, total, citation);
+    return { ok: true, chunkMap };
+  } catch (error) {
+    const failureCategory = classifyChunkFailure(error);
+    devLog("chunk map failed", {
+      chunkNumber: index + 1,
+      total,
+      failureCategory,
+    });
+    return { ok: false, chunkNumber: index + 1, failureCategory };
+  }
+}
+
 async function generateStructuredSummary(
   text: string,
   sourceKind: "full-text" | "chunk-map",
   chunkMaps: ChunkMap[] = [],
   coverageReminder?: string,
+  partialCoverageHint?: { successfulChunks: number[]; failedChunks: number[]; totalChunks: number },
 ) {
-  const materialLabel = sourceKind === "chunk-map" ? "chunk-level maps from the same uploaded file" : "uploaded study material";
+  const materialLabel = sourceKind === "chunk-map" ? "clean study notes from the same uploaded file" : "uploaded study material";
   const chunkCount = Math.max(1, chunkMaps.length);
   // Scale output budget to module size so large modules are not starved into
   // dropping later topics (e.g. the classical ciphers at the end of CNS M1).
@@ -652,10 +829,13 @@ async function generateStructuredSummary(
   );
   const chunkRule =
     sourceKind === "chunk-map"
-      ? `\nFull-module synthesis rules for chunk maps:\n- You are given maps for ALL ${chunkMaps.length} chunks of the same uploaded material.\n- Your answer is invalid if it summarizes only chunk 1 or only one section.\n- Use ALL_DETECTED_TOPICS and every Chunk N of ${chunkMaps.length} when deciding covered_topics, key_points, and topic_wise_summary.\n- Include a broad topic_wise_summary that represents early, middle, and late chunks.\n- If chunks overlap, merge duplicates; if chunks differ, preserve the distinct topics.\n- Do a private coverage check before returning JSON: every major topic listed in the chunk maps should appear in covered_topics or topic_wise_summary.\n`
+      ? `\nFull-material synthesis rules:\n- You are given clean study notes compiled from the same uploaded material.\n- Your answer is invalid if it summarizes only one section.\n- Use every major study area, concept, and key educational point when deciding covered_topics, key_points, and topic_wise_summary.\n- Include a broad topic_wise_summary that represents the full material.\n- If ideas overlap, merge duplicates; if ideas differ, preserve the distinct topics.\n- Do a private coverage check before returning JSON: every major study area should appear in covered_topics or topic_wise_summary.\n`
       : "";
   const reminder = coverageReminder
     ? `\nIMPORTANT COVERAGE FIX from your previous attempt:\n${coverageReminder}\nYour previous draft omitted major topics that ARE present in the material. Re-read ALL of the material below and include each listed topic in covered_topics and topic_wise_summary with a real explanation (not just a name).\n`
+    : "";
+  const partialHint = partialCoverageHint && partialCoverageHint.failedChunks.length
+    ? `\nPARTIAL COVERAGE NOTICE:\n- This is a partial summary. Only part of the source material could be processed successfully.\n- Do NOT hallucinate topics from unavailable source sections. Only describe what is present in the provided clean study notes.\n- In module_overview, briefly note that the summary is partial because some source sections were unavailable.\n- Do NOT claim the summary covers the full module.\n`
     : "";
   const prompt = `${STUDYPILOT_TUTOR_INSTRUCTION}
 
@@ -669,8 +849,10 @@ Critical summary rules:
 - If one topic has more text, still mention other major topics that are present.
 - Mention topic coverage clearly.
 - Use student-friendly explanations, examples, memory lines, common mistakes, and exam/viva points.
+- The user-facing summary must read as one clean study document with these sections only: Short Summary, Key Points, Action Items, Important Concepts, Suggested Tags, Suggested Next Step.
+- Never include internal processing labels, JSON fragments, source-section labels, chunk numbers, headings, raw arrays, braces, or implementation metadata in any user-facing field.
 - For Cryptography and Network Security files, check for cryptography basics, security concepts, CIA triad, OSI security architecture, threats vs attacks, active/passive attacks, security services, mechanisms, symmetric cipher model, and classical encryption ciphers such as Caesar, monoalphabetic, Playfair, and Hill. Only include topics actually present in the material.
-${chunkRule}${reminder}
+${chunkRule}${reminder}${partialHint}
 
 Return strict JSON only. Do not include markdown. The JSON shape must be:
 {
@@ -748,7 +930,7 @@ function buildCoverageReminder(summary: StructuredSummary, chunkMaps: ChunkMap[]
 export async function summarizeStudyText(
   text: string,
   source: SummarySourceContext = { sourceType: "file", sourceName: "Study material" },
-) {
+): Promise<StructuredSummary> {
   const segments = segmentTextWithCitations({
     text,
     sourceId: source.sourceId,
@@ -764,6 +946,8 @@ export async function summarizeStudyText(
     throw new Error("No readable text found in this file. Try another file or add manual notes.");
   }
 
+  const sourceTextLength = text.length;
+
   if (chunks.length === 1) {
     let summary = await generateStructuredSummary(chunks[0], "full-text");
     const reminder = buildCoverageReminder(summary, [], chunks[0]);
@@ -773,27 +957,67 @@ export async function summarizeStudyText(
       // Keep the retry only if it actually improved coverage.
       if (retried.covered_topics.length >= summary.covered_topics.length) summary = retried;
     }
-    const final = {
+    const final: StructuredSummary = sanitizeUserFacingSummary({
       ...ensureFullModuleCoverage(summary, []),
       source_citations: sourceCitations,
-    };
+      generation_metadata: {
+        attemptedChunks: 1,
+        successfulChunks: [1],
+        failedChunks: [],
+        failureCategories: [],
+        partialCoverage: false,
+        sourceTextLength,
+      },
+    });
     devLog("summary complete", { chunkCount: 1, coveredTopicsCount: final.covered_topics.length });
     return final;
   }
 
+  // Multi-chunk path: process every chunk independently. A single chunk failure
+  // is recorded as partial coverage rather than aborting the whole summary, so
+  // a transient timeout on chunk 1 cannot starve chunks 2 and 3 of the merged
+  // synthesis. Chunk order is preserved so early/middle/late topics stay in
+  // the right order in chunkMapsToMaterial and ensureFullModuleCoverage.
+  const attemptedChunks = chunks.length;
+  const successfulChunks: number[] = [];
+  const failedChunks: number[] = [];
+  const failureCategoriesSet = new Set<string>();
   const chunkMaps: ChunkMap[] = [];
+
   for (let index = 0; index < chunks.length; index += 1) {
-    chunkMaps.push(await summarizeChunk(chunks[index], index, chunks.length, segments[index].citation));
+    const attempt = await attemptSummarizeChunk(chunks[index], index, chunks.length, segments[index].citation);
+    if (attempt.ok) {
+      chunkMaps.push(attempt.chunkMap);
+      successfulChunks.push(index + 1);
+    } else {
+      failedChunks.push(attempt.chunkNumber);
+      failureCategoriesSet.add(attempt.failureCategory);
+    }
   }
 
+  const failureCategories = [...failureCategoriesSet];
+
+  if (chunkMaps.length === 0) {
+    // Every chunk failed. Surface a clean summary-generation error so the
+    // API route can preserve the prior saved summary and label it stale.
+    const flatCategories = failureCategories.join(", ") || "provider-error";
+    throw new Error(`Summary generation failed: every chunk failed (${flatCategories}).`);
+  }
+
+  const partialCoverage = failedChunks.length > 0;
   const detectedTopicCount = uniqueList(chunkMaps.flatMap((chunk) => chunk.topics), 60).length;
   devLog("all chunk maps prepared", {
-    chunks: chunkMaps.length,
+    attempted: attemptedChunks,
+    succeeded: successfulChunks.length,
+    failed: failedChunks.length,
     detectedTopics: detectedTopicCount,
   });
 
-  const material = chunkMapsToMaterial(chunkMaps);
-  let summary = await generateStructuredSummary(material, "chunk-map", chunkMaps);
+  const material = chunkMapsToCleanStudyMaterial(chunkMaps);
+  const partialHint = partialCoverage
+    ? { successfulChunks, failedChunks, totalChunks: attemptedChunks }
+    : undefined;
+  let summary = await generateStructuredSummary(material, "chunk-map", chunkMaps, undefined, partialHint);
   const reminder = buildCoverageReminder(summary, chunkMaps);
   devLog("multi-chunk coverage check", {
     detectedTopicCount,
@@ -802,7 +1026,7 @@ export async function summarizeStudyText(
     ...(reminder ? { missedReminder: reminder.slice(0, 200) } : {}),
   });
   if (reminder) {
-    const retried = await generateStructuredSummary(material, "chunk-map", chunkMaps, reminder);
+    const retried = await generateStructuredSummary(material, "chunk-map", chunkMaps, reminder, partialHint);
     if (retried.covered_topics.length >= summary.covered_topics.length) summary = retried;
     devLog("multi-chunk coverage retry complete", {
       retriedCovered: retried.covered_topics.length,
@@ -810,13 +1034,32 @@ export async function summarizeStudyText(
     });
   }
 
-  const final = {
+  const final: StructuredSummary = sanitizeUserFacingSummary({
     ...ensureFullModuleCoverage(summary, chunkMaps),
     source_citations: sourceCitations,
-  };
+    generation_metadata: {
+      attemptedChunks,
+      successfulChunks,
+      failedChunks,
+      failureCategories,
+      partialCoverage,
+      sourceTextLength,
+    },
+    // If the synthesis did not flag the partial status itself in
+    // module_overview, ensure the user-visible field reflects it.
+    module_overview: partialCoverage && !mentionsPartialCoverage(summary.module_overview)
+      ? `This is a partial summary because some source sections could not be processed. ${summary.module_overview || ""}`.trim()
+      : summary.module_overview,
+  });
   devLog("summary complete", {
     chunkCount: chunkMaps.length,
     coveredTopicsCount: final.covered_topics.length,
+    partial: partialCoverage,
+    failedChunks,
   });
   return final;
+}
+
+function mentionsPartialCoverage(overview: string) {
+  return /partial|incomplete|some chunks failed/i.test(overview || "");
 }

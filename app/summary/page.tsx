@@ -6,6 +6,8 @@ import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
 
+const SUMMARY_LIST_LIMIT = 50;
+
 type SummaryRow = {
   id: string;
   file_id: string | null;
@@ -47,14 +49,15 @@ export default async function SummaryPage() {
       .from("ai_outputs")
       .select("id, file_id, note_id, short_summary, key_points, suggested_tags, suggested_title, suggested_next_step, content, created_at")
       .eq("user_id", user.id)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .limit(SUMMARY_LIST_LIMIT);
 
     if (result.error) {
       error = result.error.message;
     } else {
       summaries = (result.data ?? []) as SummaryRow[];
-      const fileIds = summaries.map((summary) => summary.file_id).filter(Boolean) as string[];
-      const noteIds = summaries.map((summary) => summary.note_id).filter(Boolean) as string[];
+      const fileIds = Array.from(new Set(summaries.map((summary) => summary.file_id).filter(Boolean))) as string[];
+      const noteIds = Array.from(new Set(summaries.map((summary) => summary.note_id).filter(Boolean))) as string[];
 
       if (fileIds.length) {
         const files = await supabase.from("files").select("id, file_name").in("id", fileIds).eq("user_id", user.id);

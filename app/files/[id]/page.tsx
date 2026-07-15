@@ -266,7 +266,22 @@ export default async function FileDetailPage({ params }: { params: Promise<{ id:
 
         {/* ─── Summary panel (independent scroll, sticky on desktop) ────── */}
         <div className="min-w-0 xl:sticky xl:top-24 xl:max-h-[calc(100vh-7rem)] xl:overflow-y-auto xl:self-start">
-          <SummaryPanel fileId={file.id} initialSummary={summary ?? null} canCreateStudyActions={canCreateStudyActions} />
+          {/*
+            A key that changes precisely when the displayed summary row changes
+            forces React to remount SummaryPanel after `router.refresh()` so
+            its useState lazy initializer runs against the freshly-loaded
+            initialSummary. This is the React-blessed way to "reset component
+            state when a prop changes" and avoids useState-in-effect, which
+            Next.js 16's ESLint config forbids. When there is no saved
+            summary we still bind the key to the file id so the panel
+            reflects a freshly-uploaded file's null summary correctly.
+          */}
+          <SummaryPanel
+            key={`file-${file.id}-summary-${summary?.id ?? "none"}`}
+            fileId={file.id}
+            initialSummary={summary ?? null}
+            canCreateStudyActions={canCreateStudyActions}
+          />
         </div>
       </div>
     </AppShell>

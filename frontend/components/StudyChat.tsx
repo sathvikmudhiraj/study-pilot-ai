@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { createBrowserSupabaseClient } from "@/frontend/lib/supabase/browser";
 import { isMissingSupabaseSchema } from "@/frontend/lib/supabase/errors";
 import {
@@ -42,6 +43,7 @@ import {
   IconImage,
   IconFileText,
   IconSearch,
+  IconVolume,
 } from "./icons";
 import {
   type Conversation,
@@ -58,6 +60,15 @@ import {
 } from "@/frontend/lib/conversations";
 import { ConversationList } from "./ConversationList";
 import { ConversationHeader } from "./ConversationHeader";
+import {
+  LEARN_STEP_BY_STEP_MODE,
+  buildLearningControlQuestion,
+  learningProgressPercent,
+  normalizeLearningStepMeta,
+  type LearnStepByStepMode,
+  type LearningControl,
+  type LearningStepMeta,
+} from "@/frontend/lib/learningStep";
 
 type Answer = {
   short_answer?: string;
@@ -70,6 +81,7 @@ type Answer = {
   practice_question?: string;
   related_files_notes?: string[];
   next_step?: string;
+  learning_step?: LearningStepMeta | null;
   response_mode?: "ai" | "cache" | "offline_fallback";
   fallback_notice?: string;
   source_chips?: SourceChip[];
@@ -112,7 +124,7 @@ type Attachment = {
   type: "file" | "note";
 };
 
-type RequestMode = "study" | "web_search" | "deep_research";
+type RequestMode = "study" | "web_search" | "deep_research" | LearnStepByStepMode;
 type UserMessageMode = RequestMode | "diagram";
 type LoadingMode = RequestMode | "diagram";
 
@@ -120,6 +132,12 @@ type RetryPayload = {
   question: string;
   attachments: Attachment[];
   mode: RequestMode;
+};
+
+type DiagramRetryPayload = {
+  request: DiagramRequest;
+  sourceLabel: string;
+  replaceMessageId?: string;
 };
 
 type SendOptions = {
@@ -383,6 +401,7 @@ function normalizeAnswer(value: unknown): Answer {
     practice_question: textValue(record, "practice_question", "practiceQuestion", "practice question"),
     related_files_notes: arrayValue(record, "related_files_notes", "relatedFilesNotes", "related", "sources"),
     next_step: textValue(record, "next_step", "nextStep", "next step"),
+    learning_step: normalizeLearningStepMeta(record.learning_step ?? record.learningStep),
     response_mode: textValue(record, "response_mode", "responseMode") as Answer["response_mode"],
     fallback_notice: textValue(record, "fallback_notice", "fallbackNotice"),
     source_chips: sourceChipsValue(record, "source_chips", "sourceChips", "answer_sources", "answerSources"),
@@ -407,12 +426,88 @@ function formatTime(iso?: string): string {
   }
 }
 
+function conversationTime(conversation: Conversation): number {
+  const updated = Date.parse(conversation.updated_at);
+  if (Number.isFinite(updated)) return updated;
+  const created = Date.parse(conversation.created_at);
+  return Number.isFinite(created) ? created : 0;
+}
+
+function latestConversation(conversations: Conversation[]): Conversation | null {
+  return conversations.reduce<Conversation | null>((latest, conversation) => {
+    if (!latest) return conversation;
+    return conversationTime(conversation) > conversationTime(latest) ? conversation : latest;
+  }, null);
+}
+
 // Hydration-safe "is client" flag: false during SSR/first render, true after hydration.
 const emptySubscribe = () => () => {};
 const getClientSnapshot = () => true;
 const getServerSnapshot = () => false;
 function useIsClient() {
   return useSyncExternalStore(emptySubscribe, getClientSnapshot, getServerSnapshot);
+}
+
+function LearningStepControls({
+  meta,
+  loading,
+  onControl,
+}: {
+  meta: LearningStepMeta;
+  loading: boolean;
+  onControl: (control: LearningControl, meta: LearningStepMeta) => void;
+}) {
+  const percent = learningProgressPercent(meta);
+  const ended = meta.session_status === "ended";
+  const controls: Array<{ action: LearningControl; label: string }> = [
+    { action: "previous", label: "Previous Step" },
+    { action: "next", label: "Next Step" },
+    { action: "simpler", label: "Explain Simpler" },
+    { action: "another_example", label: "Give Another Example" },
+    { action: "quiz", label: "Quiz Me" },
+    { action: "skip", label: "Skip Step" },
+    { action: "end", label: "End Session" },
+  ];
+
+  return (
+    <div className="mt-3 rounded-lg border border-emerald-300/15 bg-emerald-300/[0.035] p-3">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-xs font-semibold text-emerald-200">
+            Step {meta.current_step} of {meta.total_steps}: {meta.step_title}
+          </p>
+          {meta.feedback ? (
+            <p className={`mt-0.5 text-[11px] ${meta.feedback === "correct" ? "text-emerald-200/80" : "text-amber-200/85"}`}>
+              {meta.feedback === "correct" ? "Answer checked: correct." : "Answer checked: needs another pass."}
+            </p>
+          ) : null}
+        </div>
+        {ended ? (
+          <span className="rounded-full border border-slate-500/20 bg-slate-500/10 px-2 py-0.5 text-[11px] font-semibold text-slate-300">
+            Session ended
+          </span>
+        ) : null}
+      </div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-white/10" aria-label={`Learning progress ${percent}%`}>
+        <div className="h-full rounded-full bg-emerald-300 transition-[width] duration-300" style={{ width: `${percent}%` }} />
+      </div>
+      {!ended ? (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {controls.map((control) => (
+            <button
+              key={control.action}
+              type="button"
+              onClick={() => onControl(control.action, meta)}
+              disabled={loading}
+              className="inline-flex h-7 items-center rounded-md border border-white/10 bg-white/[0.04] px-2.5 text-xs font-semibold text-slate-200 transition hover:-translate-y-0.5 hover:border-emerald-300/25 hover:bg-emerald-300/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/40 disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none motion-reduce:hover:translate-y-0"
+            >
+              {control.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 export function StudyChat({
@@ -424,6 +519,12 @@ export function StudyChat({
   files: FileOption[];
   notes: NoteOption[];
 }) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const requestedConversationId = searchParams.get("conversationId");
+  const handledRequestedConversationIdRef = useRef<string | null>(null);
+  const restoredLatestConversationRef = useRef(false);
+
   /* â”€â”€â”€ Persistent conversations (Phase 1B) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
   // List state.
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -577,7 +678,10 @@ export function StudyChat({
     setAbortController(null);
     setLoading(false);
     setLoadingMode(null);
-    stopSpeaking();
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+    setSpeakingId("");
 
     setActiveId(id);
     setLegacyActive(false);
@@ -591,6 +695,7 @@ export function StudyChat({
     setAttachments([]);
     setError("");
     setPendingRetry(null);
+    setPendingDiagramRetry(null);
     setRequestMode("study");
 
     const messagesResult = await getMessages(id);
@@ -804,6 +909,7 @@ export function StudyChat({
       setQuestion("");
       setError("");
       setPendingRetry(null);
+      setPendingDiagramRetry(null);
       bumpConversationVersion();
       window.setTimeout(() => textareaRef.current?.focus(), 0);
     }
@@ -812,6 +918,7 @@ export function StudyChat({
 
   function openLegacyChat() {
     if (loading) return;
+    router.replace("/chat", { scroll: false });
     abortActiveController();
     setAbortController(null);
     setLoading(false);
@@ -829,6 +936,7 @@ export function StudyChat({
     setAttachments([]);
     setError("");
     setPendingRetry(null);
+    setPendingDiagramRetry(null);
     setRequestMode("study");
     setMobileDrawerOpen(false);
     markNearBottom();
@@ -870,7 +978,8 @@ export function StudyChat({
     });
     if (hasImage) return "image";
     const fileIds = opts.attachments.filter((a) => a.type === "file").map((a) => a.id);
-    return fileIds.length > 0 ? "file" : "general";
+    const noteIds = opts.attachments.filter((a) => a.type === "note").map((a) => a.id);
+    return fileIds.length > 0 || noteIds.length > 0 ? "file" : "general";
   }
 
   /* â”€â”€â”€ Original chat message state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
@@ -883,6 +992,7 @@ export function StudyChat({
   const [uploadProgress, setUploadProgress] = useState("");
   const [error, setError] = useState("");
   const [pendingRetry, setPendingRetry] = useState<RetryPayload | null>(null);
+  const [pendingDiagramRetry, setPendingDiagramRetry] = useState<DiagramRetryPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [requestMode, setRequestMode] = useState<RequestMode>("study");
   const [loadingMode, setLoadingMode] = useState<LoadingMode | null>(null);
@@ -897,6 +1007,7 @@ export function StudyChat({
   const menuRef = useRef<HTMLDivElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const diagramRequestInFlightRef = useRef("");
   const conversationVersionRef = useRef(0);
   const messageCounterRef = useRef(0);
   const isNearBottomRef = useRef(true);
@@ -909,10 +1020,18 @@ export function StudyChat({
   // the AbortController pattern (which React itself recommends) while the
   // analyzer can't trace the mutation across the function call.
   function setAbortController(controller: AbortController | null) {
-    setAbortController(controller);
+    abortRef.current = controller;
   }
   function abortActiveController() {
-    abortActiveController();
+    const active = abortRef.current;
+    if (active) {
+      try {
+        active.abort();
+      } catch {
+        // Ignore abort errors; the request may already be settled.
+      }
+    }
+    abortRef.current = null;
   }
   function bumpConversationVersion(): number {
     conversationVersionRef.current += 1;
@@ -922,7 +1041,7 @@ export function StudyChat({
     return conversationVersionRef.current;
   }
   function markNearBottom() {
-    markNearBottom();
+    isNearBottomRef.current = true;
   }
   function setNearBottom(value: boolean) {
     isNearBottomRef.current = value;
@@ -1091,6 +1210,31 @@ export function StudyChat({
   }, [loading, loadingMode]);
 
   useEffect(() => {
+    if (restoredLatestConversationRef.current) return;
+    if (requestedConversationId || loadingConversations || activeId || legacyActive) return;
+    const latest = latestConversation(conversations);
+    if (!latest) return;
+
+    restoredLatestConversationRef.current = true;
+    handledRequestedConversationIdRef.current = latest.id;
+    router.replace(`/chat?conversationId=${encodeURIComponent(latest.id)}`, { scroll: false });
+    void Promise.resolve().then(() => {
+      void openConversation(latest.id);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId, conversations, legacyActive, loadingConversations, requestedConversationId, router]);
+
+  useEffect(() => {
+    if (!requestedConversationId) return;
+    if (handledRequestedConversationIdRef.current === requestedConversationId) return;
+    handledRequestedConversationIdRef.current = requestedConversationId;
+    void Promise.resolve().then(() => {
+      void openConversation(requestedConversationId);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestedConversationId]);
+
+  useEffect(() => {
     return () => {
       abortActiveController();
       setAbortController(null);
@@ -1098,7 +1242,6 @@ export function StudyChat({
         window.speechSynthesis.cancel();
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* â”€â”€â”€ Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
@@ -1125,6 +1268,7 @@ export function StudyChat({
     setMenuOpen(false);
     setError("");
     setPendingRetry(null);
+    setPendingDiagramRetry(null);
     // Switching to web mode strips down to web/research context â€” attachments
     // are not used here so we patch only the context_mode.
     patchActiveContextFromState(attachments, "web_search");
@@ -1136,7 +1280,18 @@ export function StudyChat({
     setMenuOpen(false);
     setError("");
     setPendingRetry(null);
+    setPendingDiagramRetry(null);
     patchActiveContextFromState(attachments, "deep_research");
+    window.setTimeout(() => textareaRef.current?.focus(), 0);
+  }
+
+  function activateLearnStepByStep() {
+    setRequestMode(LEARN_STEP_BY_STEP_MODE);
+    setMenuOpen(false);
+    setError("");
+    setPendingRetry(null);
+    setPendingDiagramRetry(null);
+    patchActiveContextFromState(attachments, LEARN_STEP_BY_STEP_MODE);
     window.setTimeout(() => textareaRef.current?.focus(), 0);
   }
 
@@ -1145,6 +1300,7 @@ export function StudyChat({
     setRequestMode("study");
     setError("");
     setPendingRetry(null);
+    setPendingDiagramRetry(null);
     patchActiveContextFromState(attachments, "study");
     window.setTimeout(() => textareaRef.current?.focus(), 0);
   }
@@ -1154,6 +1310,17 @@ export function StudyChat({
     setRequestMode("study");
     setError("");
     setPendingRetry(null);
+    setPendingDiagramRetry(null);
+    patchActiveContextFromState(attachments, "study");
+    window.setTimeout(() => textareaRef.current?.focus(), 0);
+  }
+
+  function clearLearnStepByStepMode() {
+    if (loading) return;
+    setRequestMode("study");
+    setError("");
+    setPendingRetry(null);
+    setPendingDiagramRetry(null);
     patchActiveContextFromState(attachments, "study");
     window.setTimeout(() => textareaRef.current?.focus(), 0);
   }
@@ -1163,6 +1330,7 @@ export function StudyChat({
     setMenuOpen(false);
     setError("");
     setPendingRetry(null);
+    setPendingDiagramRetry(null);
     setDiagramOpen(true);
   }
 
@@ -1177,6 +1345,9 @@ export function StudyChat({
     replaceMessageId?: string,
   ) {
     if (loading) return;
+    const requestKey = JSON.stringify({ request, sourceLabel, replaceMessageId: replaceMessageId ?? null });
+    if (diagramRequestInFlightRef.current === requestKey) return;
+    diagramRequestInFlightRef.current = requestKey;
     const conversationVersion = conversationVersionRef.current;
     const diagramLabel = request.diagramType.replaceAll("_", " ");
     const userQuestion = `Generate a ${diagramLabel} from ${sourceLabel}`;
@@ -1192,6 +1363,7 @@ export function StudyChat({
     if (!activeId || legacyActive) {
       if (legacyActive) {
         setError("This is a read-only previous chat. Start a new chat to generate a diagram.");
+        diagramRequestInFlightRef.current = "";
         return;
       }
       const ensured = await ensureConversationForSend({
@@ -1201,6 +1373,7 @@ export function StudyChat({
       });
       if (!ensured.ok) {
         setError(ensured.message);
+        diagramRequestInFlightRef.current = "";
         return;
       }
       sendConversationId = ensured.conversation.id;
@@ -1223,6 +1396,7 @@ export function StudyChat({
     setDiagramOpen(false);
     setError("");
     setPendingRetry(null);
+    setPendingDiagramRetry(null);
     setLoading(true);
     setLoadingMode("diagram");
     markNearBottom();
@@ -1248,18 +1422,23 @@ export function StudyChat({
         if (current.some((m) => m.id === assistantMessageId)) return current;
         return [...current, assistantMessage];
       });
+      setPendingDiagramRetry(null);
 
       void maybeAutoTitleConversation(sendConversationId, userQuestion);
       void touchConversationUpdatedAt(sendConversationId, activeConversation?.title ?? null);
     } catch (err) {
       if (currentConversationVersion() !== conversationVersion) return;
       if (err instanceof Error && err.name === "AbortError") return;
+      setPendingDiagramRetry({ request, sourceLabel, replaceMessageId });
       setError(cleanErrorMessage(err instanceof Error ? err.message : "Diagram generation failed."));
     } finally {
       if (abortRef.current === controller) {
         setLoading(false);
         setLoadingMode(null);
         setAbortController(null);
+      }
+      if (diagramRequestInFlightRef.current === requestKey) {
+        diagramRequestInFlightRef.current = "";
       }
     }
   }
@@ -1392,6 +1571,7 @@ export function StudyChat({
     setQuestion("");
     setError("");
     setPendingRetry(null);
+    setPendingDiagramRetry(null);
     setLoading(true);
     setLoadingMode("web_search");
     markNearBottom();
@@ -1477,6 +1657,7 @@ export function StudyChat({
     setQuestion("");
     setError("");
     setPendingRetry(null);
+    setPendingDiagramRetry(null);
     setResearchProgressIndex(0);
     setLoading(true);
     setLoadingMode("deep_research");
@@ -1564,7 +1745,7 @@ export function StudyChat({
     const userMessage: UiMessage = {
       id: nextMessageId("user"),
       role: "user",
-      mode: "study",
+      mode,
       question: trimmed,
       attachments: currentAttachments,
       createdAt: new Date().toISOString(),
@@ -1577,8 +1758,9 @@ export function StudyChat({
     setAttachments([]);
     setError("");
     setPendingRetry(null);
+    setPendingDiagramRetry(null);
     setLoading(true);
-    setLoadingMode("study");
+    setLoadingMode(mode);
     markNearBottom();
 
     const controller = new AbortController();
@@ -1590,6 +1772,7 @@ export function StudyChat({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           question: trimmed,
+          mode,
           fileIds: currentAttachments.filter((attachment) => attachment.type === "file").map((attachment) => attachment.id),
           noteIds: currentAttachments.filter((attachment) => attachment.type === "note").map((attachment) => attachment.id),
           ...(sendConversationId ? { conversationId: sendConversationId } : {}),
@@ -1629,7 +1812,7 @@ export function StudyChat({
               mode: "study",
               answer,
               answerId: data.chat.id,
-              retry: answer.response_mode === "offline_fallback" ? { question: trimmed, attachments: currentAttachments, mode: "study" } : undefined,
+              retry: answer.response_mode === "offline_fallback" ? { question: trimmed, attachments: currentAttachments, mode } : undefined,
               createdAt: data.chat.created_at,
             },
           ];
@@ -1651,7 +1834,7 @@ export function StudyChat({
       }
       setQuestion(trimmed);
       setAttachments(currentAttachments);
-      setPendingRetry({ question: trimmed, attachments: currentAttachments, mode: "study" });
+      setPendingRetry({ question: trimmed, attachments: currentAttachments, mode });
       setError(cleanErrorMessage(err instanceof Error ? err.message : "AI request failed."));
     } finally {
       if (abortRef.current === controller) {
@@ -1671,6 +1854,54 @@ export function StudyChat({
     setAbortController(null);
   }
 
+  function retryPendingAction() {
+    if (loading) return;
+    if (pendingDiagramRetry) {
+      void generateDiagram(
+        pendingDiagramRetry.request,
+        pendingDiagramRetry.sourceLabel,
+        pendingDiagramRetry.replaceMessageId,
+      );
+      return;
+    }
+    if (!pendingRetry) return;
+    void sendMessage(pendingRetry.question, {
+      attachmentsOverride: pendingRetry.attachments,
+      skipUserBubble: true,
+      modeOverride: pendingRetry.mode,
+    });
+  }
+
+  function editPendingAction() {
+    if (loading) return;
+    if (pendingDiagramRetry) {
+      setError("");
+      setDiagramOpen(true);
+      return;
+    }
+    if (!pendingRetry) return;
+    setQuestion(pendingRetry.question);
+    setAttachments(pendingRetry.attachments);
+    setRequestMode(pendingRetry.mode);
+    patchActiveContextFromState(pendingRetry.attachments, pendingRetry.mode);
+    setError("");
+    setPendingRetry(null);
+    setPendingDiagramRetry(null);
+    window.setTimeout(() => textareaRef.current?.focus(), 0);
+  }
+
+  function switchPendingDeepResearchToFastSearch() {
+    if (loading || pendingRetry?.mode !== "deep_research") return;
+    const questionToSearch = pendingRetry.question;
+    setError("");
+    setPendingRetry(null);
+    setPendingDiagramRetry(null);
+    void sendWebSearch(questionToSearch, {
+      attachmentsOverride: [],
+      skipUserBubble: true,
+    });
+  }
+
   function regenerate(messageId: string) {
     if (loading) return;
     const index = messages.findIndex((m) => m.id === messageId);
@@ -1688,6 +1919,7 @@ export function StudyChat({
   }
 
   function startNewChat() {
+    router.replace("/chat", { scroll: false });
     bumpConversationVersion();
     abortActiveController();
     setAbortController(null);
@@ -1702,6 +1934,7 @@ export function StudyChat({
     setRequestMode("study");
     setError("");
     setPendingRetry(null);
+    setPendingDiagramRetry(null);
     setShowScrollDown(false);
     setActiveId(null);
     setActiveConversation(null);
@@ -1761,6 +1994,14 @@ export function StudyChat({
     window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "smooth" });
   }
 
+  function sendLearningControl(control: LearningControl, meta: LearningStepMeta) {
+    if (loading) return;
+    void meta;
+    void sendMessage(buildLearningControlQuestion(control), {
+      modeOverride: LEARN_STEP_BY_STEP_MODE,
+    });
+  }
+
   /* â”€â”€â”€ Render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
   const menuItemClass =
@@ -1782,7 +2023,10 @@ export function StudyChat({
         legacyActive={legacyActive}
         hasLegacy={legacyChats.length > 0}
         newDisabled={loading}
-        onSelect={(id) => void openConversation(id)}
+        onSelect={(id) => {
+          router.replace(`/chat?conversationId=${encodeURIComponent(id)}`, { scroll: false });
+          void openConversation(id);
+        }}
         onNew={startNewChat}
         onRename={(id, title) => void renameConversation(id, title)}
         onTogglePin={(id, pinned) => void togglePinConversation(id, pinned)}
@@ -1812,6 +2056,18 @@ export function StudyChat({
           onOpenMobileDrawer={() => setMobileDrawerOpen(true)}
         />
 
+        {activeId && !legacyActive ? (
+          <div className="mb-4 flex justify-end">
+            <Link
+              href={`/voice?conversationId=${encodeURIComponent(activeId)}`}
+              className="inline-flex h-8 items-center gap-2 rounded-md border border-emerald-300/25 bg-emerald-300/10 px-3 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-300/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/40"
+            >
+              <IconVolume size={14} />
+              Continue in Voice Tutor
+            </Link>
+          </div>
+        ) : null}
+
         {messagesError ? (
           <div className="mb-4 rounded-lg border border-red-300/25 bg-red-300/[0.08] p-3 text-sm text-red-100">
             {messagesError}
@@ -1825,7 +2081,7 @@ export function StudyChat({
             aria-live="polite"
           >
             <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-300" />
-            Loading conversationâ€¦
+            Loading conversation…
           </div>
         ) : null}
 
@@ -1861,21 +2117,25 @@ export function StudyChat({
                         ))}
                       </div>
                     ) : null}
-                    {message.mode === "web_search" || message.mode === "deep_research" || message.mode === "diagram" ? (
+                    {message.mode === "web_search" || message.mode === "deep_research" || message.mode === "diagram" || message.mode === LEARN_STEP_BY_STEP_MODE ? (
                       <div className="mt-1.5 flex justify-end">
                         <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${
                           message.mode === "deep_research"
                             ? "border-sky-300/20 bg-sky-300/[0.08] text-sky-200"
                             : message.mode === "diagram"
                               ? "border-pink-300/20 bg-pink-300/[0.08] text-pink-200"
-                              : "border-violet-300/20 bg-violet-300/[0.08] text-violet-200"
+                              : message.mode === LEARN_STEP_BY_STEP_MODE
+                                ? "border-emerald-300/20 bg-emerald-300/[0.08] text-emerald-200"
+                                : "border-violet-300/20 bg-violet-300/[0.08] text-violet-200"
                         }`}>
-                          {message.mode === "diagram" ? <IconImage size={11} /> : <IconSearch size={11} />}
+                          {message.mode === "diagram" ? <IconImage size={11} /> : message.mode === LEARN_STEP_BY_STEP_MODE ? <IconFileText size={11} /> : <IconSearch size={11} />}
                           {message.mode === "deep_research"
                             ? "Deep research"
                             : message.mode === "diagram"
                               ? "Diagram"
-                              : "Web search"}
+                              : message.mode === LEARN_STEP_BY_STEP_MODE
+                                ? "Learn Step by Step"
+                                : "Web search"}
                         </span>
                       </div>
                     ) : null}
@@ -2015,6 +2275,13 @@ export function StudyChat({
 
                   <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3">
                     <AssistantAnswer answer={message.answer} />
+                    {message.answer.learning_step ? (
+                      <LearningStepControls
+                        meta={message.answer.learning_step}
+                        loading={loading}
+                        onControl={sendLearningControl}
+                      />
+                    ) : null}
                   </div>
 
                   <MessageActions
@@ -2054,12 +2321,22 @@ export function StudyChat({
                 </div>
                 {loadingMode === "deep_research" ? (
                   <div className="rounded-xl border border-sky-300/15 bg-sky-300/[0.04] px-4 py-3" role="status" aria-live="polite">
-                    <LoadingDots text={`${researchProgressCues[researchProgressIndex]}â€¦`} />
-                    <p className="mt-1 text-[11px] text-slate-500">Bounded to 3â€“5 searches and at most 12 sources.</p>
+                    <LoadingDots text={`${researchProgressCues[researchProgressIndex]}…`} />
+                    <p className="mt-1 text-[11px] text-slate-500">Bounded to 3-5 searches and at most 12 sources.</p>
                   </div>
                 ) : (
                   <div className="inline-flex items-center rounded-xl border border-emerald-300/15 bg-emerald-400/[0.04] px-4 py-2.5">
-                    <LoadingDots text={loadingMode === "web_search" ? "Searching the webâ€¦" : loadingMode === "diagram" ? "Generating a grounded diagramâ€¦" : "Thinking with your study contextâ€¦"} />
+                    <LoadingDots
+                      text={
+                        loadingMode === "web_search"
+                          ? "Searching the web…"
+                          : loadingMode === "diagram"
+                            ? "Generating a grounded diagram…"
+                            : loadingMode === LEARN_STEP_BY_STEP_MODE
+                              ? "Preparing the next learning step…"
+                              : "Thinking with your study context…"
+                      }
+                    />
                   </div>
                 )}
               </div>
@@ -2086,20 +2363,35 @@ export function StudyChat({
           {error ? (
             <div className="mb-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-400/25 bg-red-400/[0.08] px-3 py-2 text-sm text-red-200">
               <span className="min-w-0 break-words">{error}</span>
-              {pendingRetry ? (
-                <button
-                  type="button"
-                  onClick={() =>
-                    sendMessage(pendingRetry.question, {
-                      attachmentsOverride: pendingRetry.attachments,
-                      skipUserBubble: true,
-                      modeOverride: pendingRetry.mode,
-                    })
-                  }
-                  className="inline-flex h-7 shrink-0 items-center rounded-md border border-red-200/30 bg-red-200/10 px-2.5 text-xs font-semibold text-red-100 transition hover:bg-red-200/15"
-                >
-                  Retry
-                </button>
+              {pendingRetry || pendingDiagramRetry ? (
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
+                  {pendingRetry?.mode === "deep_research" ? (
+                    <button
+                      type="button"
+                      onClick={switchPendingDeepResearchToFastSearch}
+                      disabled={loading}
+                      className="inline-flex h-7 items-center rounded-md border border-sky-200/30 bg-sky-200/10 px-2.5 text-xs font-semibold text-sky-100 transition hover:bg-sky-200/15 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Fast Search
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={editPendingAction}
+                    disabled={loading}
+                    className="inline-flex h-7 items-center rounded-md border border-red-200/30 bg-red-200/10 px-2.5 text-xs font-semibold text-red-100 transition hover:bg-red-200/15 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    onClick={retryPendingAction}
+                    disabled={loading}
+                    className="inline-flex h-7 items-center rounded-md border border-red-200/30 bg-red-200/10 px-2.5 text-xs font-semibold text-red-100 transition hover:bg-red-200/15 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Retry
+                  </button>
+                </div>
               ) : null}
             </div>
           ) : null}
@@ -2107,26 +2399,50 @@ export function StudyChat({
             <div className="mb-2 rounded-lg border border-emerald-300/25 bg-emerald-300/10 px-3 py-2 text-sm text-emerald-100">{uploadProgress}</div>
           ) : null}
 
-          {requestMode === "web_search" || requestMode === "deep_research" ? (
+          {requestMode === "web_search" || requestMode === "deep_research" || requestMode === LEARN_STEP_BY_STEP_MODE ? (
             <div className="mb-2 flex items-center gap-2">
               <button
                 type="button"
-                onClick={requestMode === "deep_research" ? clearDeepResearchMode : clearWebSearchMode}
+                onClick={
+                  requestMode === "deep_research"
+                    ? clearDeepResearchMode
+                    : requestMode === LEARN_STEP_BY_STEP_MODE
+                      ? clearLearnStepByStepMode
+                      : clearWebSearchMode
+                }
                 disabled={loading}
                 className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 disabled:cursor-not-allowed disabled:opacity-60 ${
                   requestMode === "deep_research"
                     ? "border-sky-300/25 bg-sky-300/10 text-sky-100 hover:bg-sky-300/15 focus-visible:ring-sky-300/50"
+                    : requestMode === LEARN_STEP_BY_STEP_MODE
+                      ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100 hover:bg-emerald-300/15 focus-visible:ring-emerald-300/50"
                     : "border-violet-300/25 bg-violet-300/10 text-violet-100 hover:bg-violet-300/15 focus-visible:ring-violet-300/50"
                 }`}
-                aria-label={requestMode === "deep_research" ? "Clear Deep research mode" : "Clear Web search mode"}
-                title={requestMode === "deep_research" ? "Clear Deep research mode" : "Clear Web search mode"}
+                aria-label={
+                  requestMode === "deep_research"
+                    ? "Clear Deep research mode"
+                    : requestMode === LEARN_STEP_BY_STEP_MODE
+                      ? "Clear Learn Step by Step mode"
+                      : "Clear Web search mode"
+                }
+                title={
+                  requestMode === "deep_research"
+                    ? "Clear Deep research mode"
+                    : requestMode === LEARN_STEP_BY_STEP_MODE
+                      ? "Clear Learn Step by Step mode"
+                      : "Clear Web search mode"
+                }
               >
-                <IconSearch size={12} />
-                {requestMode === "deep_research" ? "Deep research" : "Web search"}
+                {requestMode === LEARN_STEP_BY_STEP_MODE ? <IconFileText size={12} /> : <IconSearch size={12} />}
+                {requestMode === "deep_research" ? "Deep research" : requestMode === LEARN_STEP_BY_STEP_MODE ? "Learn Step by Step" : "Web search"}
                 <IconX size={12} />
               </button>
               <span className="text-[11px] text-slate-500">
-                {requestMode === "deep_research" ? "Enter a focused research question" : "Enter a current-information query"}
+                {requestMode === "deep_research"
+                  ? "Enter a focused research question"
+                  : requestMode === LEARN_STEP_BY_STEP_MODE
+                    ? "Enter a topic, answer, or use the step controls"
+                    : "Enter a current-information query"}
               </span>
             </div>
           ) : null}
@@ -2251,6 +2567,19 @@ export function StudyChat({
                       </span>
                     </button>
 
+                    <button
+                      type="button"
+                      onClick={activateLearnStepByStep}
+                      className={`${menuItemClass} ${requestMode === LEARN_STEP_BY_STEP_MODE ? "bg-emerald-300/[0.08]" : ""}`}
+                      role="menuitem"
+                    >
+                      <span className={`${menuIconClass} border-emerald-300/20 text-emerald-200`}><IconFileText size={14} /></span>
+                      <span className="min-w-0">
+                        <span className="block font-medium text-white">Learn Step by Step</span>
+                        <span className="block text-xs text-slate-400">Study one guided step at a time</span>
+                      </span>
+                    </button>
+
                     <button type="button" onClick={activateDiagram} className={menuItemClass} role="menuitem">
                       <span className={`${menuIconClass} border-pink-300/20 text-pink-200`}><IconImage size={14} /></span>
                       <span className="min-w-0">
@@ -2293,10 +2622,12 @@ export function StudyChat({
                 rows={1}
                 placeholder={
                   requestMode === "web_search"
-                    ? "Search the webâ€¦"
+                    ? "Search the web…"
                     : requestMode === "deep_research"
                       ? "What should StudyPilot research deeply?"
-                      : "Ask StudyPilot about your study materialâ€¦"
+                      : requestMode === LEARN_STEP_BY_STEP_MODE
+                        ? "What topic should we learn step by step?"
+                      : "Ask StudyPilot about your study material…"
                 }
                 className="max-h-40 min-h-[2.5rem] min-w-0 flex-1 resize-none bg-transparent px-1 py-2.5 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500"
                 aria-label="Type your question"
@@ -2328,14 +2659,16 @@ export function StudyChat({
                       ? "bg-violet-300 hover:bg-violet-200 focus-visible:ring-violet-300/50"
                       : requestMode === "deep_research"
                         ? "bg-sky-300 hover:bg-sky-200 focus-visible:ring-sky-300/50"
-                      : "bg-emerald-400 hover:bg-emerald-300 focus-visible:ring-emerald-400/50"
+                        : "bg-emerald-400 hover:bg-emerald-300 focus-visible:ring-emerald-400/50"
                   }`}
                   aria-label={
                     requestMode === "web_search"
                       ? "Search the web"
                       : requestMode === "deep_research"
                         ? "Start deep research"
-                        : "Send message"
+                        : requestMode === LEARN_STEP_BY_STEP_MODE
+                          ? "Start or continue Learn Step by Step"
+                          : "Send message"
                   }
                 >
                   <IconSend size={18} />
@@ -2349,6 +2682,8 @@ export function StudyChat({
               ? "Web answers use current search results. Open the listed sources to verify important details."
               : requestMode === "deep_research"
                 ? "Deep research uses a bounded set of current web sources and shows its limitations."
+                : requestMode === LEARN_STEP_BY_STEP_MODE
+                  ? "Learn Step by Step keeps one guided step active in this conversation."
               : "StudyPilot uses your files and notes as context. AI calls are limited on free keys."}
           </p>
         </div>

@@ -16,9 +16,9 @@ type QuizQuestion = {
   question: string;
   topic: string;
   options: string[];
-  correct_index: number | null;
-  acceptable_answers: string[];
-  explanation: string;
+  marks?: number | null;
+  difficulty?: string | null;
+  display_order?: number;
 };
 
 type AnswerKeyEntry = {
@@ -32,6 +32,7 @@ type AnswerKeyEntry = {
 
 type Quiz = {
   id: string;
+  file_id?: string | null;
   title: string | null;
   quiz_title?: string | null;
   difficulty?: string | null;
@@ -76,6 +77,12 @@ type SavedAttempt = {
   percentage: number;
   weak_topics: string[];
   strong_topics: string[];
+  user_answers?: {
+    question_id: string;
+    topic: string;
+    user_answer: string;
+    is_correct: boolean;
+  }[];
 };
 
 // ---------------------------------------------------------------------------
@@ -106,41 +113,47 @@ function normalizeQuestion(raw: unknown, index: number): QuizQuestion | null {
         ? "mcq"
         : "short";
 
-  const explanation = textOr(record.explanation ?? record.rationale ?? record.reason);
   const topic = textOr(record.topic ?? record.subject ?? record.concept, "General review");
   const options = asList(record.options ?? record.choices);
-  const correctIndexRaw = record.correct_index ?? record.correctIndex ?? record.correct ?? record.answer_index;
-  let correctIndex: number | null = null;
-  if (typeof correctIndexRaw === "number" && Number.isFinite(correctIndexRaw)) {
-    correctIndex = correctIndexRaw;
-  } else if (typeof correctIndexRaw === "string") {
-    const trimmed = correctIndexRaw.trim();
-    const n = Number(trimmed);
-    if (Number.isFinite(n)) correctIndex = n;
-    else if (/^[A-Da-d]\b/.test(trimmed)) correctIndex = trimmed.toUpperCase().charCodeAt(0) - 65;
-    else {
-      const matchIdx = options.findIndex((opt) => opt.toLowerCase() === trimmed.toLowerCase());
-      if (matchIdx >= 0) correctIndex = matchIdx;
-    }
-  }
-  const acceptableAnswers = asList(record.acceptable_answers ?? record.acceptableAnswers ?? record.answers ?? record.answer);
+  const marks = typeof record.marks === "number" && Number.isFinite(record.marks) ? record.marks : null;
+  const displayOrder = typeof record.display_order === "number" && Number.isFinite(record.display_order) ? record.display_order : index + 1;
 
   if (type === "mcq") {
-    if (options.length < 2 || correctIndex === null || correctIndex < 0 || correctIndex >= options.length) return null;
-    return { id: textOr(record.id, `q${index + 1}`), type, question, topic, options, correct_index: correctIndex, acceptable_answers: [], explanation };
+    if (options.length < 2) return null;
+    return { id: textOr(record.id, `q${index + 1}`), type, question, topic, options, marks, difficulty: textOr(record.difficulty) || null, display_order: displayOrder };
   }
 
-  if (!acceptableAnswers.length) return null;
   return {
     id: textOr(record.id, `q${index + 1}`),
     type: "short",
     question,
     topic,
     options: [],
-    correct_index: null,
-    acceptable_answers: acceptableAnswers,
-    explanation,
+    marks,
+    difficulty: textOr(record.difficulty) || null,
+    display_order: displayOrder,
   };
+}
+
+function normalizeAnswerKey(raw: unknown): AnswerKeyEntry[] {
+  if (!Array.isArray(raw)) return [];
+
+  return raw
+    .map<AnswerKeyEntry | null>((entry, i) => {
+      if (!entry || typeof entry !== "object") return null;
+      const r = entry as Record<string, unknown>;
+      const correctIndex = typeof r.correct_index === "number" ? r.correct_index : typeof r.correctIndex === "number" ? r.correctIndex : null;
+
+      return {
+        id: textOr(r.id, `q${i + 1}`),
+        type: (String(r.type ?? "").toLowerCase().includes("short") ? "short" : "mcq") as QuestionType,
+        topic: textOr(r.topic) || undefined,
+        correct_index: correctIndex,
+        acceptable_answers: asList(r.acceptable_answers ?? r.acceptableAnswers),
+        explanation: textOr(r.explanation ?? r.rationale ?? r.reason),
+      };
+    })
+    .filter((entry): entry is AnswerKeyEntry => Boolean(entry));
 }
 
 function normalizeQuiz(raw: unknown): Quiz | null {
@@ -153,98 +166,19 @@ function normalizeQuiz(raw: unknown): Quiz | null {
     .map((q, i) => ({ ...q, id: q.id || `q${i + 1}` }));
   if (!normalized.length) return null;
 
-  // answer_key may be present (saved/generated). Prefer it for grading when
-  // it lines up with the questions; otherwise derive from the questions.
-  const rawKey = Array.isArray(record.answer_key) ? record.answer_key : [];
-  const keyById = new Map<string, AnswerKeyEntry>();
-  rawKey.forEach((entry, i) => {
-    if (!entry || typeof entry !== "object") return;
-    const r = entry as Record<string, unknown>;
-    const id = textOr(r.id, `q${i + 1}`);
-    keyById.set(id, {
-      id,
-      type: (String(r.type ?? "").toLowerCase().includes("short") ? "short" : "mcq") as QuestionType,
-      topic: textOr(r.topic),
-      correct_index: typeof r.correct_index === "number" ? r.correct_index : typeof r.correctIndex === "number" ? r.correctIndex : null,
-      acceptable_answers: asList(r.acceptable_answers ?? r.acceptableAnswers),
-      explanation: textOr(r.explanation ?? r.rationale ?? r.reason),
-    });
-  });
-
-  const answerKey: AnswerKeyEntry[] = normalized.map((q) => {
-    const fromKey = keyById.get(q.id);
-    if (fromKey) return fromKey;
-    return {
-      id: q.id,
-      type: q.type,
-      topic: q.topic,
-      correct_index: q.correct_index,
-      acceptable_answers: q.acceptable_answers,
-      explanation: q.explanation,
-    };
-  });
+  const answerKey = normalizeAnswerKey(record.answer_key);
 
   return {
     id: textOr(record.id, `quiz_${Date.now()}`),
+    file_id: textOr(record.file_id) || null,
     title: textOr(record.quiz_title ?? record.title) || null,
     quiz_title: textOr(record.quiz_title ?? record.title) || null,
     difficulty: textOr(record.difficulty, "medium") || "medium",
     questions: normalized,
-    answer_key: answerKey,
+    answer_key: answerKey.length ? answerKey : null,
     source_summary: textOr(record.source_summary) || null,
     created_at: textOr(record.created_at, new Date().toISOString()),
   };
-}
-
-// ---------------------------------------------------------------------------
-// Grading
-// ---------------------------------------------------------------------------
-
-function normalizeShortAnswer(value: string) {
-  return value.toLowerCase().replace(/[\s.,;:'"!?()[\]]+/g, " ").trim();
-}
-
-function isShortAnswerCorrect(answer: string, acceptable: string[]): boolean {
-  const norm = normalizeShortAnswer(answer);
-  if (!norm) return false;
-  return acceptable.some((candidate) => {
-    const c = normalizeShortAnswer(candidate);
-    if (!c) return false;
-    // Containment handles minor extra words; exact match handles the common case.
-    return norm === c || norm.includes(c) || c.includes(norm);
-  });
-}
-
-type GradeResult = {
-  perQuestion: Record<string, boolean>;
-  correct: number;
-  total: number;
-};
-
-function gradeQuiz(quiz: Quiz, answers: Record<string, string>): GradeResult {
-  const key = quiz.answer_key ?? [];
-  const perQuestion: Record<string, boolean> = {};
-  let correct = 0;
-
-  for (const q of quiz.questions) {
-    const entry = key.find((k) => k.id === q.id);
-    const answer = (answers[q.id] ?? "").trim();
-    let isCorrect = false;
-
-    if (q.type === "mcq") {
-      const selectedIndex = Number(answer);
-      const correctIndex = entry?.correct_index ?? q.correct_index;
-      isCorrect = Number.isFinite(selectedIndex) && selectedIndex === correctIndex;
-    } else {
-      const acceptable = entry?.acceptable_answers?.length ? entry.acceptable_answers : q.acceptable_answers;
-      isCorrect = isShortAnswerCorrect(answer, acceptable);
-    }
-
-    perQuestion[q.id] = isCorrect && Boolean(answer);
-    if (perQuestion[q.id]) correct += 1;
-  }
-
-  return { perQuestion, correct, total: quiz.questions.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -637,10 +571,13 @@ export function QuizWorkspace({
   const [savedAttempt, setSavedAttempt] = useState<SavedAttempt | null>(null);
   const [analytics, setAnalytics] = useState<QuizAnalytics>(initialAnalytics);
 
-  const grade = useMemo(() => (mode === "review" && activeQuiz ? gradeQuiz(activeQuiz, answers) : null), [mode, activeQuiz, answers]);
+  const attemptByQuestion = useMemo(() => {
+    if (mode !== "review" || !savedAttempt?.user_answers?.length) return new Map<string, NonNullable<SavedAttempt["user_answers"]>[number]>();
+    return new Map(savedAttempt.user_answers.map((answer) => [answer.question_id, answer]));
+  }, [mode, savedAttempt]);
 
   function startQuiz(quiz: Quiz) {
-    setActiveQuiz(quiz);
+    setActiveQuiz({ ...quiz, answer_key: null });
     setAnswers({});
     setError("");
     setNotice("");
@@ -667,12 +604,20 @@ export function QuizWorkspace({
       const response = await fetch("/api/quiz/attempts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ quizId: activeQuiz.id, answers }),
+        body: JSON.stringify({
+          quizId: activeQuiz.id,
+          fileId: activeQuiz.file_id ?? null,
+          answers: activeQuiz.questions.map((question) => ({
+            questionId: question.id,
+            selectedAnswer: answers[question.id] ?? "",
+          })),
+        }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Could not save this quiz attempt.");
 
       setSavedAttempt(data.attempt as SavedAttempt);
+      setActiveQuiz((current) => current ? { ...current, answer_key: normalizeAnswerKey(data.answer_key) } : current);
       if (data.analytics) setAnalytics(data.analytics as QuizAnalytics);
       setNotice("Attempt saved. Weak topics are now available to the Revision Planner.");
       setMode("review");
@@ -684,6 +629,7 @@ export function QuizWorkspace({
   }
 
   function retake() {
+    setActiveQuiz((current) => current ? { ...current, answer_key: null } : current);
     setAnswers({});
     setError("");
     setNotice("");
@@ -809,9 +755,9 @@ export function QuizWorkspace({
                   </span>
                 </div>
                 {activeQuiz.source_summary ? <p className="mt-2 text-sm leading-6 text-slate-400">{activeQuiz.source_summary}</p> : null}
-                {mode === "review" && grade ? (
+                {mode === "review" && savedAttempt ? (
                   <p className="mt-3 text-sm font-semibold text-emerald-200">
-                    Score: {grade.correct} / {grade.total} ({grade.total ? Math.round((grade.correct / grade.total) * 100) : 0}%)
+                    Score: {savedAttempt.score} / {savedAttempt.total_questions} ({Math.round(savedAttempt.percentage)}%)
                   </p>
                 ) : (
                   <p className="mt-2 text-xs text-slate-500">{activeQuiz.questions.length} questions</p>
@@ -852,9 +798,10 @@ export function QuizWorkspace({
           <div className="grid gap-4">
             {activeQuiz.questions.map((question, index) => {
               const entry = activeQuiz.answer_key?.find((k) => k.id === question.id);
+              const serverResult = attemptByQuestion.get(question.id);
               const result =
-                mode === "review" && entry
-                  ? { isCorrect: Boolean(grade?.perQuestion[question.id]), entry }
+                mode === "review" && entry && serverResult
+                  ? { isCorrect: serverResult.is_correct, entry }
                   : undefined;
               return (
                 <QuestionCard

@@ -1,7 +1,7 @@
 import { AppShell } from "@/frontend/components/AppShell";
 import { Card } from "@/frontend/components/ui";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
-import { requireUser } from "@/backend/lib/auth";
+import { requireAdmin } from "@/backend/lib/auth";
 import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
@@ -24,8 +24,8 @@ async function countRows(supabase: Awaited<ReturnType<typeof createServerSupabas
 }
 
 export default async function AdminPage() {
-  const user = await requireUser("admin");
-  if (!user) redirect("/dashboard");
+  const admin = await requireAdmin();
+  if (!admin.ok) redirect(admin.status === 401 ? "/auth" : "/dashboard");
 
   const supabase = await createServerSupabaseClient();
   const [files, notes, summaries, chats, quizzes] = await Promise.all([

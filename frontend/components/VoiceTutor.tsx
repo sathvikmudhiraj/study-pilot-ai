@@ -1,6 +1,18 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import Link from "next/link";
+import {
+  activeContextLabel,
+  type Conversation,
+  type ConversationMessage,
+  type ContextMode,
+} from "@/frontend/lib/conversationTypes";
+import {
+  createConversation,
+  patchConversation,
+  shortTitleFromQuestion,
+} from "@/frontend/lib/conversations";
 import {
   VOICE_LANGUAGES,
   findVoiceLanguage,
@@ -10,9 +22,12 @@ import {
   type SpeechRecognitionLike,
 } from "@/frontend/lib/speech/webSpeech";
 import {
+  RecordingSilenceTimer,
+  VOICE_RECORDING_SILENCE_MS,
+} from "@/frontend/lib/speech/recordingSilenceTimer";
+import {
   VOICE_COMMANDS,
   resolveVoiceCommand,
-  withLanguageStyle,
   type VoiceDiagramSourceIntent,
   type VoiceDiagramType,
   type VoiceNoteExportFormat,
@@ -43,6 +58,14 @@ import {
   SourceCitationChips,
   type SourceCitationValue,
 } from "./SourceCitationChips";
+import {
+  telemetryStartRequest,
+  telemetryEndRequest,
+  telemetryStartStage,
+  telemetryEndStage,
+  telemetrySetMetadata,
+  telemetryRecordDuration,
+} from "@/frontend/lib/telemetry";
 import { WebCitationList } from "./WebCitationList";
 import { DeepResearchReport as DeepResearchReportView } from "./DeepResearchReport";
 import { DiagramPreview } from "./DiagramPreview";
@@ -50,6 +73,7 @@ import { VoiceOrb, type VoiceOrbState } from "./voice/VoiceOrb";
 import { StudyNoteEditor } from "./StudyNoteEditor";
 import {
   IconBrain,
+  IconChat,
   IconCheck,
   IconClock,
   IconFileText,
@@ -102,6 +126,21 @@ type Turn = {
   text?: string;
 };
 
+type FileOption = {
+  id: string;
+  file_name: string;
+  file_type: string | null;
+  mime_type: string | null;
+  created_at: string;
+};
+
+type NoteOption = {
+  id: string;
+  title: string | null;
+  topic: string | null;
+  created_at: string;
+};
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -134,6 +173,103 @@ function stripUrlsForSpeech(text: string): string {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
+}
+
+// Development-only telemetry for measuring voice pipeline stages
+const VOICE_TELEMETRY_STAGES = [
+  "speech_start",
+  "speech_end",
+  "final_transcript",
+  "api_request_start",
+  "authentication",
+  "conversation_loading",
+  "message_loading",
+  "file_context_loading",
+  "prompt_building",
+  "ai_provider_request",
+  "ai_provider_response",
+  "response_parsing",
+  "database_persistence",
+  "ui_render",
+  "tts_start",
+] as const;
+
+type VoiceTelemetryStage = (typeof VOICE_TELEMETRY_STAGES)[number];
+
+interface VoiceTelemetryEntry {
+  stage: VoiceTelemetryStage;
+  startTime: number;
+  endTime: number;
+  durationMs: number;
+  requestId: string;
+}
+
+const voiceTelemetryBuffer: VoiceTelemetryEntry[] = [];
+
+function isDev(): boolean {
+  return process.env.NODE_ENV !== "production";
+}
+
+function recordTelemetryStage(stage: VoiceTelemetryStage, startTime: number, endTime: number, requestId: string): void {
+  if (!isDev()) return;
+  const durationMs = endTime - startTime;
+  voiceTelemetryBuffer.push({ stage, startTime, endTime, durationMs, requestId });
+  console.log(`[voice-telemetry] ${requestId} | ${stage}: ${durationMs.toFixed(2)}ms (start: ${startTime}, end: ${endTime})`);
+}
+
+function startTelemetryStage(stage: VoiceTelemetryStage, requestId: string): number {
+  const startTime = performance.now();
+  if (isDev()) {
+    console.log(`[voice-telemetry] ${requestId} | ${stage}: START`);
+  }
+  return startTime;
+}
+
+function endTelemetryStage(stage: VoiceTelemetryStage, startTime: number, requestId: string): number {
+  const endTime = performance.now();
+  recordTelemetryStage(stage, startTime, endTime, requestId);
+  return endTime;
+}
+
+function generateRequestId(): string {
+  return `req_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function printTelemetrySummary(): void {
+  if (!isDev() || voiceTelemetryBuffer.length === 0) return;
+  console.log(`[voice-telemetry] === SUMMARY (${voiceTelemetryBuffer.length} entries) ===`);
+  
+  const byStage = new Map<VoiceTelemetryStage, number[]>();
+  for (const entry of voiceTelemetryBuffer) {
+    if (!byStage.has(entry.stage)) byStage.set(entry.stage, []);
+    byStage.get(entry.stage)!.push(entry.durationMs);
+  }
+  
+  for (const [stage, durations] of byStage.entries()) {
+    const sorted = [...durations].sort((a, b) => a - b);
+    const avg = sorted.reduce((a, b) => a + b, 0) / sorted.length;
+    const min = sorted[0];
+    const max = sorted[sorted.length - 1];
+    const p95Index = Math.ceil(sorted.length * 0.95) - 1;
+    const p95 = sorted[Math.max(0, p95Index)];
+    console.log(`[voice-telemetry] ${stage}: avg=${avg.toFixed(2)}ms min=${min.toFixed(2)}ms max=${max.toFixed(2)}ms p95=${p95.toFixed(2)}ms (n=${sorted.length})`);
+  }
+  
+  // Find slowest stage overall
+  let slowestStage: VoiceTelemetryStage | null = null;
+  let slowestAvg = 0;
+  for (const [stage, durations] of byStage.entries()) {
+    const avg = durations.reduce((a, b) => a + b, 0) / durations.length;
+    if (avg > slowestAvg) {
+      slowestAvg = avg;
+      slowestStage = stage;
+    }
+  }
+  if (slowestStage) {
+    console.log(`[voice-telemetry] SLOWEST STAGE: ${slowestStage} (avg ${slowestAvg.toFixed(2)}ms)`);
+  }
+  
+  console.log(`[voice-telemetry] === END SUMMARY ===`);
 }
 
 function isContextualWebQuery(query: string): boolean {
@@ -228,6 +364,26 @@ function normalizeAnswer(value: unknown): Answer {
   };
 }
 
+function recordToTurns(message: ConversationMessage): Turn[] {
+  return [
+    {
+      id: `${message.id}-user`,
+      role: "user",
+      question: message.question,
+    },
+    {
+      id: `${message.id}-assistant`,
+      role: "assistant",
+      answer: normalizeAnswer(message.answer),
+      answerId: message.id,
+    },
+  ];
+}
+
+function conversationDisplayTitle(conversation: Conversation | null): string {
+  return conversation?.title?.trim() || "New chat";
+}
+
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   if (!children) return null;
   return (
@@ -251,14 +407,24 @@ const noopSubscribe = () => () => {};
 export function VoiceTutor({
   initialFileId,
   initialFileName,
+  initialConversation,
+  initialMessages = [],
+  initialConversationError = "",
+  files = [],
+  notes = [],
 }: {
   initialFileId?: string | null;
   initialFileName?: string | null;
+  initialConversation?: Conversation | null;
+  initialMessages?: ConversationMessage[];
+  initialConversationError?: string | null;
+  files?: FileOption[];
+  notes?: NoteOption[];
 }) {
   const [language, setLanguage] = useState<string>("auto");
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState("");
-  const [turns, setTurns] = useState<Turn[]>([]);
+  const [turns, setTurns] = useState<Turn[]>(() => initialMessages.flatMap((message) => recordToTurns(message)));
   const [loading, setLoading] = useState(false);
   const [searching, setSearching] = useState(false);
   const [activeSearchQuery, setActiveSearchQuery] = useState("");
@@ -272,15 +438,40 @@ export function VoiceTutor({
   const [speaking, setSpeaking] = useState(false);
   const [hasSpokenText, setHasSpokenText] = useState(false);
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState(initialConversationError ?? "");
+  const [conversation, setConversation] = useState<Conversation | null>(initialConversation ?? null);
+  const [conversationId, setConversationId] = useState<string | null>(initialConversation?.id ?? null);
+  const [contextMode, setContextMode] = useState<ContextMode>(initialConversation?.context_mode ?? "general");
+  const [activeFileIds, setActiveFileIds] = useState<string[]>(initialConversation?.active_file_ids ?? []);
+  const [activeNoteIds, setActiveNoteIds] = useState<string[]>(initialConversation?.active_note_ids ?? []);
 
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
-  const silenceTimerRef = useRef<number | null>(null);
+  const silenceTimerRef = useRef<RecordingSilenceTimer | null>(null);
+  const recognitionCleanupRef = useRef<(() => void) | null>(null);
+  const askAbortRef = useRef<AbortController | null>(null);
   const searchAbortRef = useRef<AbortController | null>(null);
   const researchAbortRef = useRef<AbortController | null>(null);
   const diagramAbortRef = useRef<AbortController | null>(null);
   const lastSpokenTextRef = useRef<string>("");
   const turnCounterRef = useRef(0);
+  // Voice-turn epoch: every accepted final transcript or new AI request
+  // bumps this. Async callbacks capture the epoch at issue time and refuse
+  // to apply their results if it has advanced (a newer voice turn superseded
+  // them). This prevents a late /api/ai/ask response from appending old
+  // PDF/previous-answer content after a newer pure greeting.
+  const voiceTurnEpochRef = useRef(0);
+  // Per-recognition-session guard: each startListening instance gets a unique
+  // token. onend checks the token before dispatching handleSpokenText so a
+  // duplicate onend (or a stale recognition from a previous mic session)
+  // cannot re-process the same transcript. A handled-transcript set, scoped
+  // to the single session, blocks duplicate final events for identical text
+  // without ever blocking the same words spoken in a later session.
+  const recognitionSessionRef = useRef<{ token: number; handled: Set<string> } | null>(null);
+  const loadedAssistantIdsRef = useRef<Set<string>>(new Set(initialMessages.map((message) => message.id)));
+  const titledConversationIdsRef = useRef<Set<string>>(
+    new Set(initialConversation?.title ? [initialConversation.id] : []),
+  );
+  const requestIdRef = useRef<string>("");
 
   const recognitionSupported = useSyncExternalStore(
     noopSubscribe,
@@ -294,14 +485,43 @@ export function VoiceTutor({
   );
 
   const activeLanguage = useMemo(() => findVoiceLanguage(language), [language]);
+  const fileNamesById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const file of files) map.set(file.id, file.file_name);
+    if (initialFileId && initialFileName) map.set(initialFileId, initialFileName);
+    return map;
+  }, [files, initialFileId, initialFileName]);
+  const noteNamesById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const note of notes) map.set(note.id, note.title ?? note.topic ?? "Manual note");
+    return map;
+  }, [notes]);
+  const activeContextNames = useMemo(
+    () => [
+      ...activeFileIds.map((id) => fileNamesById.get(id) ?? "File"),
+      ...activeNoteIds.map((id) => noteNamesById.get(id) ?? "Manual note"),
+    ].slice(0, 4),
+    [activeFileIds, activeNoteIds, fileNamesById, noteNamesById],
+  );
+  const activeContextText = activeContextLabel(contextMode, activeContextNames);
+  const contextFileForCommands =
+    (contextMode === "file" || contextMode === "image" ? activeFileIds[0] : null) ?? initialFileId ?? null;
+  const contextFileNameForCommands =
+    (contextFileForCommands ? fileNamesById.get(contextFileForCommands) : null) ?? initialFileName ?? null;
+  const studyFileIds =
+    contextMode === "file" || contextMode === "image" ? activeFileIds : [];
+  const studyNoteIds =
+    contextMode === "file" || contextMode === "image" ? activeNoteIds : [];
 
   // Stop any active recognition/synthesis when the component unmounts.
   useEffect(() => {
     return () => {
       if (silenceTimerRef.current !== null) {
-        window.clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current.dispose();
         silenceTimerRef.current = null;
       }
+      recognitionCleanupRef.current?.();
+      recognitionCleanupRef.current = null;
       const active = recognitionRef.current;
       if (active) {
         try {
@@ -317,6 +537,8 @@ export function VoiceTutor({
           // Ignore cancel errors on unmount.
         }
       }
+      askAbortRef.current?.abort();
+      askAbortRef.current = null;
       searchAbortRef.current?.abort();
       searchAbortRef.current = null;
       researchAbortRef.current?.abort();
@@ -341,50 +563,176 @@ export function VoiceTutor({
     return `${prefix}-${turnCounterRef.current}`;
   }
 
+  // Normalize a final transcript the same way voiceCommands.normalize does,
+  // so per-session deduplication compares a stable lowercase, punctuation-free
+  // form. Whitespace is collapsed so "hi" vs " hi " vs "hi!" are not treated
+  // as distinct duplicates.
+  function normalizeTranscriptForDedup(text: string): string {
+    return text
+      .normalize("NFKC")
+      .toLocaleLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  // Bump the voice-turn epoch so any in-flight async result (AI ask, web
+  // search, research, diagram) issued under a prior epoch is ignored when it
+  // resolves. Returns the new epoch so a caller that continues with async
+  // work can capture and verify it locally.
+  function invalidateVoiceTurnEpoch(): number {
+    voiceTurnEpochRef.current += 1;
+    return voiceTurnEpochRef.current;
+  }
+
+  // Abort and clear the /api/ai/ask controller (and its loading flag) without
+  // touching unrelated abort refs/flags. Used by the greeting path so a
+  // late-resolving prior AI request cannot append old PDF/previous-answer
+  // content after a newer greeting reply.
+  function abortActiveAskRequest() {
+    const active = askAbortRef.current;
+    if (!active) return;
+    askAbortRef.current = null;
+    active.abort();
+    setLoading(false);
+  }
+
+  async function ensureConversationForQuestion(question: string) {
+    if (conversationId && conversation) return conversation;
+
+    const title = shortTitleFromQuestion(question);
+    const result = await createConversation({
+      title: title ?? undefined,
+      contextMode: "general",
+      activeFileIds: [],
+      activeNoteIds: [],
+    });
+    if (!result.ok) throw new Error(result.message);
+
+    setConversation(result.conversation);
+    setConversationId(result.conversation.id);
+    setContextMode(result.conversation.context_mode);
+    setActiveFileIds(result.conversation.active_file_ids ?? []);
+    setActiveNoteIds(result.conversation.active_note_ids ?? []);
+    if (title) titledConversationIdsRef.current.add(result.conversation.id);
+    return result.conversation;
+  }
+
+  async function maybeAutoTitleConversation(id: string | null, question: string) {
+    if (!id || titledConversationIdsRef.current.has(id)) return;
+    if (conversation?.title) {
+      titledConversationIdsRef.current.add(id);
+      return;
+    }
+    const title = shortTitleFromQuestion(question);
+    if (!title) return;
+    titledConversationIdsRef.current.add(id);
+    const result = await patchConversation(id, { title });
+    if (result.ok) setConversation(result.conversation);
+  }
+
+  async function touchConversationUpdatedAt(id: string | null) {
+    if (!id) return;
+    const result = await patchConversation(id, { title: conversation?.title ?? null });
+    if (result.ok) setConversation(result.conversation);
+  }
+
   // -------------------------------------------------------------------------
   // Ask the existing StudyPilot chat API (declared before the mic handler so
   // there is no forward reference)
   // -------------------------------------------------------------------------
 
-  async function askStudyPilot(displayQuestion: string, resolvedQuestion: string) {
+  async function askStudyPilot(displayQuestion: string) {
     setError("");
+    setNotice("");
+
+    // This is a new voice turn. Invalidate any older async work first so a
+    // late-resolving prior request cannot append stale content. Abort the
+    // active controller (if any) before issuing the new one.
+    const epoch = invalidateVoiceTurnEpoch();
+    abortActiveAskRequest();
+
     setLoading(true);
     setTurns((current) => [...current, { id: nextTurnId("user"), role: "user", question: displayQuestion }]);
 
-    // Wrap the question so the AI answers in the same language style.
-    const localized = withLanguageStyle(resolvedQuestion, activeLanguage.languageName);
+    const controller = new AbortController();
+    askAbortRef.current = controller;
 
     try {
+      const activeConversation = await ensureConversationForQuestion(displayQuestion);
       const response = await fetch("/api/ai/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          question: localized,
-          ...(initialFileId ? { fileIds: [initialFileId] } : {}),
+          question: displayQuestion,
+          fileIds: studyFileIds,
+          noteIds: studyNoteIds,
+          conversationId: activeConversation.id,
         }),
+        signal: controller.signal,
       });
 
       const data = await response.json();
       if (!response.ok) throw new Error(data?.error || "AI request failed.");
 
+      // ── Stale-response guard ────────────────────────────────────────────
+      // If a newer voice turn has superseded this one (e.g. a pure greeting
+      // arrived while this request was in flight, or a second mic session
+      // accepted a new question), do NOT append the (now stale) AI answer.
+      // The abort signal normally fires first, but on some browsers a fetch
+      // can resolve just before AbortError propagates, so we verify the
+      // epoch explicitly. Also confirm the controller is still active so a
+      // stop-activity call followed by a new turn behaves correctly.
+      const stillActive =
+        askAbortRef.current === controller && voiceTurnEpochRef.current === epoch;
+      if (!stillActive) return;
+
       const answer = normalizeAnswer({
         ...(data.chat?.answer ?? {}),
         response_mode: data.mode ?? data.chat?.answer?.response_mode,
       });
+      const answerId = typeof data.chat?.id === "string" ? data.chat.id : undefined;
 
-      setTurns((current) => [
-        ...current,
-        {
-          id: nextTurnId("assistant"),
-          role: "assistant",
-          answer,
-          answerId: typeof data.chat?.id === "string" ? data.chat.id : undefined,
-        },
-      ]);
+      // Re-verify after resolve/json — a concurrent turn could have advanced
+      // the epoch during the await before the stale check above ran. The
+      // controller check above already short-circuits the common case.
+      if (askAbortRef.current !== controller || voiceTurnEpochRef.current !== epoch) {
+        return;
+      }
+
+      if (answerId && !loadedAssistantIdsRef.current.has(answerId)) {
+        loadedAssistantIdsRef.current.add(answerId);
+        setTurns((current) => [
+          ...current,
+          {
+            id: `${answerId}-assistant`,
+            role: "assistant",
+            answer,
+            answerId,
+          },
+        ]);
+      } else if (!answerId) {
+        setTurns((current) => [
+          ...current,
+          {
+            id: nextTurnId("assistant"),
+            role: "assistant",
+            answer,
+          },
+        ]);
+      }
+
+      void maybeAutoTitleConversation(activeConversation.id, displayQuestion);
+      void touchConversationUpdatedAt(activeConversation.id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "AI request failed. Please try again.");
+      if (!isAbortError(err) && voiceTurnEpochRef.current === epoch) {
+        setError(err instanceof Error ? err.message : "AI request failed. Please try again.");
+      }
     } finally {
-      setLoading(false);
+      if (askAbortRef.current === controller && voiceTurnEpochRef.current === epoch) {
+        askAbortRef.current = null;
+        setLoading(false);
+      }
     }
   }
 
@@ -551,6 +899,45 @@ export function VoiceTutor({
     addSystemTurn(message);
   }
 
+  function stopActiveRequest() {
+    let stopped = false;
+
+    if (askAbortRef.current) {
+      askAbortRef.current.abort();
+      askAbortRef.current = null;
+      setLoading(false);
+      stopped = true;
+    }
+    if (searchAbortRef.current) {
+      searchAbortRef.current.abort();
+      searchAbortRef.current = null;
+      setSearching(false);
+      setActiveSearchQuery("");
+      stopped = true;
+    }
+    if (researchAbortRef.current) {
+      researchAbortRef.current.abort();
+      researchAbortRef.current = null;
+      setResearching(false);
+      setActiveResearchQuery("");
+      setResearchProgressIndex(0);
+      stopped = true;
+    }
+    if (diagramAbortRef.current) {
+      diagramAbortRef.current.abort();
+      diagramAbortRef.current = null;
+      setVisualizing(false);
+      setActiveDiagramPrompt("");
+      stopped = true;
+    }
+
+    if (stopped) {
+      const message = "Current StudyPilot action stopped.";
+      setNotice(message);
+      addSystemTurn(message);
+    }
+  }
+
   function addSystemTurn(text: string) {
     setTurns((current) => [...current, { id: nextTurnId("system"), role: "system", text }]);
   }
@@ -652,28 +1039,28 @@ export function VoiceTutor({
     }
 
     if (source === "file") {
-      if (!initialFileId) return { error: "No uploaded file is selected for this diagram." };
+      if (!contextFileForCommands) return { error: "No uploaded file is selected for this diagram." };
       return {
-        request: { diagramType, sourceType: "file", fileId: initialFileId },
-        label: "the selected uploaded file",
+        request: { diagramType, sourceType: "file", fileId: contextFileForCommands },
+        label: contextFileNameForCommands ?? "the selected uploaded file",
       };
     }
 
     if (source === "summary") {
-      if (!initialFileId) return { error: "No file is selected, so StudyPilot cannot find its saved summary." };
+      if (!contextFileForCommands) return { error: "No file is selected, so StudyPilot cannot find its saved summary." };
       return {
-        request: { diagramType, sourceType: "summary", fileId: initialFileId },
-        label: "the saved summary for the selected file",
+        request: { diagramType, sourceType: "summary", fileId: contextFileForCommands },
+        label: contextFileNameForCommands ? `the saved summary for ${contextFileNameForCommands}` : "the saved summary for the selected file",
       };
     }
 
     const latestAssistant = latestAssistantDiagramSource(diagramType);
     if (latestAssistant) return latestAssistant;
 
-    if (source === "auto" && initialFileId) {
+    if (source === "auto" && contextFileForCommands) {
       return {
-        request: { diagramType, sourceType: "file", fileId: initialFileId },
-        label: "the selected uploaded file",
+        request: { diagramType, sourceType: "file", fileId: contextFileForCommands },
+        label: contextFileNameForCommands ?? "the selected uploaded file",
       };
     }
 
@@ -701,25 +1088,25 @@ export function VoiceTutor({
       }
       payload.sourceType = "answer";
       payload.answerId = latestAnswer.answerId;
-      if (initialFileId) payload.fileId = initialFileId;
+      if (contextFileForCommands) payload.fileId = contextFileForCommands;
     } else if (source === "summary") {
-      if (!initialFileId) {
+      if (!contextFileForCommands) {
         const message = "No file is selected, so StudyPilot cannot find a saved summary for this command.";
         setNotice(message);
         addSystemTurn(message);
         return;
       }
       payload.sourceType = "summary";
-      payload.fileId = initialFileId;
+      payload.fileId = contextFileForCommands;
     } else {
-      if (!initialFileId) {
+      if (!contextFileForCommands) {
         const message = "Ask a question or select an uploaded file before creating notes.";
         setNotice(message);
         addSystemTurn(message);
         return;
       }
       payload.sourceType = "file";
-      payload.fileId = initialFileId;
+      payload.fileId = contextFileForCommands;
     }
 
     setNotesLoading(true);
@@ -837,6 +1224,14 @@ export function VoiceTutor({
 
     // A greeting/social phrase — show inline reply, no API call.
     if (resolved.kind === "command" && resolved.outcome.kind === "greeting") {
+      // A pure greeting supersedes any in-flight /api/ai/ask request: bump the
+      // voice-turn epoch and abort the active controller so a late AI response
+      // carrying old PDF/previous-answer content cannot append after this
+      // short greeting reply. Clearing loading is safe here because no other
+      // turn is now driving that flag.
+      invalidateVoiceTurnEpoch();
+      abortActiveAskRequest();
+
       const { reply } = resolved.outcome;
       setTurns((current) => [
         ...current,
@@ -849,7 +1244,7 @@ export function VoiceTutor({
 
     // A documented "ask" command resolves to a fixed study question.
     if (resolved.kind === "command" && resolved.outcome.kind === "ask") {
-      await askStudyPilot(spoken, resolved.outcome.question);
+      await askStudyPilot(spoken);
       return;
     }
 
@@ -932,7 +1327,7 @@ export function VoiceTutor({
     // Anything else is a free-form study question -> chat API as-is.
     if (resolved.kind === "question") {
       const freeQuestion = resolved.question.trim();
-      if (freeQuestion) await askStudyPilot(spoken, freeQuestion);
+      if (freeQuestion) await askStudyPilot(spoken);
     }
   }
 
@@ -942,13 +1337,18 @@ export function VoiceTutor({
 
   function clearSilenceTimer() {
     if (silenceTimerRef.current !== null) {
-      window.clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current.dispose();
       silenceTimerRef.current = null;
     }
   }
 
   function stopListening() {
     clearSilenceTimer();
+    recognitionCleanupRef.current?.();
+    recognitionCleanupRef.current = null;
+    // Invalidate this recognition session so a duplicate/late onend cannot
+    // dispatch handleSpokenText after a manual stop.
+    recognitionSessionRef.current = null;
     const active = recognitionRef.current;
     if (active) {
       try {
@@ -962,8 +1362,17 @@ export function VoiceTutor({
   }
 
   function startListening() {
+    const currentRequestId = generateRequestId();
+    requestIdRef.current = currentRequestId;
+    if (isDev()) {
+      console.log(`[voice-telemetry] ${currentRequestId} | REQUEST_START`);
+    }
     setError("");
     setNotice("");
+
+    if (speaking) {
+      stopSpeaking();
+    }
 
     if (loading || notesLoading || searching || researching || visualizing) {
       setNotice("Please wait for the current StudyPilot action to finish before listening again.");
@@ -988,30 +1397,75 @@ export function VoiceTutor({
     // browser language instead of assigning an empty SpeechRecognition lang.
     recognition.lang = activeLanguage.recognitionLocale || window.navigator.language || "en-US";
     recognition.interimResults = true;
-    recognition.continuous = false;
+    recognition.continuous = true;
     recognition.maxAlternatives = 1;
+
+    // ── Per-session guard ──────────────────────────────────────────────────
+    // A unique token identifies this mic instance. onend checks it before
+    // dispatching handleSpokenText so a duplicate onend (or one from a stale,
+    // prior session that fired after a new session already started) is
+    // ignored. A handled-set, scoped to this single session, blocks the same
+    // normalized final transcript from being processed twice. The set lives
+    // only here, so a user may legitimately say the same phrase again later
+    // in a new mic session — it is never globally blocked.
+    const sessionToken = (recognitionSessionRef.current?.token ?? 0) + 1;
+    const handled = new Set<string>();
+    recognitionSessionRef.current = { token: sessionToken, handled };
 
     let finalTranscript = "";
     let latestTranscript = "";
     let recognitionHadError = false;
+    let hasDispatchedFinal = false;
 
-    // Silence timeout: if no final speech arrives within 12 s, stop cleanly.
-    // Cleared on the first final result, manual stop, error, and unmount.
-    const SILENCE_TIMEOUT_MS = 12_000;
-    silenceTimerRef.current = window.setTimeout(() => {
-      silenceTimerRef.current = null;
-      // Only stop if this recognition session is still active.
-      if (recognitionRef.current === recognition) {
+    const silenceTimer = new RecordingSilenceTimer({
+      silenceMs: VOICE_RECORDING_SILENCE_MS,
+      onSilence: () => {
+        if (recognitionRef.current !== recognition) return;
         try {
           recognition.stop();
         } catch {
-          // Ignore — browser may have already ended the session.
+          // Ignore stop errors; the browser may have already ended.
         }
+      },
+    });
+    silenceTimerRef.current = silenceTimer;
+
+    function cleanupRecognitionListeners() {
+      silenceTimer.dispose();
+      if (silenceTimerRef.current === silenceTimer) silenceTimerRef.current = null;
+      recognition.onstart = null;
+      recognition.onresult = null;
+      recognition.onerror = null;
+      recognition.onend = null;
+      recognition.onaudiostart = null;
+      recognition.onaudioend = null;
+      recognition.onsoundstart = null;
+      recognition.onsoundend = null;
+      recognition.onspeechstart = null;
+      recognition.onspeechend = null;
+      if (recognitionCleanupRef.current === cleanupRecognitionListeners) {
+        recognitionCleanupRef.current = null;
       }
-    }, SILENCE_TIMEOUT_MS);
+    }
+    recognitionCleanupRef.current = cleanupRecognitionListeners;
 
     recognition.onstart = () => {
+      telemetryStartStage(currentRequestId, "speech_start");
       setListening(true);
+      silenceTimer.start();
+    };
+
+    recognition.onaudiostart = () => silenceTimer.speechActivity();
+    recognition.onsoundstart = () => silenceTimer.speechStart();
+    recognition.onspeechstart = () => silenceTimer.speechStart();
+    recognition.onspeechend = () => {
+      telemetryEndStage(currentRequestId, "speech_end");
+      silenceTimer.speechEnd();
+    };
+    recognition.onsoundend = () => silenceTimer.speechEnd();
+    recognition.onaudioend = () => {
+      if (latestTranscript) silenceTimer.speechEnd();
+      else silenceTimer.speechActivity();
     };
 
     recognition.onresult = (event) => {
@@ -1022,18 +1476,19 @@ export function VoiceTutor({
         const transcript = result[0]?.transcript ?? "";
         if (result.isFinal) {
           finalTranscript = `${finalTranscript} ${transcript}`.trim();
-          // Final speech received — silence timer no longer needed.
-          clearSilenceTimer();
         } else {
           interimText = `${interimText} ${transcript}`.trim();
         }
       }
       latestTranscript = [finalTranscript, interimText].filter(Boolean).join(" ").trim();
+      // Interim transcripts are shown live but never persisted — only the
+      // final transcript is dispatched onend.
       setInterim(latestTranscript);
+      if (latestTranscript) silenceTimer.speechActivity();
     };
 
     recognition.onerror = (event) => {
-      clearSilenceTimer();
+      cleanupRecognitionListeners();
       recognitionHadError = true;
       const code = event.error ?? "";
       if (code === "not-allowed" || code === "service-not-allowed") {
@@ -1050,19 +1505,48 @@ export function VoiceTutor({
       setListening(false);
       setInterim("");
       recognitionRef.current = null;
+      // Drop the session token so a subsequent onend for this session is
+      // not mistaken for a valid dispatch.
+      recognitionSessionRef.current = null;
     };
 
     recognition.onend = () => {
-      clearSilenceTimer();
+      cleanupRecognitionListeners();
       setListening(false);
       recognitionRef.current = null;
 
-      if (recognitionHadError) return;
+      // Per-session guard: ignore a duplicate onend (some browsers fire it
+      // twice for a single session) or an onend from a prior session that
+      // fired after a new mic session began. Verifying the token ensures only
+      // the live session's final dispatch runs.
+      const session = recognitionSessionRef.current;
+      if (!session || session.token !== sessionToken || recognitionHadError) {
+        return;
+      }
 
-      const spoken = latestTranscript.trim() || finalTranscript.trim();
+      // Dispatch handleSpokenText exactly once per session. A browser that
+      // calls onend a second time for the same "hi" cannot append a second
+      // greeting turn, and a brand-new session gets a fresh session object so
+      // the same words spoken legitimately later are not globally blocked.
+      if (hasDispatchedFinal) {
+        return;
+      }
+      hasDispatchedFinal = true;
+
+      const spoken = finalTranscript.trim();
       setInterim("");
       if (spoken) {
-        void handleSpokenText(spoken);
+        telemetryEndStage(currentRequestId, "final_transcript");
+        // Final-transcript duplicate protection within this single session:
+        // if a browser emits two final events for identical text, the second
+        // normalized form already exists in `handled` and is skipped. The set
+        // is per-session, so this never blocks the same phrase in a later
+        // mic session.
+        const dedupKey = normalizeTranscriptForDedup(spoken);
+        if (dedupKey && !handled.has(dedupKey)) {
+          handled.add(dedupKey);
+          void handleSpokenText(spoken);
+        }
       } else {
         setError("I did not catch that. Tap Start listening and try again.");
       }
@@ -1072,10 +1556,11 @@ export function VoiceTutor({
       recognition.start();
       recognitionRef.current = recognition;
     } catch {
-      clearSilenceTimer();
+      cleanupRecognitionListeners();
       setError("Could not start the microphone. Please try again.");
       setListening(false);
       recognitionRef.current = null;
+      recognitionSessionRef.current = null;
     }
   }
 
@@ -1221,9 +1706,20 @@ export function VoiceTutor({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="inline-flex min-w-0 items-center gap-2 self-start rounded-md border border-white/10 bg-[#09111f]/80 px-3 py-2 text-xs text-slate-400">
           <IconFileText size={15} className="shrink-0 text-slate-300" />
-          <span className="shrink-0">Default file context</span>
-          <span className="truncate font-semibold text-emerald-300">{initialFileName ?? "No file selected"}</span>
+          <span className="shrink-0">Active context</span>
+          <span className="truncate font-semibold text-emerald-300">{activeContextText}</span>
         </div>
+
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          {conversationId ? (
+            <Link
+              href={`/chat?conversationId=${encodeURIComponent(conversationId)}`}
+              className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-emerald-300/25 bg-emerald-300/10 px-3 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-300/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/40"
+            >
+              <IconChat size={14} />
+              Return to AI Chat
+            </Link>
+          ) : null}
 
         <div className="flex w-full items-center justify-between gap-4 rounded-lg border border-white/10 bg-[#09111f]/90 px-4 py-3 shadow-lg shadow-black/20 sm:w-56">
           <div>
@@ -1246,6 +1742,7 @@ export function VoiceTutor({
               />
             ))}
           </div>
+        </div>
         </div>
       </div>
 
@@ -1318,8 +1815,13 @@ export function VoiceTutor({
           <IconMic size={17} />
           {listening ? "Listening..." : "Start listening"}
         </button>
-        <button type="button" onClick={stopListening} disabled={!listening} className={controlButtonClass}>
-          <IconStop size={16} /> Stop listening
+        <button
+          type="button"
+          onClick={listening ? stopListening : stopActiveRequest}
+          disabled={!listening && !working}
+          className={controlButtonClass}
+        >
+          <IconStop size={16} /> {listening ? "Stop listening" : "Stop activity"}
         </button>
         <button type="button" onClick={readAloud} disabled={ttsBlocked || !lastSpeakableAssistant || speaking || searching || researching || visualizing} className={controlButtonClass}>
           <IconVolume size={17} /> Read aloud
@@ -1390,7 +1892,7 @@ export function VoiceTutor({
         <header className="flex items-center justify-between gap-3 border-b border-white/8 px-4 py-3">
           <div className="flex items-center gap-2">
             <IconClock size={16} className="text-slate-300" />
-            <h2 className="text-sm font-semibold text-white">Recent conversations</h2>
+            <h2 className="text-sm font-semibold text-white">{conversationDisplayTitle(conversation)}</h2>
           </div>
           <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[11px] font-semibold text-slate-400">
             {turns.length} {turns.length === 1 ? "turn" : "turns"}

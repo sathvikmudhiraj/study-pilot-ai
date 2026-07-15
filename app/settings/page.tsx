@@ -14,7 +14,7 @@ export default async function SettingsPage() {
       </div>
       <div className="max-w-xl rounded-lg border border-white/10 bg-white/[0.04] p-6">
         <div className="text-sm text-slate-400">Email</div>
-        <div className="mt-1 font-medium text-white">{user?.email}</div>
+        <div className="mt-1 break-words font-medium text-white">{user?.email || "Email unavailable"}</div>
       </div>
     </AppShell>
   );

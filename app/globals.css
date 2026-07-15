@@ -110,6 +110,17 @@ select {
   to { opacity: 1; }
 }
 
+@keyframes dashboardStatusDotPulse {
+  0%, 100% {
+    opacity: 0.75;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+}
+
 @keyframes slideInRight {
   from {
     opacity: 0;
@@ -287,6 +298,10 @@ select {
 
 .animate-fade-in {
   animation: fadeIn 0.3s var(--animate-ease-out) both;
+}
+
+.animate-dashboard-status-dot {
+  animation: dashboardStatusDotPulse 2.4s ease-in-out infinite;
 }
 
 .animate-slide-in-right {

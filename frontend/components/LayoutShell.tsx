@@ -100,6 +100,15 @@ export function LayoutShell({
     return () => document.removeEventListener("keydown", handleKey);
   }, [drawerOpen, closeDrawer]);
 
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [drawerOpen]);
+
   return (
     <div className="min-h-screen overflow-x-hidden bg-[#070b14]">
       {/* ─── Desktop sidebar ─────────────────────────────────────────── */}
@@ -149,6 +158,7 @@ export function LayoutShell({
 
           {/* Drawer */}
           <div
+            id="mobile-navigation-drawer"
             ref={drawerRef}
             className="absolute inset-y-0 left-0 w-[280px] border-r border-white/[0.06] bg-slate-950 p-4 shadow-2xl shadow-black/50 animate-slide-in-left"
             role="dialog"
@@ -209,6 +219,8 @@ export function LayoutShell({
                 onClick={() => setDrawerOpen(true)}
                 className="grid h-10 w-10 shrink-0 place-items-center rounded-lg border border-white/10 bg-white/[0.04] text-slate-300 transition hover:bg-white/[0.08] hover:text-white lg:hidden"
                 aria-label="Open navigation menu"
+                aria-controls="mobile-navigation-drawer"
+                aria-expanded={drawerOpen}
               >
                 <IconMenu size={20} />
               </button>

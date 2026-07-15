@@ -14,6 +14,14 @@ export type StructuredChatAnswer = {
   practice_question: string;
   related_files_notes: string[];
   next_step: string;
+  learning_step?: {
+    current_step: number;
+    total_steps: number;
+    step_title: string;
+    session_status: "active" | "ended";
+    expects_answer?: boolean;
+    feedback?: "correct" | "incorrect" | null;
+  };
 };
 
 function devLog(message: string, details?: Record<string, unknown>) {
@@ -101,8 +109,32 @@ function validateAnswer(value: unknown): StructuredChatAnswer | null {
     next_step: textValue(record, "next_step", "nextStep", "next step"),
   };
 
+  const learningStep = normalizeLearningStep(record.learning_step ?? record.learningStep);
+  if (learningStep) answer.learning_step = learningStep;
+
   if (!answer.short_answer && !answer.simple_explanation) return null;
   return answer;
+}
+
+function normalizeLearningStep(value: unknown): StructuredChatAnswer["learning_step"] | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const totalRaw = Number(record.total_steps ?? record.totalSteps ?? 7);
+  const currentRaw = Number(record.current_step ?? record.currentStep ?? record.step ?? 1);
+  const total = Number.isFinite(totalRaw) ? Math.max(1, Math.min(12, Math.trunc(totalRaw))) : 7;
+  const current = Number.isFinite(currentRaw) ? Math.max(1, Math.min(total, Math.trunc(currentRaw))) : 1;
+  const title = textValue(record, "step_title", "stepTitle", "title") || `Step ${current}`;
+  const status = record.session_status === "ended" || record.sessionStatus === "ended" ? "ended" : "active";
+  const feedback = record.feedback === "correct" || record.feedback === "incorrect" ? record.feedback : null;
+
+  return {
+    current_step: current,
+    total_steps: total,
+    step_title: title,
+    session_status: status,
+    expects_answer: Boolean(record.expects_answer ?? record.expectsAnswer),
+    feedback,
+  };
 }
 
 function parseCandidate(json: string) {
@@ -226,4 +258,97 @@ ${question}`;
   }
 
   throw new Error("AI returned an answer format StudyPilot could not read. Please try again.");
+}
+
+export async function answerLearnStepByStep({
+  question,
+  context,
+}: {
+  question: string;
+  context: string;
+}) {
+  const prompt = `${STUDYPILOT_TUTOR_INSTRUCTION}
+
+You are running StudyPilot's "Learn Step by Step" chat mode.
+Teach interactively. Return exactly ONE learning step, not the full lesson.
+
+Learning path, always 7 steps:
+1. Topic introduction
+2. Core concept
+3. Simple example
+4. Worked example
+5. Practice question
+6. Mini quiz
+7. Summary
+
+Rules:
+- Infer the current step from the conversation history in STUDY CONTEXT.
+- If this is a new session, start at Step 1.
+- If the student asks "Next Step", advance by one step.
+- If the student asks "Previous Step", move back by one step.
+- If the student asks "Skip Step", advance by one step without judgment.
+- If the student asks "Explain Simpler", stay on the same step and simplify.
+- If the student asks "Give Another Example", stay on the same step and give a new example.
+- If the student asks "Quiz Me", ask one quiz/practice question for the current topic.
+- If the student asks "End Session", set session_status to "ended" and give a short wrap-up.
+- If the previous step asked a practice or quiz question and the latest message is the student's answer, evaluate it.
+- If the answer is incorrect, set feedback to "incorrect", explain again more simply, and do not reveal unrelated future answers.
+- If the answer is correct, set feedback to "correct" and invite the next step.
+- Never reveal quiz answers, answer keys, rubrics, or hidden correct options before the student submits an answer.
+- Preserve any selected file/note context. If context is weak, say so briefly and continue with general tutoring.
+- Keep the answer concise and friendly.
+
+Return strict JSON only. Do not include markdown outside JSON. The JSON shape must be:
+{
+  "short_answer": "string",
+  "simple_explanation": "string",
+  "step_by_step": ["string"],
+  "example": "string",
+  "memory_line": "string",
+  "common_mistake": "string",
+  "exam_viva_answer": "string",
+  "practice_question": "string",
+  "related_files_notes": ["string"],
+  "next_step": "string",
+  "learning_step": {
+    "current_step": 1,
+    "total_steps": 7,
+    "step_title": "Topic introduction",
+    "session_status": "active",
+    "expects_answer": false,
+    "feedback": null
+  }
+}
+
+STUDY CONTEXT AND CONVERSATION HISTORY:
+${context || "No readable user study context was found."}
+
+LATEST STUDENT MESSAGE:
+${question}`;
+
+  const response = await generateAIText(prompt, {
+    temperature: 0.25,
+    maxOutputTokens: 1800,
+    responseMimeType: "application/json",
+  });
+  devLog("Learn Step by Step response received", { rawLength: response.length });
+  const parsed = parseChatJson(response);
+  if (parsed?.learning_step) return parsed;
+
+  const fallback = fallbackAnswerFromText(response);
+  if (fallback) {
+    return {
+      ...fallback,
+      learning_step: {
+        current_step: 1,
+        total_steps: 7,
+        step_title: "Topic introduction",
+        session_status: "active" as const,
+        expects_answer: false,
+        feedback: null,
+      },
+    };
+  }
+
+  throw new Error("AI returned a learning step format StudyPilot could not read. Please try again.");
 }

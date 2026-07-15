@@ -9,6 +9,9 @@ import { supabaseSetupMessage } from "@/frontend/lib/supabase/errors";
 
 export const dynamic = "force-dynamic";
 
+const LIBRARY_FILE_LIMIT = 100;
+const LIBRARY_NOTE_LIMIT = 100;
+
 export default async function FilesPage() {
   const user = await getCurrentUser();
   const supabase = await createServerSupabaseClient();
@@ -19,12 +22,14 @@ export default async function FilesPage() {
             .from("files")
             .select("id, file_name, file_type, mime_type, file_size, processing_status, status, created_at")
             .eq("user_id", user.id)
-            .order("created_at", { ascending: false }),
+            .order("created_at", { ascending: false })
+            .limit(LIBRARY_FILE_LIMIT),
           supabase
             .from("notes")
             .select("id, title, topic, raw_notes, content, importance, source_type, metadata, file_id, key_link, note_date, created_at, updated_at")
             .eq("user_id", user.id)
-            .order("created_at", { ascending: false }),
+            .order("created_at", { ascending: false })
+            .limit(LIBRARY_NOTE_LIMIT),
         ])
       : [{ data: [] }, { data: [] }];
 

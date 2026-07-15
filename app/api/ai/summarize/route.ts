@@ -4,11 +4,13 @@ import {
   analyzeCnsCoverage,
   summarizeStudyText,
   validateCnsExtractionCoverage,
+  type StructuredSummary,
 } from "@/backend/lib/aiSummary";
 import { estimateChunks } from "@/backend/lib/pdfText";
 import { processStudyMaterial, type StudyPageMetadata } from "@/backend/lib/studyMaterial";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import {
+  getAIProviderRuntimeInfo,
   getAiUserMessage,
   isAiBusyError,
   isAiQuotaError,
@@ -17,6 +19,14 @@ import {
 } from "@/backend/lib/aiProvider";
 
 export const runtime = "nodejs";
+
+// Hard top-level guard for the entire summarize orchestration. Per-call
+// provider timeouts can stack across chunks, so we cap the whole job to keep
+// the file from being stranded in "summarizing" indefinitely. Slightly below
+// the platform/serverless ceiling so our finally block still gets to write a
+// terminal status before the function is killed.
+const SUMMARY_ORCHESTRATION_TIMEOUT_MS = 110_000;
+const SUMMARY_IN_PROGRESS_MESSAGE = "A summary is already being generated for this file. Please wait for it to finish.";
 
 type SummarizeBody = {
   fileId?: string;
@@ -43,6 +53,48 @@ function isDev() {
 function devLog(message: string, details?: Record<string, unknown>) {
   if (!isDev()) return;
   console.log(`[summarize] ${message}`, details ?? "");
+}
+
+type SummaryOutcome = "completed" | "failed" | "in-progress" | "deduplicated";
+type SummaryEvent = {
+  fileId?: string | null;
+  noteId?: string | null;
+  provider: string;
+  model: string;
+  fallbackProvider?: string | null;
+  fallbackModel?: string | null;
+  promptChars?: number;
+  chunkCount?: number;
+  retryCount?: number;
+  elapsedMs?: number;
+  status: SummaryOutcome;
+  error?: string;
+};
+
+// Production-visible structured log so summary hangs are observable regardless
+// of NODE_ENV. One line per summary job lifecycle event.
+function logSummaryEvent(event: SummaryEvent) {
+  const payload = {
+    scope: "summary",
+    fileId: event.fileId ?? null,
+    noteId: event.noteId ?? null,
+    provider: event.provider,
+    model: event.model,
+    fallbackProvider: event.fallbackProvider ?? null,
+    fallbackModel: event.fallbackModel ?? null,
+    promptChars: event.promptChars ?? null,
+    chunkCount: event.chunkCount ?? null,
+    retryCount: event.retryCount ?? null,
+    elapsedMs: event.elapsedMs ?? null,
+    status: event.status,
+    error: event.error ?? null,
+  };
+  if (isDev()) {
+    console.log(`[summarize] summary-event`, payload);
+  } else {
+    // Stable JSON line for log aggregation in production.
+    console.log(JSON.stringify(payload));
+  }
 }
 
 function errorResponse(message: string, status = 500, debug?: Record<string, unknown>) {
@@ -359,6 +411,31 @@ export async function POST(request: Request) {
       if (!file) return errorResponse("File not found.", 404, debug);
       sourceName = file.file_name;
 
+      // Duplicate-job guard: a second "Generate Summary" click on a file that
+      // is already being summarized must not kick off a second AI job. The
+      // status is the source of truth — if it is still "summarizing" from a
+      // prior in-flight request, return a 409 immediately, with the runtime
+      // info logged for observability. (Re-extraction sets "extracting" and is
+      // handled separately below.)
+      const currentStatus = file.processing_status;
+      if (!reextractOnly && currentStatus === "summarizing") {
+        const runtime = getAIProviderRuntimeInfo("summary");
+        logSummaryEvent({
+          fileId,
+          provider: runtime.configuredProvider,
+          model: runtime.primaryModel,
+          fallbackProvider: runtime.fallbackProvider,
+          fallbackModel: runtime.fallbackModel,
+          status: "deduplicated",
+        });
+        return NextResponse.json(
+          {
+            error: SUMMARY_IN_PROGRESS_MESSAGE,
+          },
+          { status: 409 },
+        );
+      }
+
       const storedText = (file.extracted_text ?? "").trim();
 
       let coverage = analyzeCnsCoverage(storedText);
@@ -577,14 +654,17 @@ export async function POST(request: Request) {
       devLog("source text resolved", { fileId, sourceOrigin, textLength: sourceText.length, chunkCount: estimateChunks(sourceText) });
 
       await updateFileStatus(supabase, { fileId: file.id, userId: user.id, values: { processing_status: "summarizing", status: "summarizing" } });
+      const runtimeInfo = getAIProviderRuntimeInfo("summary");
       devLog("summary provider/model started", {
         fileId,
         extractedTextLength: sourceText.length,
         chunkCount: estimateChunks(sourceText),
-        provider: process.env.SUMMARY_AI_PROVIDER || "auto",
-        geminiModel: process.env.GEMINI_MODEL || "gemini-2.5-flash",
-        nvidiaModel: process.env.SUMMARY_NVIDIA_MODEL || "z-ai/glm-5.2",
-        timeoutMs: Number(process.env.SUMMARY_AI_TIMEOUT_MS) || 120000,
+        provider: runtimeInfo.configuredProvider,
+        primaryModel: runtimeInfo.primaryModel,
+        fallbackProvider: runtimeInfo.fallbackProvider,
+        fallbackModel: runtimeInfo.fallbackModel,
+        timeoutMs: runtimeInfo.timeoutMs,
+        fastFallbackTimeoutMs: runtimeInfo.fastFallbackTimeoutMs,
       });
     }
 
@@ -608,23 +688,110 @@ export async function POST(request: Request) {
       return errorResponse("No readable text found in this file. Try another file or add manual notes.", 400, debug);
     }
 
-    const summary = await summarizeStudyText(sourceText, {
-      sourceId: sourceFileId ?? sourceNoteId ?? undefined,
-      sourceType: sourceFileId ? "file" : "note",
-      sourceName,
+    const chunkCount = estimateChunks(sourceText);
+    const runtimeInfo = getAIProviderRuntimeInfo("summary");
+    const summaryStartedAt = Date.now();
+    let orchestrationTimeoutFired = false;
+    let orchestrationAborted = false;
+
+    // Hard top-level timeout so a hung provider stack (Gemini fast-attempt +
+    // NVIDIA fallback + coverage retries stacked across N chunks) can never
+    // strand the file in "summarizing". The finally block below reconciles to
+    // a terminal state if the timer wins the race.
+    let orchestrationTimerId: ReturnType<typeof setTimeout> | undefined;
+    const orchestrationTimer = new Promise<never>((_, reject) => {
+      orchestrationTimerId = setTimeout(() => {
+        orchestrationTimeoutFired = true;
+        reject(new Error("Summary orchestration timed out."));
+      }, SUMMARY_ORCHESTRATION_TIMEOUT_MS);
     });
-    devLog("AI summarization complete", {
-      fileId: sourceFileId,
-      noteId: sourceNoteId,
-      sourceOrigin: debug.sourceOrigin ?? "note",
-      coveredTopicsCount: summary.covered_topics.length,
-    });
+
+    let summary: StructuredSummary;
+    try {
+      summary = await Promise.race([
+        summarizeStudyText(sourceText, {
+          sourceId: sourceFileId ?? sourceNoteId ?? undefined,
+          sourceType: sourceFileId ? "file" : "note",
+          sourceName,
+        }),
+        orchestrationTimer,
+      ]);
+      const elapsedMs = Date.now() - summaryStartedAt;
+      debug.summaryElapsedMs = elapsedMs;
+      debug.coveredTopicsCount = summary.covered_topics.length;
+      logSummaryEvent({
+        fileId: sourceFileId,
+        noteId: sourceNoteId,
+        provider: runtimeInfo.configuredProvider,
+        model: runtimeInfo.primaryModel,
+        fallbackProvider: runtimeInfo.fallbackProvider,
+        fallbackModel: runtimeInfo.fallbackModel,
+        promptChars: sourceText.length,
+        chunkCount,
+        elapsedMs,
+        status: "completed",
+      });
+      devLog("AI summarization complete", {
+        fileId: sourceFileId,
+        noteId: sourceNoteId,
+        sourceOrigin: debug.sourceOrigin ?? "note",
+        coveredTopicsCount: summary.covered_topics.length,
+        elapsedMs,
+      });
+    } catch (summaryError) {
+      orchestrationAborted = true;
+      const elapsedMs = Date.now() - summaryStartedAt;
+      const retryCount =
+        typeof (summaryError as { retries?: unknown })?.retries === "number"
+          ? Number((summaryError as { retries: number }).retries)
+          : 0;
+      logSummaryEvent({
+        fileId: sourceFileId,
+        noteId: sourceNoteId,
+        provider: runtimeInfo.configuredProvider,
+        model: runtimeInfo.primaryModel,
+        fallbackProvider: runtimeInfo.fallbackProvider,
+        fallbackModel: runtimeInfo.fallbackModel,
+        promptChars: sourceText.length,
+        chunkCount,
+        retryCount,
+        elapsedMs,
+        status: "failed",
+        error:
+          (orchestrationTimeoutFired ? "orchestration-timeout" : "") ||
+          (summaryError instanceof Error ? summaryError.message : "summary-failed"),
+      });
+      // Re-throw so the outer catch reconciles status to failed/extracted
+      // exactly like any other AI failure.
+      throw summaryError;
+    } finally {
+      // Clear the orchestration timer so it can never resolve/reject after we
+      // already settled (avoids an unhandled rejection on the success path).
+      if (orchestrationTimerId) clearTimeout(orchestrationTimerId);
+      // Terminal-state guarantee: no matter how we exit (timeout, error, or
+      // success), a file that is STILL recorded as "summarizing" gets pushed
+      // to a terminal state here. The success path overwrote it to
+      // "completed" already; this catches the abandoned/timeout case where
+      // the outer try hadn't run the success status write yet.
+      if (sourceFileId && orchestrationAborted) {
+        await updateFileStatus(supabase, {
+          fileId: sourceFileId,
+          userId: user.id,
+          values: { processing_status: "failed", status: "failed" },
+        });
+      }
+    }
     debug.coveredTopicsCount = summary.covered_topics.length;
 
     const existingQuery = supabase
       .from("ai_outputs")
       .select("id")
       .eq("user_id", user.id)
+      // Order by created_at desc so the row we update is the same row the
+      // file-detail RSC displays (which also orders by created_at desc).
+      // Without this, the lookup is non-deterministic and regeneration could
+      // update an older row while the UI reads a newer one.
+      .order("created_at", { ascending: false })
       .limit(1);
 
     const existing = sourceFileId
@@ -649,6 +816,10 @@ export async function POST(request: Request) {
     });
 
     if (sourceFileId) {
+      // A successful (even partial) regeneration completes the file's AI
+      // processing pipeline. Partial coverage is flagged on the saved summary
+      // row itself via the generation_metadata content blob; the file row's
+      // status remains "completed" so the user can still act on it.
       await updateFileStatus(supabase, {
         fileId: sourceFileId,
         userId: user.id,
@@ -656,8 +827,19 @@ export async function POST(request: Request) {
       });
     }
 
+    const generationMetadata = summary.generation_metadata;
+    const partialCoverage = Boolean(generationMetadata?.partialCoverage);
+    const notice = partialCoverage
+      ? `Partial summary saved: ${generationMetadata?.successfulChunks.length ?? 0} of ${generationMetadata?.attemptedChunks ?? 0} source sections processed. Some source sections were unavailable. Regenerate to retry the full module.`
+      : "";
+
     return NextResponse.json({
       summary: { ...(saved.data ?? {}), ...summary },
+      regenerationSucceeded: true,
+      staleSummary: false,
+      partialCoverage,
+      elapsedMs: typeof debug.summaryElapsedMs === "number" ? debug.summaryElapsedMs : undefined,
+      ...(notice ? { notice } : {}),
       ...(isDev() ? { debug } : {}),
     });
   } catch (error) {
@@ -669,20 +851,48 @@ export async function POST(request: Request) {
       noteId: sourceNoteId,
     });
     if (sourceFileId) {
-      const freshExtractionPreserved = debug.sourceOrigin === "fresh-extraction";
+      // Regeneration failed. Do NOT mark the file as "completed": this would
+      // mask the fact that the displayed summary is a stale saved row from a
+      // previous run. Keep it as "extracted" (a valid, supported status that
+      // also keeps the file eligible for the /api/revision route's
+      // ["completed","extracted"] filter) when there's any valid extraction to
+      // fall back to, otherwise "failed". We never overwrite the valid
+      // extracted_text — the catch block only writes status fields.
+      const fallbackStatus =
+        debug.sourceOrigin === "fresh-extraction" || savedSummaryExists
+          ? "extracted"
+          : "failed";
       await updateFileStatus(supabase, {
         fileId: sourceFileId,
         userId: user.id,
-        values: freshExtractionPreserved
-          ? { processing_status: "extracted", status: "extracted" }
-          : savedSummaryExists
-            ? { processing_status: "completed", status: "completed" }
-            : { processing_status: "failed", status: "failed" },
+        values: { processing_status: fallbackStatus, status: fallbackStatus },
       });
     }
-    return errorResponse(normalized, isAiBusyError(error) ? 503 : isAiQuotaError(error) ? 429 : 500, {
+    const status = isAiBusyError(error) ? 503 : isAiQuotaError(error) ? 429 : 500;
+    // When a saved summary already exists, the front-end must know it is
+    // showing a stale saved row, not a freshly generated one. Return:
+    // - staleSummary: true
+    // - regenerationSucceeded: false
+    // - a user-facing notice that labels the displayed summary as older.
+    if (savedSummaryExists) {
+      const staleNotice =
+        "Summary regeneration failed. The displayed summary is an older saved version.";
+      return NextResponse.json(
+        {
+          error: normalized,
+          notice: staleNotice,
+          staleSummary: true,
+          regenerationSucceeded: false,
+          ...(isDev() ? { debug, error: normalized } : {}),
+        },
+        { status },
+      );
+    }
+    return errorResponse(normalized, status, {
       ...debug,
       error: normalized,
+      staleSummary: false,
+      regenerationSucceeded: false,
     });
   }
 }
