@@ -1,4 +1,4 @@
-export const VOICE_RECORDING_SILENCE_MS = 12_000;
+export const VOICE_RECORDING_SILENCE_MS = 3_500;
 
 type RecordingSilenceTimerOptions = {
   silenceMs?: number;

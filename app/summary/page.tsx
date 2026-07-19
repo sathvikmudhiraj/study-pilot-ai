@@ -3,6 +3,7 @@ import { AppShell } from "@/frontend/components/AppShell";
 import { normalizeSourceCitations, SourceCitationChips } from "@/frontend/components/SourceCitationChips";
 import { getCurrentUser } from "@/backend/lib/auth";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
+import { sanitizeSummaryForDisplay } from "@/shared/summarySanitizer";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +33,16 @@ function summaryCitations(content: string | null) {
     return normalizeSourceCitations(parsed.source_citations);
   } catch {
     return [];
+  }
+}
+
+function contentSummary(content: string | null) {
+  if (!content) return null;
+  try {
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
   }
 }
 
@@ -94,8 +105,9 @@ export default async function SummaryPage() {
 
       <div className="grid gap-4">
         {summaries.map((summary) => {
+          const sanitized = sanitizeSummaryForDisplay({ ...(contentSummary(summary.content) ?? {}), ...summary });
           const title =
-            summary.suggested_title ||
+            sanitized.suggested_title ||
             (summary.file_id ? fileNames.get(summary.file_id) : null) ||
             (summary.note_id ? noteNames.get(summary.note_id) : null) ||
             "Study summary";
@@ -116,31 +128,31 @@ export default async function SummaryPage() {
                   </Link>
                 ) : null}
               </div>
-              {summary.short_summary ? <p className="mt-4 text-sm leading-6 text-slate-300">{summary.short_summary}</p> : null}
+              {sanitized.short_summary ? <p className="mt-4 text-sm leading-6 text-slate-300">{sanitized.short_summary}</p> : null}
               {citations.length ? (
                 <div className="mt-4">
                   <SourceCitationChips citations={citations} />
                 </div>
               ) : null}
-              {asList(summary.key_points).length ? (
+              {asList(sanitized.key_points).length ? (
                 <ul className="mt-4 grid gap-2 text-sm text-slate-400 md:grid-cols-2">
-                  {asList(summary.key_points).slice(0, 4).map((point) => (
+                  {asList(sanitized.key_points).slice(0, 4).map((point) => (
                     <li key={point} className="rounded-md border border-white/10 bg-slate-950/60 p-3">
                       {point}
                     </li>
                   ))}
                 </ul>
               ) : null}
-              {asList(summary.suggested_tags).length ? (
+              {asList(sanitized.suggested_tags).length ? (
                 <div className="mt-4 flex flex-wrap gap-2">
-                  {asList(summary.suggested_tags).map((tag) => (
+                  {asList(sanitized.suggested_tags).map((tag) => (
                     <span key={tag} className="rounded-md border border-white/10 bg-slate-950/70 px-2 py-1 text-xs text-slate-300">
                       {tag}
                     </span>
                   ))}
                 </div>
               ) : null}
-              {summary.suggested_next_step ? <p className="mt-4 text-sm leading-6 text-emerald-100">{summary.suggested_next_step}</p> : null}
+              {sanitized.suggested_next_step ? <p className="mt-4 text-sm leading-6 text-emerald-100">{sanitized.suggested_next_step}</p> : null}
             </article>
           );
         })}

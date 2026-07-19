@@ -64,7 +64,6 @@ import {
   telemetryStartStage,
   telemetryEndStage,
   telemetrySetMetadata,
-  telemetryRecordDuration,
 } from "@/frontend/lib/telemetry";
 import { WebCitationList } from "./WebCitationList";
 import { DeepResearchReport as DeepResearchReportView } from "./DeepResearchReport";
@@ -173,103 +172,6 @@ function stripUrlsForSpeech(text: string): string {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
-}
-
-// Development-only telemetry for measuring voice pipeline stages
-const VOICE_TELEMETRY_STAGES = [
-  "speech_start",
-  "speech_end",
-  "final_transcript",
-  "api_request_start",
-  "authentication",
-  "conversation_loading",
-  "message_loading",
-  "file_context_loading",
-  "prompt_building",
-  "ai_provider_request",
-  "ai_provider_response",
-  "response_parsing",
-  "database_persistence",
-  "ui_render",
-  "tts_start",
-] as const;
-
-type VoiceTelemetryStage = (typeof VOICE_TELEMETRY_STAGES)[number];
-
-interface VoiceTelemetryEntry {
-  stage: VoiceTelemetryStage;
-  startTime: number;
-  endTime: number;
-  durationMs: number;
-  requestId: string;
-}
-
-const voiceTelemetryBuffer: VoiceTelemetryEntry[] = [];
-
-function isDev(): boolean {
-  return process.env.NODE_ENV !== "production";
-}
-
-function recordTelemetryStage(stage: VoiceTelemetryStage, startTime: number, endTime: number, requestId: string): void {
-  if (!isDev()) return;
-  const durationMs = endTime - startTime;
-  voiceTelemetryBuffer.push({ stage, startTime, endTime, durationMs, requestId });
-  console.log(`[voice-telemetry] ${requestId} | ${stage}: ${durationMs.toFixed(2)}ms (start: ${startTime}, end: ${endTime})`);
-}
-
-function startTelemetryStage(stage: VoiceTelemetryStage, requestId: string): number {
-  const startTime = performance.now();
-  if (isDev()) {
-    console.log(`[voice-telemetry] ${requestId} | ${stage}: START`);
-  }
-  return startTime;
-}
-
-function endTelemetryStage(stage: VoiceTelemetryStage, startTime: number, requestId: string): number {
-  const endTime = performance.now();
-  recordTelemetryStage(stage, startTime, endTime, requestId);
-  return endTime;
-}
-
-function generateRequestId(): string {
-  return `req_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-}
-
-function printTelemetrySummary(): void {
-  if (!isDev() || voiceTelemetryBuffer.length === 0) return;
-  console.log(`[voice-telemetry] === SUMMARY (${voiceTelemetryBuffer.length} entries) ===`);
-  
-  const byStage = new Map<VoiceTelemetryStage, number[]>();
-  for (const entry of voiceTelemetryBuffer) {
-    if (!byStage.has(entry.stage)) byStage.set(entry.stage, []);
-    byStage.get(entry.stage)!.push(entry.durationMs);
-  }
-  
-  for (const [stage, durations] of byStage.entries()) {
-    const sorted = [...durations].sort((a, b) => a - b);
-    const avg = sorted.reduce((a, b) => a + b, 0) / sorted.length;
-    const min = sorted[0];
-    const max = sorted[sorted.length - 1];
-    const p95Index = Math.ceil(sorted.length * 0.95) - 1;
-    const p95 = sorted[Math.max(0, p95Index)];
-    console.log(`[voice-telemetry] ${stage}: avg=${avg.toFixed(2)}ms min=${min.toFixed(2)}ms max=${max.toFixed(2)}ms p95=${p95.toFixed(2)}ms (n=${sorted.length})`);
-  }
-  
-  // Find slowest stage overall
-  let slowestStage: VoiceTelemetryStage | null = null;
-  let slowestAvg = 0;
-  for (const [stage, durations] of byStage.entries()) {
-    const avg = durations.reduce((a, b) => a + b, 0) / durations.length;
-    if (avg > slowestAvg) {
-      slowestAvg = avg;
-      slowestStage = stage;
-    }
-  }
-  if (slowestStage) {
-    console.log(`[voice-telemetry] SLOWEST STAGE: ${slowestStage} (avg ${slowestAvg.toFixed(2)}ms)`);
-  }
-  
-  console.log(`[voice-telemetry] === END SUMMARY ===`);
 }
 
 function isContextualWebQuery(query: string): boolean {
@@ -645,6 +547,8 @@ export function VoiceTutor({
   async function askStudyPilot(displayQuestion: string) {
     setError("");
     setNotice("");
+    const requestId = requestIdRef.current;
+    let endTelemetryInFinally = Boolean(requestId);
 
     // This is a new voice turn. Invalidate any older async work first so a
     // late-resolving prior request cannot append stale content. Abort the
@@ -659,7 +563,11 @@ export function VoiceTutor({
     askAbortRef.current = controller;
 
     try {
+      telemetryStartStage(requestId, "conversation_loading");
       const activeConversation = await ensureConversationForQuestion(displayQuestion);
+      telemetryEndStage(requestId, "conversation_loading");
+
+      telemetryStartStage(requestId, "api_request_start");
       const response = await fetch("/api/ai/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -668,12 +576,21 @@ export function VoiceTutor({
           fileIds: studyFileIds,
           noteIds: studyNoteIds,
           conversationId: activeConversation.id,
+          deferPersistence: true,
         }),
         signal: controller.signal,
       });
+      telemetryEndStage(requestId, "api_request_start");
 
+      telemetryStartStage(requestId, "response_parsing");
       const data = await response.json();
+      telemetryEndStage(requestId, "response_parsing");
       if (!response.ok) throw new Error(data?.error || "AI request failed.");
+      telemetrySetMetadata(requestId, {
+        mode: "ask",
+        serverTimings: data?.debug?.timings ?? null,
+        responseMode: data?.mode ?? data?.chat?.answer?.response_mode ?? null,
+      });
 
       // ── Stale-response guard ────────────────────────────────────────────
       // If a newer voice turn has superseded this one (e.g. a pure greeting
@@ -722,6 +639,16 @@ export function VoiceTutor({
         ]);
       }
 
+      telemetryStartStage(requestId, "ui_render");
+      window.requestAnimationFrame(() => {
+        telemetryEndStage(requestId, "ui_render");
+        telemetryEndRequest(requestId, { completed: true });
+      });
+      endTelemetryInFinally = false;
+
+      const spokenAnswer = stripUrlsForSpeech(answerToSpokenText(answer));
+      if (spokenAnswer) speakText(spokenAnswer);
+
       void maybeAutoTitleConversation(activeConversation.id, displayQuestion);
       void touchConversationUpdatedAt(activeConversation.id);
     } catch (err) {
@@ -732,6 +659,9 @@ export function VoiceTutor({
       if (askAbortRef.current === controller && voiceTurnEpochRef.current === epoch) {
         askAbortRef.current = null;
         setLoading(false);
+      }
+      if (endTelemetryInFinally) {
+        telemetryEndRequest(requestId, { completed: false });
       }
     }
   }
@@ -1362,11 +1292,8 @@ export function VoiceTutor({
   }
 
   function startListening() {
-    const currentRequestId = generateRequestId();
+    const currentRequestId = telemetryStartRequest();
     requestIdRef.current = currentRequestId;
-    if (isDev()) {
-      console.log(`[voice-telemetry] ${currentRequestId} | REQUEST_START`);
-    }
     setError("");
     setNotice("");
 
@@ -1457,9 +1384,14 @@ export function VoiceTutor({
 
     recognition.onaudiostart = () => silenceTimer.speechActivity();
     recognition.onsoundstart = () => silenceTimer.speechStart();
-    recognition.onspeechstart = () => silenceTimer.speechStart();
+    recognition.onspeechstart = () => {
+      telemetryEndStage(currentRequestId, "speech_start");
+      telemetryStartStage(currentRequestId, "speech_end");
+      silenceTimer.speechStart();
+    };
     recognition.onspeechend = () => {
       telemetryEndStage(currentRequestId, "speech_end");
+      telemetryStartStage(currentRequestId, "final_transcript");
       silenceTimer.speechEnd();
     };
     recognition.onsoundend = () => silenceTimer.speechEnd();
@@ -1575,6 +1507,8 @@ export function VoiceTutor({
     }
     if (!text.trim()) return;
 
+    const requestId = requestIdRef.current;
+    telemetryStartStage(requestId, "tts_start");
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
     const voice = pickVoiceForLocale(activeLanguage.speechLocale);
@@ -1590,6 +1524,7 @@ export function VoiceTutor({
     setHasSpokenText(true);
     setSpeaking(true);
     window.speechSynthesis.speak(utterance);
+    telemetryEndStage(requestId, "tts_start");
   }
 
   function readAloud() {

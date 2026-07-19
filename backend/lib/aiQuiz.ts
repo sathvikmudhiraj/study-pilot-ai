@@ -32,6 +32,8 @@ export type QuizOptions = {
   count?: number;
   difficulty?: QuizDifficulty;
   questionTypes?: QuizQuestionType[];
+  focusTopics?: string[];
+  personalizationNote?: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -317,6 +319,7 @@ export async function generateQuiz(sourceText: string, options: QuizOptions = {}
   const count = clampCount(options.count ?? DEFAULT_QUESTION_COUNT);
   const difficulty = normalizeDifficulty(options.difficulty);
   const text = compactQuizContext((sourceText || "").trim(), MAX_TEXT_CHARS);
+  const focusTopics = uniqueStrings(options.focusTopics ?? [], 8);
 
   if (!text) {
     throw new Error("No readable text found to generate a quiz from. Try another file or add manual notes.");
@@ -340,6 +343,10 @@ Quiz requirements:
 - Each multiple-choice question has 2 to 4 options with exactly ONE correct option.
 - Each short-answer question has 1 to 5 acceptable answers.
 - Write a clear, student-friendly explanation for every question explaining why the correct answer is correct (and, for MCQs, why the others are wrong when useful).
+- Keep coverage balanced: about 70% of the quiz should test the overall chapter/module and about 30% may emphasize weak or focus topics.
+- Do not generate only from weak topics unless the source material itself is narrowly about those topics.
+${focusTopics.length ? `- Weak/focus topics for extra practice emphasis when present: ${focusTopics.join(", ")}.` : ""}
+${options.personalizationNote ? `- Personalization note: ${options.personalizationNote}` : ""}
 
 Return strict JSON only. Do not include markdown. The JSON shape must be:
 {

@@ -6,9 +6,19 @@ import {
   validateCnsExtractionCoverage,
   type StructuredSummary,
 } from "@/backend/lib/aiSummary";
+import { sanitizeSummaryForDisplay } from "@/shared/summarySanitizer";
 import { estimateChunks } from "@/backend/lib/pdfText";
+import {
+  buildDocumentProcessingMetadata,
+  buildGenerationCacheKey,
+  chunkDocument,
+  createProcessingProgress,
+  stableHash,
+  type DocumentProcessingMetadata,
+} from "@/backend/lib/documentProcessing";
 import { processStudyMaterial, type StudyPageMetadata } from "@/backend/lib/studyMaterial";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
+import { buildLearnerProfile, buildSummaryPersonalization } from "@/backend/lib/learnerProfile";
 import {
   getAIProviderRuntimeInfo,
   getAiUserMessage,
@@ -255,14 +265,35 @@ async function hasSavedSummary(
   return Boolean(result.data);
 }
 
+async function loadSummaryPersonalization(
+  supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>,
+  userId: string,
+) {
+  if (!supabase) return "";
+  const result = await supabase
+    .from("quiz_attempts")
+    .select("score, total_questions, percentage, weak_topics, strong_topics, topic_results, wrong_questions, created_at")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(100);
+
+  if (result.error) {
+    devLog("summary personalization skipped", { error: result.error.message });
+    return "";
+  }
+
+  return buildSummaryPersonalization(buildLearnerProfile(result.data ?? []));
+}
+
 type ReExtractOutcome =
-  | { ok: true; text: string; contentType: string; processingNotes: string[]; pageMetadata?: StudyPageMetadata }
+  | { ok: true; text: string; contentType: string; processingNotes: string[]; pageMetadata?: StudyPageMetadata; documentMetadata?: DocumentProcessingMetadata }
   | {
       ok: false;
       reason: "no-storage-path" | "download-failed" | "no-text";
       message: string;
       processingNotes: string[];
       pageMetadata?: StudyPageMetadata;
+      documentMetadata?: DocumentProcessingMetadata;
       details?: Record<string, unknown>;
     };
 
@@ -332,6 +363,7 @@ async function downloadAndReprocess(
         message: failureMessage,
         processingNotes: processed.processingNotes,
         pageMetadata: processed.pageMetadata,
+        documentMetadata: processed.documentMetadata,
         details: {
           contentType: processed.contentType,
           failureCode: processed.extractionFailure?.code ?? "insufficient",
@@ -345,6 +377,7 @@ async function downloadAndReprocess(
       contentType: processed.contentType,
       processingNotes: processed.processingNotes,
       pageMetadata: processed.pageMetadata,
+      documentMetadata: processed.documentMetadata,
     };
   } catch (error) {
     const normalized = normalizeError(error);
@@ -356,6 +389,19 @@ async function downloadAndReprocess(
       details: { failureCode: "processing" },
     };
   }
+}
+
+function metadataForSourceText(text: string, sourceId: string | null, stage: "extracted" | "generating" | "complete") {
+  const chunks = chunkDocument(text, { sourceId: sourceId ?? "summary-source", dedupe: true });
+  return buildDocumentProcessingMetadata({
+    text,
+    chunks,
+    progress: createProcessingProgress(stage === "complete" ? "complete" : stage, {
+      chunksProcessed: stage === "generating" ? 0 : chunks.length,
+      totalChunks: chunks.length,
+      cache: "miss",
+    }),
+  });
 }
 
 export async function POST(request: Request) {
@@ -526,6 +572,7 @@ export async function POST(request: Request) {
               status: savedSummaryExists ? "completed" : "failed",
               processing_notes: freshFailureNotes,
               extracted_metadata: {
+                ...(outcome.documentMetadata ?? {}),
                 ...(outcome.pageMetadata ?? {}),
                 processedAt: new Date().toISOString(),
                 extractionValidated: false,
@@ -557,6 +604,7 @@ export async function POST(request: Request) {
                 `Missing required topics: ${freshStrictCoverage.missingTopics.join(", ")}.`,
               ],
               extracted_metadata: {
+                ...(outcome.documentMetadata ?? {}),
                 ...(outcome.pageMetadata ?? {}),
                 processedAt: new Date().toISOString(),
                 extractionValidated: false,
@@ -610,6 +658,7 @@ export async function POST(request: Request) {
             content_type: outcome.contentType,
             processing_notes: extractedProcessingNotes,
             extracted_metadata: {
+              ...(outcome.documentMetadata ?? metadataForSourceText(sourceText, file.id, "extracted")),
               ...(outcome.pageMetadata ?? {}),
               extractedTextLength: sourceText.length,
               chunksCount: estimateChunks(sourceText),
@@ -646,7 +695,8 @@ export async function POST(request: Request) {
       } else {
         sourceText = storedText;
         debug.extractedTextLength = sourceText.length;
-        debug.chunkCount = estimateChunks(sourceText);
+        const storedChunks = chunkDocument(sourceText, { sourceId: file.id, dedupe: true });
+        debug.chunkCount = storedChunks.length;
       }
 
       debug.sourceOrigin = sourceOrigin;
@@ -691,6 +741,20 @@ export async function POST(request: Request) {
     const chunkCount = estimateChunks(sourceText);
     const runtimeInfo = getAIProviderRuntimeInfo("summary");
     const summaryStartedAt = Date.now();
+    const personalizationHint = await loadSummaryPersonalization(supabase, user.id);
+    const contentHash = stableHash(sourceText);
+    const summaryCacheKey = buildGenerationCacheKey({
+      fileId: sourceFileId,
+      noteId: sourceNoteId,
+      contentHash,
+      generationType: "summary",
+      provider: runtimeInfo.configuredProvider,
+      model: runtimeInfo.primaryModel,
+      promptVersion: "summary-v3-sanitized-hierarchical",
+      personalizationHash: stableHash(personalizationHint || "none"),
+    });
+    debug.personalizedSummary = Boolean(personalizationHint);
+    debug.summaryCacheKey = summaryCacheKey.slice(0, 12);
     let orchestrationTimeoutFired = false;
     let orchestrationAborted = false;
 
@@ -708,14 +772,15 @@ export async function POST(request: Request) {
 
     let summary: StructuredSummary;
     try {
-      summary = await Promise.race([
+      summary = sanitizeSummaryForDisplay(await Promise.race([
         summarizeStudyText(sourceText, {
           sourceId: sourceFileId ?? sourceNoteId ?? undefined,
           sourceType: sourceFileId ? "file" : "note",
           sourceName,
+          personalizationHint,
         }),
         orchestrationTimer,
-      ]);
+      ]));
       const elapsedMs = Date.now() - summaryStartedAt;
       debug.summaryElapsedMs = elapsedMs;
       debug.coveredTopicsCount = summary.covered_topics.length;
@@ -800,13 +865,15 @@ export async function POST(request: Request) {
 
     if (existing.error) throw existing.error;
 
+    const sanitizedSummary = sanitizeSummaryForDisplay(summary);
+
     const payload = {
       user_id: user.id,
       file_id: sourceFileId,
       note_id: sourceNoteId,
       output_type: "summary",
-      content: JSON.stringify(summary),
-      ...summary,
+      content: JSON.stringify(sanitizedSummary),
+      ...sanitizedSummary,
     };
 
     const saved = await saveSummaryOutput({
@@ -823,7 +890,12 @@ export async function POST(request: Request) {
       await updateFileStatus(supabase, {
         fileId: sourceFileId,
         userId: user.id,
-        values: { processing_status: "completed", status: "completed", chunks_count: estimateChunks(sourceText) },
+        values: {
+          processing_status: "completed",
+          status: "completed",
+          chunks_count: chunkDocument(sourceText, { sourceId: sourceFileId, dedupe: true }).length,
+          extracted_metadata: metadataForSourceText(sourceText, sourceFileId, "complete"),
+        },
       });
     }
 
@@ -834,7 +906,7 @@ export async function POST(request: Request) {
       : "";
 
     return NextResponse.json({
-      summary: { ...(saved.data ?? {}), ...summary },
+      summary: sanitizeSummaryForDisplay({ ...(saved.data ?? {}), ...sanitizedSummary }),
       regenerationSucceeded: true,
       staleSummary: false,
       partialCoverage,

@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/backend/lib/auth";
 import { buildAnswerKey, generateQuiz, type QuizDifficulty, type QuizQuestionType } from "@/backend/lib/aiQuiz";
+import { chunkDocument } from "@/backend/lib/documentProcessing";
 import { processStudyMaterial } from "@/backend/lib/studyMaterial";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { getAiUserMessage, isAiBusyError, isAiQuotaError } from "@/backend/lib/aiProvider";
 import { sanitizeQuizForClient } from "@/backend/lib/quizSecurity";
+import { buildLearnerProfile, buildPersonalizedQuizOptions } from "@/backend/lib/learnerProfile";
 
 export const runtime = "nodejs";
 
@@ -95,6 +97,40 @@ function uniqueInOrder<T>(values: T[]): T[] {
   return out;
 }
 
+function chapterCoverageText(text: string, fileId: string | null, maxChunks = 14) {
+  const chunks = chunkDocument(text, { sourceId: fileId ?? "quiz-source", dedupe: true });
+  if (chunks.length <= maxChunks) {
+    return { text, chunksCount: chunks.length, partialCoverage: false };
+  }
+
+  const selectedIndexes = new Set<number>();
+  const stride = Math.max(1, Math.floor(chunks.length / maxChunks));
+  for (let index = 0; index < chunks.length && selectedIndexes.size < maxChunks; index += stride) {
+    selectedIndexes.add(index);
+  }
+  selectedIndexes.add(chunks.length - 1);
+
+  const selected = [...selectedIndexes]
+    .sort((a, b) => a - b)
+    .slice(0, maxChunks)
+    .map((index) => chunks[index])
+    .filter(Boolean);
+
+  return {
+    text: [
+      `PROCESSING COVERAGE NOTICE: Quiz generation is using ${selected.length} representative chunks out of ${chunks.length} extracted document chunks to preserve broad chapter coverage within the AI budget.`,
+      ...selected.map((chunk) => {
+        const locator = chunk.startPage
+          ? `pages ${chunk.startPage}${chunk.endPage && chunk.endPage !== chunk.startPage ? `-${chunk.endPage}` : ""}`
+          : `chunk ${chunk.index + 1}`;
+        return `[${locator}]\n${chunk.text}`;
+      }),
+    ].join("\n\n"),
+    chunksCount: chunks.length,
+    partialCoverage: true,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Source resolution
 // ---------------------------------------------------------------------------
@@ -104,6 +140,8 @@ type SourceResolution = {
   fileId: string | null;
   noteId: string | null;
   summaryId: string | null;
+  chunksCount?: number;
+  partialCoverage?: boolean;
 };
 
 type SummaryRow = {
@@ -235,7 +273,15 @@ async function resolveSource(
       // Persist the recovered extraction for later use.
       await supabase
         .from("files")
-        .update({ extracted_text: text, processing_status: "extracted", status: "extracted" })
+        .update({
+          extracted_text: text,
+          processing_status: "extracted",
+          status: "extracted",
+          chunks_count: processed.chunksCount,
+          content_type: processed.contentType,
+          processing_notes: processed.processingNotes,
+          extracted_metadata: processed.documentMetadata,
+        })
         .eq("id", file.id)
         .eq("user_id", user.id);
     }
@@ -254,7 +300,15 @@ async function resolveSource(
       ].join("\n\n");
     }
 
-    return { text, fileId: file.id, noteId: null, summaryId: null };
+    const coverage = chapterCoverageText(text, file.id);
+    return {
+      text: coverage.text,
+      fileId: file.id,
+      noteId: null,
+      summaryId: null,
+      chunksCount: coverage.chunksCount,
+      partialCoverage: coverage.partialCoverage,
+    };
   }
 
   if (body.noteId) {
@@ -335,6 +389,25 @@ async function saveQuiz(
   throw fbResult.error;
 }
 
+async function loadLearnerQuizOptions(
+  supabase: NonNullable<Awaited<ReturnType<typeof createServerSupabaseClient>>>,
+  userId: string,
+) {
+  const result = await supabase
+    .from("quiz_attempts")
+    .select("score, total_questions, percentage, weak_topics, strong_topics, topic_results, wrong_questions, created_at")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(100);
+
+  if (result.error) {
+    devLog("learner profile skipped for quiz", { error: result.error.message });
+    return buildPersonalizedQuizOptions(buildLearnerProfile([]));
+  }
+
+  return buildPersonalizedQuizOptions(buildLearnerProfile(result.data ?? []));
+}
+
 // ---------------------------------------------------------------------------
 // Request body type
 // ---------------------------------------------------------------------------
@@ -411,11 +484,17 @@ export async function POST(request: Request) {
   try {
     const source = await resolveSource(supabase, user, body);
     debug.sourceTextLength = source.text.length;
+    debug.sourceChunksCount = source.chunksCount ?? null;
+    debug.partialSourceCoverage = Boolean(source.partialCoverage);
+    const personalized = await loadLearnerQuizOptions(supabase, user.id);
+    debug.personalizedFocusTopics = personalized.focusTopics;
 
     const quiz = await generateQuiz(source.text, {
       count,
-      difficulty,
+      difficulty: difficulty ?? personalized.difficulty,
       questionTypes,
+      focusTopics: personalized.focusTopics,
+      personalizationNote: personalized.extraQuestionBias,
     });
 
     devLog("quiz generated", {

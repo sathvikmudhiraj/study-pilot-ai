@@ -1,7 +1,7 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { requireUser } from "@/backend/lib/auth";
 import { answerLearnStepByStep, answerStudyQuestion, type StructuredChatAnswer } from "@/backend/lib/aiChat";
-import { estimateChunks } from "@/backend/lib/pdfText";
+import { chunkDocument, selectRelevantChunks } from "@/backend/lib/documentProcessing";
 import { processStudyMaterial } from "@/backend/lib/studyMaterial";
 import {
   formatCitationLocator,
@@ -13,6 +13,7 @@ import {
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { getAiUserMessage, isAiBusyError, isAiQuotaError } from "@/backend/lib/aiProvider";
 import { isGreeting, greetingResponse } from "@/backend/lib/greetingDetector";
+import { buildLearnerProfile, buildPersonalizedChatContext, recommendWeakTopic } from "@/backend/lib/learnerProfile";
 
 export const runtime = "nodejs";
 
@@ -23,6 +24,8 @@ type AskBody = {
   mode?: "study" | "learn_step_by_step";
   /** Optional. When supplied the exchange is stored inside this conversation. */
   conversationId?: string;
+  /** Voice Tutor can speak from the response immediately while persistence runs after response. */
+  deferPersistence?: boolean;
 };
 
 const CONVERSATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -554,10 +557,14 @@ async function getSelectedFileContext({
   supabase,
   userId,
   fileIds,
+  question,
+  broadQuestion,
 }: {
   supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>;
   userId: string;
   fileIds: string[];
+  question: string;
+  broadQuestion: boolean;
 }) {
   if (!supabase || !fileIds.length) return [];
 
@@ -609,15 +616,10 @@ async function getSelectedFileContext({
               extracted_text: text || null,
               processing_status: text ? "extracted" : "failed",
               status: text ? "extracted" : "failed",
-              chunks_count: estimateChunks(text),
+              chunks_count: processed.chunksCount,
               content_type: processed.contentType,
               processing_notes: processed.processingNotes,
-              extracted_metadata: {
-                extractedTextLength: text.length,
-                chunksCount: estimateChunks(text),
-                processedAt: new Date().toISOString(),
-                source: "chat",
-              },
+              extracted_metadata: processed.documentMetadata,
             },
           });
         } catch (error) {
@@ -633,12 +635,33 @@ async function getSelectedFileContext({
     }
 
     if (text || !summaryText) {
+      const chunks = chunkDocument(text, { sourceId: file.id, dedupe: true });
+      const selectedChunks = selectRelevantChunks({
+        chunks,
+        query: question,
+        maxChunks: broadQuestion ? 10 : 6,
+        preserveOrder: broadQuestion,
+      });
+      const contextText = selectedChunks.length
+        ? [
+            chunks.length > selectedChunks.length
+              ? `PROCESSING COVERAGE NOTICE: Chat context uses ${selectedChunks.length} relevant chunks out of ${chunks.length} extracted document chunks for this question.`
+              : "",
+            ...selectedChunks.map((chunk) => {
+              const locator = chunk.startPage
+                ? `pages ${chunk.startPage}${chunk.endPage && chunk.endPage !== chunk.startPage ? `-${chunk.endPage}` : ""}`
+                : `chunk ${chunk.index + 1}`;
+              return `[${locator}]\n${chunk.text}`;
+            }),
+          ].filter(Boolean).join("\n\n")
+        : "No readable extracted text is available for this file yet.";
+
       items.push({
         id: file.id,
         type: "file",
         label: file.file_name,
         sourceName: file.file_name,
-        text: text || "No readable extracted text is available for this file yet.",
+        text: contextText,
         source: "Extracted text",
       });
     }
@@ -834,6 +857,29 @@ async function getPreviousAnswerContext({
     .slice(0, 5);
 }
 
+async function getLearnerProfileForChat({
+  supabase,
+  userId,
+}: {
+  supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>;
+  userId: string;
+}) {
+  if (!supabase) return buildLearnerProfile([]);
+  const { data, error } = await supabase
+    .from("quiz_attempts")
+    .select("score, total_questions, percentage, weak_topics, strong_topics, topic_results, wrong_questions, created_at")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(100);
+
+  if (error) {
+    devLog("learner profile skipped for chat", { error: error.message });
+    return buildLearnerProfile([]);
+  }
+
+  return buildLearnerProfile(data ?? []);
+}
+
 async function getCachedAnswer({
   supabase,
   userId,
@@ -898,7 +944,19 @@ async function getCachedAnswer({
 }
 
 export async function POST(request: Request) {
-  const user = await requireUser();
+  const requestStartedAt = Date.now();
+  const timings: Record<string, number> = {};
+  const measure = async <T,>(name: string, task: () => Promise<T>): Promise<T> => {
+    const startedAt = Date.now();
+    try {
+      return await task();
+    } finally {
+      timings[name] = (timings[name] ?? 0) + Date.now() - startedAt;
+    }
+  };
+  const timingDebug = () => ({ ...timings, total: Date.now() - requestStartedAt });
+
+  const user = await measure("authentication", () => requireUser());
   if (!user) return apiError("Please log in first.", 401);
 
   const supabase = await createServerSupabaseClient();
@@ -932,12 +990,14 @@ export async function POST(request: Request) {
       return apiError("conversationId is not a valid UUID.", 400);
     }
     // Double-check ownership (RLS also enforces this, but we want a clean 404).
-    const { data: convo, error: convoError } = await supabase
-      .from("conversations")
-      .select("id, context_mode, active_file_ids, active_note_ids")
-      .eq("id", rawConversationId)
-      .eq("user_id", user.id)
-      .maybeSingle();
+    const { data: convo, error: convoError } = await measure("conversation_loading", async () =>
+      await supabase
+        .from("conversations")
+        .select("id, context_mode, active_file_ids, active_note_ids")
+        .eq("id", rawConversationId)
+        .eq("user_id", user.id)
+        .maybeSingle(),
+    );
 
     if (convoError) {
       return apiError("Could not verify conversation ownership.", 500);
@@ -982,28 +1042,30 @@ export async function POST(request: Request) {
     };
 
     // Persist the exchange so conversation history stays consistent.
-    const saved = await supabase
-      .from("assistant_questions")
-      .insert({
-        user_id: user.id,
-        question,
-        answer: greetingAnswer,
-        related_file_ids: [],
-        related_note_ids: [],
-        mode: "ai",
-        status: "answered",
-        ...(conversationId ? { conversation_id: conversationId } : {}),
-      })
-      .select("id, question, answer, related_file_ids, related_note_ids, created_at")
-      .single();
+    const saved = await measure("database_persistence", async () =>
+      await supabase
+        .from("assistant_questions")
+        .insert({
+          user_id: user.id,
+          question,
+          answer: greetingAnswer,
+          related_file_ids: [],
+          related_note_ids: [],
+          mode: "ai",
+          status: "answered",
+          ...(conversationId ? { conversation_id: conversationId } : {}),
+        })
+        .select("id, question, answer, related_file_ids, related_note_ids, created_at")
+        .single(),
+    );
 
     if (saved.error) {
       // Non-critical — return the answer anyway without DB persistence.
       devLog("greeting save failed (non-fatal)", { error: saved.error.message });
-      return NextResponse.json({ chat: { id: null, question, answer: greetingAnswer }, related: [], mode: "ai" });
+      return NextResponse.json({ chat: { id: null, question, answer: greetingAnswer }, related: [], mode: "ai", ...(isDev() ? { debug: { ...debug, timings: timingDebug() } } : {}) });
     }
 
-    return NextResponse.json({ chat: saved.data, related: [], mode: "ai" });
+    return NextResponse.json({ chat: saved.data, related: [], mode: "ai", ...(isDev() ? { debug: { ...debug, timings: timingDebug() } } : {}) });
   }
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -1011,30 +1073,34 @@ export async function POST(request: Request) {
     const broadAttachedFileQuestion = fileIds.length > 0 && isBroadFileQuestion(question);
     debug.broadAttachedFileQuestion = broadAttachedFileQuestion;
 
-    const selectedContext = [
+    const selectedContext = await measure("file_context_loading", async () => [
       ...(await getSelectedFileContext({
         supabase,
         userId: user.id,
         fileIds,
+        question,
+        broadQuestion: broadAttachedFileQuestion,
       })),
       ...(await getSelectedNoteContext({ supabase, userId: user.id, noteIds })),
-    ];
+    ]);
     const keywordContext = selectedContext.length
       ? []
       : conversationId
         ? []
-        : await getKeywordContext({ supabase, userId: user.id, question });
+        : await measure("file_context_loading", () => getKeywordContext({ supabase, userId: user.id, question }));
     const contextItems = selectedContext.length ? selectedContext : keywordContext;
     const cached = requestMode === "learn_step_by_step" || broadAttachedFileQuestion
       ? null
-      : await getCachedAnswer({
-          supabase,
-          userId: user.id,
-          question,
-          fileIds,
-          noteIds,
-          conversationId,
-        });
+      : await measure("message_loading", () =>
+          getCachedAnswer({
+            supabase,
+            userId: user.id,
+            question,
+            fileIds,
+            noteIds,
+            conversationId,
+          }),
+        );
 
     if (cached) {
       return NextResponse.json({
@@ -1042,21 +1108,34 @@ export async function POST(request: Request) {
         related: contextItems.map((item) => ({ id: item.id, label: item.label, type: item.type })),
         mode: "cache",
         cached: true,
-        ...(isDev() ? { debug: { ...debug, cacheHit: true } } : {}),
+        ...(isDev() ? { debug: { ...debug, cacheHit: true, timings: timingDebug() } } : {}),
       });
     }
 
-    const previousContext = await getPreviousAnswerContext({
-      supabase,
-      userId: user.id,
-      question,
-      conversationId,
-    });
-    const preparedContext = prepareCitedContext([...contextItems, ...previousContext], question);
+    const previousContext = await measure("message_loading", () =>
+      getPreviousAnswerContext({
+        supabase,
+        userId: user.id,
+        question,
+        conversationId,
+      }),
+    );
+    const learnerProfile = await measure("learner_profile_loading", () => getLearnerProfileForChat({ supabase, userId: user.id }));
+    const personalizedContext = buildPersonalizedChatContext(learnerProfile, question);
+    const recommendedWeakTopic = recommendWeakTopic(learnerProfile);
+    const personalizedQuestion =
+      requestMode === "learn_step_by_step" && recommendedWeakTopic && /^(start|begin|recommend|suggest|lesson|learn|teach|next|weak)/i.test(question)
+        ? `${question}\nRecommended weak-topic lesson: ${recommendedWeakTopic}`
+        : question;
+    const preparedContext = await measure("prompt_building", async () =>
+      prepareCitedContext([...contextItems, ...previousContext], question),
+    );
+    const promptContext = [personalizedContext, preparedContext.text].filter(Boolean).join("\n\n");
 
     debug.contextItemCount = contextItems.length;
     debug.previousAnswerContextCount = previousContext.length;
-    debug.contextLength = preparedContext.text.length;
+    debug.learnerWeakTopicCount = learnerProfile.weakTopics.length;
+    debug.contextLength = promptContext.length;
     debug.citationCount = preparedContext.citations.length;
     devLog("question context prepared", debug);
 
@@ -1066,8 +1145,8 @@ export async function POST(request: Request) {
     try {
       answer = {
         ...(requestMode === "learn_step_by_step"
-          ? await answerLearnStepByStep({ question, context: preparedContext.text })
-          : await answerStudyQuestion({ question, context: preparedContext.text })),
+          ? await measure("ai_provider_request", () => answerLearnStepByStep({ question: personalizedQuestion, context: promptContext }))
+          : await measure("ai_provider_request", () => answerStudyQuestion({ question, context: promptContext }))),
         response_mode: "ai",
         source_citations: preparedContext.citations,
       };
@@ -1088,21 +1167,49 @@ export async function POST(request: Request) {
 
     const relatedFileIds = contextItems.filter((item) => item.type === "file").map((item) => item.id);
     const relatedNoteIds = contextItems.filter((item) => item.type === "note").map((item) => item.id);
+    const persistencePayload = {
+      user_id: user.id,
+      question,
+      answer,
+      related_file_ids: relatedFileIds,
+      related_note_ids: relatedNoteIds,
+      mode,
+      status: "answered",
+      ...(conversationId ? { conversation_id: conversationId } : {}),
+    };
 
-    const saved = await supabase
-      .from("assistant_questions")
-      .insert({
-        user_id: user.id,
-        question,
-        answer,
-        related_file_ids: relatedFileIds,
-        related_note_ids: relatedNoteIds,
+    if (body.deferPersistence === true) {
+      const createdAt = new Date().toISOString();
+      after(async () => {
+        const result = await supabase.from("assistant_questions").insert(persistencePayload);
+        if (result.error) {
+          devLog("deferred voice persistence failed", { error: result.error.message, conversationId });
+        }
+      });
+
+      return NextResponse.json({
+        chat: {
+          id: null,
+          question,
+          answer,
+          related_file_ids: relatedFileIds,
+          related_note_ids: relatedNoteIds,
+          created_at: createdAt,
+        },
+        related: contextItems.map((item) => ({ id: item.id, label: item.label, type: item.type })),
         mode,
-        status: "answered",
-        ...(conversationId ? { conversation_id: conversationId } : {}),
-      })
-      .select("id, question, answer, related_file_ids, related_note_ids, created_at")
-      .single();
+        deferredPersistence: true,
+        ...(isDev() ? { debug: { ...debug, timings: timingDebug() } } : {}),
+      });
+    }
+
+    const saved = await measure("database_persistence", async () =>
+      await supabase
+        .from("assistant_questions")
+        .insert(persistencePayload)
+        .select("id, question, answer, related_file_ids, related_note_ids, created_at")
+        .single(),
+    );
 
     if (saved.error) throw saved.error;
 
@@ -1110,13 +1217,14 @@ export async function POST(request: Request) {
       chat: saved.data,
       related: contextItems.map((item) => ({ id: item.id, label: item.label, type: item.type })),
       mode,
-      ...(isDev() ? { debug } : {}),
+      ...(isDev() ? { debug: { ...debug, timings: timingDebug() } } : {}),
     });
   } catch (error) {
     const normalized = normalizeError(error);
     devLog("question failed", { ...debug, error: normalized, busy: isAiBusyError(error), quota: isAiQuotaError(error) });
     return apiError(normalized, isAiBusyError(error) ? 503 : isAiQuotaError(error) ? 429 : 500, {
       ...debug,
+      timings: timingDebug(),
       error: normalized,
     });
   }

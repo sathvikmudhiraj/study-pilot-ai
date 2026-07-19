@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import type { Conversation } from "@/frontend/lib/conversationTypes";
+import { formatConversationTimestamp } from "@/frontend/lib/chatPersistence";
 import {
   IconChat,
   IconEdit,
@@ -160,7 +161,7 @@ export function ConversationList({
     <>
       {/* Desktop compact sidebar */}
       <aside
-        className="hidden lg:flex w-[260px] shrink-0 flex-col gap-3 border-r border-white/[0.06] bg-slate-950/60 p-3"
+        className="hidden w-[272px] shrink-0 flex-col gap-3 border-r border-white/[0.06] bg-slate-950/70 p-3 lg:flex"
         aria-label="Conversations"
       >
         {panel}
@@ -223,7 +224,7 @@ export function ConversationList({
         </div>
 
         {/* Body: loading / error / empty / lists */}
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="min-h-0 flex-1 overflow-y-auto pr-0.5">
           {loading ? (
             <LoadingState />
           ) : error ? (
@@ -231,7 +232,10 @@ export function ConversationList({
           ) : filtered.length === 0 && !hasLegacy && !search.trim() ? (
             <EmptyState onNew={onNew} />
           ) : filtered.length === 0 && search.trim() ? (
-            <p className="px-2 py-6 text-center text-sm text-slate-400">No chats match your search.</p>
+            <div className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-6 text-center">
+              <p className="text-sm font-medium text-slate-200">No matches</p>
+              <p className="mt-1 text-xs leading-5 text-slate-500">Try a shorter title or start a new chat.</p>
+            </div>
           ) : (
             <div className="grid gap-4">
               {pinned.length ? (
@@ -256,12 +260,17 @@ export function ConversationList({
                   <button
                     type="button"
                     onClick={onOpenLegacy}
-                    className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/40 ${
-                      legacyActive ? "bg-emerald-400/10 text-emerald-100" : "text-slate-300 hover:bg-white/[0.06]"
+                    className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/40 ${
+                      legacyActive
+                        ? "border-emerald-300/30 bg-emerald-400/[0.12] text-emerald-100 shadow-inner shadow-emerald-950/20"
+                        : "border-transparent text-slate-300 hover:border-white/10 hover:bg-white/[0.06]"
                     }`}
                   >
                     <IconChat size={14} className="shrink-0 text-slate-400" />
-                    <span className="min-w-0 truncate">Previous Study Chat (read-only)</span>
+                    <span className="min-w-0 flex-1 truncate">Previous Study Chat</span>
+                    <span className="shrink-0 rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold text-slate-400">
+                      Read-only
+                    </span>
                   </button>
                 </section>
               ) : null}
@@ -278,6 +287,7 @@ export function ConversationList({
     const confirming = confirmingId === c.id;
     const menuOpen = menuId === c.id;
     const title = c.title ?? "Untitled chat";
+    const timestamp = formatConversationTimestamp(c.updated_at || c.created_at);
     return (
       <li key={c.id} className="relative">
         {renaming ? (
@@ -307,18 +317,35 @@ export function ConversationList({
           </label>
         ) : (
           <div
-            className={`group flex items-center gap-1 rounded-lg pl-2.5 pr-1 transition focus-within:bg-white/[0.06] ${
-              isActive ? "bg-emerald-400/10" : "hover:bg-white/[0.06]"
+            className={`group relative flex items-center gap-1 rounded-lg border pl-2.5 pr-1 transition focus-within:border-emerald-300/35 focus-within:bg-white/[0.06] ${
+              isActive
+                ? "border-emerald-300/35 bg-emerald-400/[0.12] shadow-inner shadow-emerald-950/20"
+                : "border-transparent hover:border-white/10 hover:bg-white/[0.06]"
             }`}
           >
+            {isActive ? <span className="absolute left-0 top-2 bottom-2 w-0.5 rounded-full bg-emerald-300" aria-hidden="true" /> : null}
             <button
               type="button"
               onClick={() => onSelect(c.id)}
-              className="flex h-9 min-w-0 flex-1 items-center gap-2 text-left focus-visible:outline-none"
+              className="flex min-h-12 min-w-0 flex-1 items-center gap-2 py-1.5 text-left focus-visible:outline-none"
               aria-current={isActive ? "true" : undefined}
+              title={title}
             >
               {c.pinned ? <IconPin size={12} className="shrink-0 text-amber-200" /> : <IconChat size={14} className="shrink-0 text-slate-400" />}
-              <span className={`min-w-0 truncate text-sm ${isActive ? "text-emerald-100" : "text-slate-300"}`}>{title}</span>
+              <span className="min-w-0 flex-1">
+                <span className={`block truncate text-sm font-medium ${isActive ? "text-emerald-100" : "text-slate-300"}`}>
+                  {title}
+                </span>
+                {timestamp ? (
+                  <time
+                    dateTime={c.updated_at || c.created_at}
+                    suppressHydrationWarning
+                    className={`mt-0.5 block truncate text-[11px] ${isActive ? "text-emerald-100/65" : "text-slate-500"}`}
+                  >
+                    {timestamp}
+                  </time>
+                ) : null}
+              </span>
             </button>
 
             {/* Per-row more menu trigger */}
@@ -437,13 +464,16 @@ function ErrorState({ message }: { message: string }) {
 
 function EmptyState({ onNew }: { onNew: () => void }) {
   return (
-    <div className="grid gap-2 p-3 text-center">
-      <p className="text-sm text-slate-300">No conversations yet.</p>
-      <p className="text-xs text-slate-500">Start a new chat to ask your first question.</p>
+    <div className="grid gap-2 rounded-lg border border-dashed border-white/15 bg-white/[0.03] p-4 text-center">
+      <div className="mx-auto grid h-9 w-9 place-items-center rounded-lg border border-emerald-300/20 bg-emerald-300/10 text-emerald-200">
+        <IconChat size={16} />
+      </div>
+      <p className="text-sm font-semibold text-slate-200">No conversations yet</p>
+      <p className="text-xs leading-5 text-slate-500">Ask a study question and it will stay here for later.</p>
       <button
         type="button"
         onClick={onNew}
-        className="mt-1 inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-emerald-400/25 bg-emerald-400/10 text-sm font-semibold text-emerald-100 hover:bg-emerald-400/15"
+        className="mt-1 inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border border-emerald-400/25 bg-emerald-400/10 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-400/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/40"
       >
         <IconPlus size={14} /> New chat
       </button>

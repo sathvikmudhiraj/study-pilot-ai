@@ -9,6 +9,7 @@ import {
 } from "./SourceCitationChips";
 import { StudyNoteEditor } from "./StudyNoteEditor";
 import { adaptStudyNoteRow, type StudyNoteDraft } from "@/frontend/lib/studyNotes";
+import { sanitizeSummaryForDisplay } from "@/shared/summarySanitizer";
 
 type Summary = {
   id?: string;
@@ -131,7 +132,7 @@ function normalizeGenerationMetadata(value: unknown): GenerationMetadata | null 
 function normalizeSummary(summary: Summary | null): Summary | null {
   if (!summary) return null;
   const content = parseContentSummary(summary);
-  const merged = { ...(content ?? {}), ...summary } as Summary;
+  const merged = sanitizeSummaryForDisplay({ ...(content ?? {}), ...summary } as Summary);
 
   return {
     ...merged,

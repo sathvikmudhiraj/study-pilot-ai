@@ -377,7 +377,8 @@ describe("summarizeStudyText - user-facing formatting cleanup", () => {
     expect(summary.short_summary).toBe("Summary of CNS Module 1");
     expect(summary.key_points.length).toBeGreaterThan(0);
     expect(summary.action_items.length).toBeGreaterThan(0);
-    expect(summary.important_concepts).toEqual(expect.arrayContaining(["Hill cipher", "Matrix inverse"]));
+    expect(summary.covered_topics).toEqual(expect.arrayContaining(["Hill cipher", "Matrix inverse"]));
+    expect(summary.important_concepts).toEqual([]);
     expect(summary.suggested_tags.length).toBeGreaterThan(0);
     expect(summary.suggested_next_step).toBe("Revise");
     expectNoUserFacingMetadata(summary);
@@ -434,7 +435,8 @@ describe("summarizeStudyText - user-facing formatting cleanup", () => {
     const summary = await summarizeStudyText(CNS_SOURCE, { sourceType: "file", sourceName: "CNSmodule-1.pdf" });
 
     expect(summary.covered_topics.filter((topic) => /hill cipher/i.test(topic))).toHaveLength(1);
-    expect(summary.important_concepts.filter((concept) => /matrix inverse/i.test(concept))).toHaveLength(1);
+    expect(summary.covered_topics.filter((topic) => /matrix inverse/i.test(topic))).toHaveLength(1);
+    expect(summary.important_concepts.filter((concept) => /matrix inverse/i.test(concept))).toHaveLength(0);
     expect(summary.key_points.filter((point) => /Hill cipher uses matrices/i.test(point))).toHaveLength(1);
     expect(summary.topic_wise_summary.filter((topic) => /hill cipher/i.test(topic.topic))).toHaveLength(1);
   });

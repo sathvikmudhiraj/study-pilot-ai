@@ -59,7 +59,7 @@ export function ConversationHeader({
 
   if (legacyActive) {
     return (
-      <div className="mb-4 flex items-center justify-between gap-3">
+      <div className="mb-3 flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2 lg:pl-0">
           <button
             type="button"
@@ -85,7 +85,7 @@ export function ConversationHeader({
   const contextLabel = activeContextLabel(contextMode, activeFileNames);
 
   return (
-    <div className="mb-4 flex items-start justify-between gap-3">
+    <div className="mb-3 flex items-start justify-between gap-3">
       <div className="flex min-w-0 flex-1 items-start gap-2">
         {/* Mobile-only drawer toggle */}
         <button

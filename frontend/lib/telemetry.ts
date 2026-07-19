@@ -18,25 +18,17 @@ type StageName =
   | "ui_render"
   | "tts_start";
 
-interface TelemetryEvent {
-  stage: StageName;
-  requestId: string;
-  timestamp: number;
-  durationMs?: number;
-  metadata?: Record<string, unknown>;
-}
-
 interface RequestTelemetry {
   requestId: string;
   startTime: number;
-  stages: Map<StageName, { start: number; end?: number; durationMs?: number }>;
+  stages: Map<StageName, { start: number; end?: number; durationMs?: number; metadata?: Record<string, unknown> }>;
   metadata: Record<string, unknown>;
 }
 
 const isDev = process.env.NODE_ENV !== "production";
 const activeRequests = new Map<string, RequestTelemetry>();
 let requestCounter = 0;
-let globalStartTime = Date.now();
+const globalStartTime = Date.now();
 
 function generateRequestId(): string {
   requestCounter += 1;

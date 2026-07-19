@@ -2,6 +2,7 @@ import "server-only";
 
 import { generateAIText, getAIProviderRuntimeInfo, type AIProviderTelemetryEvent } from "./aiProvider";
 import { STUDYPILOT_TUTOR_INSTRUCTION } from "./tutorPrompt";
+import type { LearnerProfile } from "./learnerProfile";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -54,6 +55,7 @@ export type StudyContext = {
   summaries: StudySummary[];
   quizzes: StudyQuiz[];
   quiz_analytics: QuizPerformance;
+  learner_profile?: Pick<LearnerProfile, "weakTopics" | "recentMistakes" | "preferredDifficulty" | "learningPace">;
 };
 
 export type DayPlan = {
@@ -152,6 +154,7 @@ function priorityTerms(ctx: StudyContext) {
   return uniqueStrings(
     [
       ...ctx.quiz_analytics.weak_topics,
+      ...(ctx.learner_profile?.weakTopics ?? []).map((topic) => topic.topic),
       ...ctx.summaries.flatMap((summary) => summary.covered_topics.slice(0, 4)),
       ...ctx.summaries.flatMap((summary) => summary.important_concepts.slice(0, 4)),
     ],
@@ -280,6 +283,27 @@ function tryParseJson(raw: string): Record<string, unknown> | null {
 // Build prompt from study context
 // ---------------------------------------------------------------------------
 
+function learnerProfileRevisionSection(ctx: StudyContext) {
+  const profile = ctx.learner_profile;
+  if (!profile || (!profile.weakTopics.length && !profile.recentMistakes.length)) return "";
+  return [
+    "LEARNER PROFILE PRIORITIES:",
+    profile.weakTopics.length
+      ? `Highest-priority weak topics: ${profile.weakTopics
+          .slice(0, 6)
+          .map((topic) => `${topic.topic} (${topic.accuracy}% accuracy, ${topic.misses} misses)`)
+          .join("; ")}`
+      : "",
+    profile.recentMistakes.length
+      ? `Repeated mistakes: ${profile.recentMistakes
+          .slice(0, 4)
+          .map((mistake) => `${mistake.topic}${mistake.misses > 1 ? ` (${mistake.misses} misses)` : ""}`)
+          .join("; ")}`
+      : "",
+    `Learning pace: ${profile.learningPace}; preferred quiz difficulty: ${profile.preferredDifficulty}`,
+  ].filter(Boolean).join("\n");
+}
+
 function buildStudyContextText(ctx: StudyContext): string {
   const sections: string[] = [];
 
@@ -344,6 +368,9 @@ function buildStudyContextText(ctx: StudyContext): string {
         .join("\n"),
     );
   }
+
+  const profileSection = learnerProfileRevisionSection(ctx);
+  if (profileSection) sections.push(profileSection);
 
   return sections.join("\n\n======\n\n");
 }
@@ -440,6 +467,9 @@ function buildReducedStudyContextText(ctx: StudyContext): { text: string; stats:
         .join("\n"),
     );
   }
+
+  const profileSection = learnerProfileRevisionSection(ctx);
+  if (profileSection) sections.push(profileSection);
 
   const text = sections.join("\n\n======\n\n");
   return {
@@ -594,13 +624,14 @@ Your revision plan must:
 1. Identify all major topics across the uploaded files, notes, and summaries.
 2. Rank topics by importance (exam relevance, frequency in material, complexity).
 3. Put every tracked weak quiz topic near the start of "revise_first" and schedule it early. Strong topics may receive lighter review.
-4. Split the "revise_first" (highest priority, weakest areas or most exam-critical topics) from "pending_topics" (everything else).
-5. Create a ${DEFAULT_PLAN_DAYS}-day daily plan. Each day should:
+4. Keep the plan full-chapter: weak topics receive extra priority, but they must not replace coverage of the full uploaded chapter/material.
+5. Split the "revise_first" (highest priority, weakest areas or most exam-critical topics) from "pending_topics" (everything else).
+6. Create a ${DEFAULT_PLAN_DAYS}-day daily plan. Each day should:
    - Focus on 2-4 topics (logical groupings, not random).
    - Include 3-5 concrete tasks (re-read notes, practice quiz, write explanation, solve examples, memorize memory lines).
    - Include an estimated study time.
-6. Provide next steps for after the plan ends.
-7. Give practical study tips.
+7. Provide next steps for after the plan ends.
+8. Give practical study tips.
 
 Today's date is ${today.toISOString().split("T")[0]}. Generate date strings for each day starting from today.
 

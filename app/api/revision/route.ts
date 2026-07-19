@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/backend/lib/auth";
 import { generateRevisionPlan, type StudyContext } from "@/backend/lib/aiRevisionPlan";
+import { chunkDocument } from "@/backend/lib/documentProcessing";
 import { buildQuizAnalytics, emptyQuizAnalytics } from "@/backend/lib/quizAnalytics";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { getAiUserMessage, isAiBusyError, isAiQuotaError } from "@/backend/lib/aiProvider";
+import { buildLearnerProfile } from "@/backend/lib/learnerProfile";
 
 export const runtime = "nodejs";
 
@@ -64,6 +66,34 @@ function stringList(value: unknown): string[] {
   return value.map((item) => String(item ?? "").trim()).filter(Boolean);
 }
 
+function revisionCoverageText(text: string, fileName: string, maxChunks = 18) {
+  const chunks = chunkDocument(text, { sourceId: fileName, dedupe: true });
+  if (chunks.length <= maxChunks) return text;
+
+  const stride = Math.max(1, Math.floor(chunks.length / maxChunks));
+  const indexes = new Set<number>();
+  for (let index = 0; index < chunks.length && indexes.size < maxChunks; index += stride) {
+    indexes.add(index);
+  }
+  indexes.add(chunks.length - 1);
+
+  const selected = [...indexes]
+    .sort((a, b) => a - b)
+    .slice(0, maxChunks)
+    .map((index) => chunks[index])
+    .filter(Boolean);
+
+  return [
+    `PROCESSING COVERAGE NOTICE: Revision planning is using ${selected.length} representative chunks out of ${chunks.length} extracted document chunks for "${fileName}". Keep the plan full-chapter, and mark any uncovered areas as retry/continue candidates.`,
+    ...selected.map((chunk) => {
+      const locator = chunk.startPage
+        ? `pages ${chunk.startPage}${chunk.endPage && chunk.endPage !== chunk.startPage ? `-${chunk.endPage}` : ""}`
+        : `chunk ${chunk.index + 1}`;
+      return `[${locator}]\n${chunk.text}`;
+    }),
+  ].join("\n\n");
+}
+
 // ---------------------------------------------------------------------------
 // Data aggregation
 // ---------------------------------------------------------------------------
@@ -78,6 +108,7 @@ async function aggregateStudyContext(
     summaries: [],
     quizzes: [],
     quiz_analytics: { attempt_count: 0, strong_topics: [], weak_topics: [], last_quiz_score: null },
+    learner_profile: buildLearnerProfile([]),
   };
   if (!supabase) return empty;
 
@@ -99,7 +130,7 @@ async function aggregateStudyContext(
     supabase.from("quizzes").select("title, difficulty, questions").eq("user_id", userId),
     supabase
       .from("quiz_attempts")
-      .select("score, total_questions, percentage, weak_topics, strong_topics, topic_results, created_at")
+      .select("score, total_questions, percentage, weak_topics, strong_topics, topic_results, wrong_questions, created_at")
       .eq("user_id", userId)
       .order("created_at", { ascending: false })
       .limit(100),
@@ -108,7 +139,7 @@ async function aggregateStudyContext(
   const files = (filesResult.data ?? []).map((f) => ({
     file_name: String(f.file_name ?? "Untitled"),
     content_type: f.content_type as string | null,
-    extracted_text: String(f.extracted_text ?? ""),
+    extracted_text: revisionCoverageText(String(f.extracted_text ?? ""), String(f.file_name ?? "Untitled")),
   }));
 
   const notes = (notesResult.data ?? []).map((n) => ({
@@ -134,7 +165,9 @@ async function aggregateStudyContext(
     question_count: Array.isArray(q.questions) ? q.questions.length : 0,
   }));
 
-  const quizAnalytics = attemptsResult.error ? emptyQuizAnalytics : buildQuizAnalytics(attemptsResult.data ?? []);
+  const attemptRows = attemptsResult.error ? [] : attemptsResult.data ?? [];
+  const quizAnalytics = attemptsResult.error ? emptyQuizAnalytics : buildQuizAnalytics(attemptRows);
+  const learnerProfile = buildLearnerProfile(attemptRows);
   const quiz_analytics = {
     attempt_count: quizAnalytics.attemptCount,
     strong_topics: quizAnalytics.strongTopics,
@@ -149,7 +182,7 @@ async function aggregateStudyContext(
       : null,
   };
 
-  return { files, notes, summaries, quizzes, quiz_analytics };
+  return { files, notes, summaries, quizzes, quiz_analytics, learner_profile: learnerProfile };
 }
 
 // ---------------------------------------------------------------------------

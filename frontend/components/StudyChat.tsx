@@ -58,6 +58,14 @@ import {
   patchConversation,
   shortTitleFromQuestion,
 } from "@/frontend/lib/conversations";
+import {
+  assistantIdsFromRows,
+  isComposerReadOnly,
+  latestConversationToRestore,
+  restoredAttachmentsFromConversation,
+  shouldOpenRequestedConversation,
+  upsertConversationFirst,
+} from "@/frontend/lib/chatPersistence";
 import { ConversationList } from "./ConversationList";
 import { ConversationHeader } from "./ConversationHeader";
 import {
@@ -288,7 +296,7 @@ function cleanStorageName(name: string) {
 // Defined here (not inlined) so that the React Compiler "purity" lint rule
 // does not flag `Date.now()` inside component-defined handlers. `Date.now()`
 // is genuinely impure, and the rule is correct that calling it during a
-// component body would be unsafe â€” but `uploadFiles` only runs from a
+// component body would be unsafe, but `uploadFiles` only runs from a
 // file-input `onChange` event handler, never during render.
 function storageTimestamp(): number {
   return Date.now();
@@ -414,6 +422,12 @@ function cleanErrorMessage(message: string): string {
   if (lower.includes("failed to fetch") || lower.includes("load failed") || lower.includes("networkerror")) {
     return "Network error. Check your connection and try again.";
   }
+  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("aborted")) {
+    return "The request took too long. Retry, or edit the question to make it more focused.";
+  }
+  if (lower.includes("rate limit") || lower.includes("quota")) {
+    return "The AI provider is temporarily limited. Retry in a moment, or use a narrower question.";
+  }
   return message;
 }
 
@@ -424,20 +438,6 @@ function formatTime(iso?: string): string {
   } catch {
     return "";
   }
-}
-
-function conversationTime(conversation: Conversation): number {
-  const updated = Date.parse(conversation.updated_at);
-  if (Number.isFinite(updated)) return updated;
-  const created = Date.parse(conversation.created_at);
-  return Number.isFinite(created) ? created : 0;
-}
-
-function latestConversation(conversations: Conversation[]): Conversation | null {
-  return conversations.reduce<Conversation | null>((latest, conversation) => {
-    if (!latest) return conversation;
-    return conversationTime(conversation) > conversationTime(latest) ? conversation : latest;
-  }, null);
 }
 
 // Hydration-safe "is client" flag: false during SSR/first render, true after hydration.
@@ -523,9 +523,9 @@ export function StudyChat({
   const searchParams = useSearchParams();
   const requestedConversationId = searchParams.get("conversationId");
   const handledRequestedConversationIdRef = useRef<string | null>(null);
-  const restoredLatestConversationRef = useRef(false);
+  const suppressLatestRestoreRef = useRef(false);
 
-  /* â”€â”€â”€ Persistent conversations (Phase 1B) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* Persistent conversations (Phase 1B) */
   // List state.
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [loadingConversations, setLoadingConversations] = useState(true);
@@ -566,7 +566,7 @@ export function StudyChat({
     if (result.ok) {
       setConversations(result.conversations);
     } else {
-      // 401 is "session expired" â€” surface a clean message.
+      // 401 is "session expired"; surface a clean message.
       setConversationsError(result.status === 401 ? "Please sign in again to load your conversations." : result.message);
     }
     setLoadingConversations(false);
@@ -649,7 +649,7 @@ export function StudyChat({
   );
 
   // Derive a short title from the first meaningful user question and PATCH it
-  // onto the conversation â€” but only once per conversation, and never for a
+  // onto the conversation, but only once per conversation, and never for a
   // greeting. This satisfies "generate a short title from the first meaningful
   // question" while leaving greetings untitled.
   const maybeAutoTitleConversation = useCallback(
@@ -663,7 +663,7 @@ export function StudyChat({
         return;
       }
       const title = shortTitleFromQuestion(question);
-      if (!title) return; // greeting-only question â†’ no title
+      if (!title) return; // greeting-only question -> no title
       titledConversationIdsRef.current.add(id);
       const result = await patchConversation(id, { title });
       if (result.ok) syncActiveConversationInList(result.conversation);
@@ -702,7 +702,7 @@ export function StudyChat({
     if (currentConversationVersion() !== conversationVersion) return;
 
     if (!messagesResult.ok) {
-      // 404 â†’ the conversation was deleted or never belonged to this user.
+      // 404 -> the conversation was deleted or never belonged to this user.
       // Fall back to a clean state with a friendly error.
       setActiveId(null);
       setActiveConversation(null);
@@ -727,7 +727,7 @@ export function StudyChat({
 
     const conversation = convRefresh.ok ? convRefresh.conversation : null;
     if (!conversation) {
-      // The conversation vanished between open and get â€” reset.
+      // The conversation vanished between open and get; reset.
       setActiveId(null);
       setActiveConversation(null);
       setLoadingMessages(false);
@@ -750,22 +750,11 @@ export function StudyChat({
 
     // Restoring attachments from active_*_ids keeps the composer meaningful
     // without auto-re-POSTing any context.
-    const restoredAttachments: Attachment[] = [
-      ...(conversation.active_file_ids ?? []).map((fid) => ({
-        id: fid,
-        type: "file" as const,
-        label: fileNamesById.get(fid) ?? "Attached file",
-      })),
-      ...(conversation.active_note_ids ?? []).map((nid) => ({
-        id: nid,
-        type: "note" as const,
-        label: noteNamesById.get(nid) ?? "Attached note",
-      })),
-    ];
+    const restoredAttachments = restoredAttachmentsFromConversation(conversation, fileNamesById, noteNamesById);
     setAttachments(restoredAttachments);
 
     // Hydrate messages chronologically (API returns ASC).
-    loadedAssistantIdsRef.current = new Set(messagesResult.messages.map((m) => m.id));
+    loadedAssistantIdsRef.current = assistantIdsFromRows(messagesResult.messages);
     setMessages(messagesResult.messages.flatMap((m) => recordToUiMessages(m)));
     setLoadingMessages(false);
     setShowScrollDown(false);
@@ -822,14 +811,14 @@ export function StudyChat({
   // Pre-creating the conversation before the request fires guarantees the
   // /api/ai/ask (and web/research/diagram) calls can attach the conversationId
   // server-side and persist the exchange into this conversation on the very
-  // first send â€” there is no "first send lost" race.
+  // first send, so there is no "first send lost" race.
   async function ensureConversationForSend(opts: {
     question: string;
     attachments: Attachment[];
     requestMode: RequestMode;
   }): Promise<{ ok: true; conversation: Conversation } | { ok: false; message: string }> {
     // If a conversation is already active (or legacy view is open) there is
-    // nothing to create â€” reuse it. Legacy view is read-only so it never
+    // nothing to create, so reuse it. Legacy view is read-only so it never
     // reaches this path because the composer is disabled there; the guard is
     // defensive.
     if (activeId && !legacyActive) {
@@ -852,12 +841,14 @@ export function StudyChat({
     });
     if (!result.ok) return { ok: false, message: result.message };
     bumpConversationVersion();
-    setConversations((current) =>
-      // Avoid duplicate entries if a stale optimistic insert already exists.
-      current.some((c) => c.id === result.conversation.id) ? current : [result.conversation, ...current],
-    );
+    suppressLatestRestoreRef.current = true;
+    handledRequestedConversationIdRef.current = result.conversation.id;
+    router.replace(`/chat?conversationId=${encodeURIComponent(result.conversation.id)}`, { scroll: false });
+    setConversations((current) => upsertConversationFirst(current, result.conversation));
     setActiveId(result.conversation.id);
     setActiveConversation(result.conversation);
+    setLegacyActive(false);
+    setMessagesError(null);
     setContextModeState(result.conversation.context_mode);
     setActiveFileIdsState(result.conversation.active_file_ids ?? []);
     setActiveNoteIdsState(result.conversation.active_note_ids ?? []);
@@ -918,6 +909,8 @@ export function StudyChat({
 
   function openLegacyChat() {
     if (loading) return;
+    suppressLatestRestoreRef.current = true;
+    handledRequestedConversationIdRef.current = null;
     router.replace("/chat", { scroll: false });
     abortActiveController();
     setAbortController(null);
@@ -946,7 +939,7 @@ export function StudyChat({
     );
   }
 
-  /* â”€â”€â”€ Conversation-derived UI labels (header context) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* Conversation-derived UI labels (header context) */
   const [contextModeState, setContextModeState] = useState<ContextMode>("general");
   const [activeFileIdsState, setActiveFileIdsState] = useState<string[]>([]);
   const [activeNoteIdsState, setActiveNoteIdsState] = useState<string[]>([]);
@@ -982,7 +975,7 @@ export function StudyChat({
     return fileIds.length > 0 || noteIds.length > 0 ? "file" : "general";
   }
 
-  /* â”€â”€â”€ Original chat message state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* Original chat message state */
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [question, setQuestion] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -1012,7 +1005,7 @@ export function StudyChat({
   const messageCounterRef = useRef(0);
   const isNearBottomRef = useRef(true);
 
-  // â”€â”€ Ref mutation helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Ref mutation helpers
   // These wrap direct `.current =` writes to refs that are also read inside an
   // effect cleanup. The React Compiler lint rule react-hooks/immutability
   // flags direct ref mutations in event handlers because the ref is shared
@@ -1139,7 +1132,7 @@ export function StudyChat({
     return sources;
   }, [attachments, files, messages]);
 
-  /* â”€â”€â”€ Effects â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* Effects */
 
   // Auto-resize textarea
   useEffect(() => {
@@ -1210,12 +1203,17 @@ export function StudyChat({
   }, [loading, loadingMode]);
 
   useEffect(() => {
-    if (restoredLatestConversationRef.current) return;
-    if (requestedConversationId || loadingConversations || activeId || legacyActive) return;
-    const latest = latestConversation(conversations);
+    const latest = latestConversationToRestore({
+      requestedConversationId,
+      handledRequestedConversationId: handledRequestedConversationIdRef.current,
+      loadingConversations,
+      activeId,
+      legacyActive,
+      suppressLatestRestore: suppressLatestRestoreRef.current,
+      conversations,
+    });
     if (!latest) return;
 
-    restoredLatestConversationRef.current = true;
     handledRequestedConversationIdRef.current = latest.id;
     router.replace(`/chat?conversationId=${encodeURIComponent(latest.id)}`, { scroll: false });
     void Promise.resolve().then(() => {
@@ -1225,11 +1223,12 @@ export function StudyChat({
   }, [activeId, conversations, legacyActive, loadingConversations, requestedConversationId, router]);
 
   useEffect(() => {
-    if (!requestedConversationId) return;
-    if (handledRequestedConversationIdRef.current === requestedConversationId) return;
-    handledRequestedConversationIdRef.current = requestedConversationId;
+    const requested = requestedConversationId;
+    if (!requested || !shouldOpenRequestedConversation(requested, handledRequestedConversationIdRef.current)) return;
+    handledRequestedConversationIdRef.current = requested;
+    suppressLatestRestoreRef.current = true;
     void Promise.resolve().then(() => {
-      void openConversation(requestedConversationId);
+      void openConversation(requested);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestedConversationId]);
@@ -1244,7 +1243,7 @@ export function StudyChat({
     };
   }, []);
 
-  /* â”€â”€â”€ Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* Handlers */
 
   function addAttachment(next: Attachment) {
     setAttachments((current) => {
@@ -1269,7 +1268,7 @@ export function StudyChat({
     setError("");
     setPendingRetry(null);
     setPendingDiagramRetry(null);
-    // Switching to web mode strips down to web/research context â€” attachments
+    // Switching to web mode strips down to web/research context; attachments
     // are not used here so we patch only the context_mode.
     patchActiveContextFromState(attachments, "web_search");
     window.setTimeout(() => textareaRef.current?.focus(), 0);
@@ -1828,7 +1827,7 @@ export function StudyChat({
       void touchConversationUpdatedAt(sendConversationId, activeConversation?.title ?? null);
     } catch (err) {
       if (currentConversationVersion() !== conversationVersion) return;
-      // User stopped generation â€” no error, keep the user bubble
+      // User stopped generation; no error, keep the user bubble.
       if (err instanceof DOMException && err.name === "AbortError") {
         return;
       }
@@ -1919,6 +1918,8 @@ export function StudyChat({
   }
 
   function startNewChat() {
+    suppressLatestRestoreRef.current = true;
+    handledRequestedConversationIdRef.current = null;
     router.replace("/chat", { scroll: false });
     bumpConversationVersion();
     abortActiveController();
@@ -2002,19 +2003,22 @@ export function StudyChat({
     });
   }
 
-  /* â”€â”€â”€ Render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* Render */
 
   const menuItemClass =
     "flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm transition hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/40 disabled:cursor-not-allowed disabled:opacity-40";
   const menuIconClass =
     "grid h-7 w-7 shrink-0 place-items-center rounded-md border border-white/10 bg-white/[0.04] text-slate-400";
+  const composerReadOnly = isComposerReadOnly(legacyActive);
+  const composerDisabled = composerReadOnly || loadingMessages;
+  const canSubmit = Boolean(question.trim()) && !composerDisabled && !loading;
 
   return (
-    <div className="relative flex min-h-[calc(100svh-140px)] min-w-0 pb-56 sm:pb-48">
+    <div className="relative flex min-h-[calc(100svh-118px)] min-w-0 pb-44 sm:pb-40">
       <input ref={fileInputRef} type="file" accept={acceptTypes} multiple className="hidden" onChange={(event) => uploadFiles(event.target.files)} />
       <input ref={imageInputRef} type="file" accept={imageAcceptTypes} className="hidden" onChange={(event) => uploadFiles(event.target.files, true)} />
 
-      {/* â”€â”€â”€ Conversation panel (desktop sidebar + mobile drawer) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      {/* Conversation panel (desktop sidebar + mobile drawer) */}
       <ConversationList
         conversations={conversations}
         activeId={activeId}
@@ -2024,6 +2028,8 @@ export function StudyChat({
         hasLegacy={legacyChats.length > 0}
         newDisabled={loading}
         onSelect={(id) => {
+          suppressLatestRestoreRef.current = true;
+          handledRequestedConversationIdRef.current = id;
           router.replace(`/chat?conversationId=${encodeURIComponent(id)}`, { scroll: false });
           void openConversation(id);
         }}
@@ -2036,9 +2042,9 @@ export function StudyChat({
         onCloseMobile={() => setMobileDrawerOpen(false)}
       />
 
-      {/* â”€â”€â”€ Chat column â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      {/* Chat column */}
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-        {/* â”€â”€â”€ Conversation header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+        {/* Conversation header */}
         <ConversationHeader
           // Remount the header whenever the active conversation changes so its
           // inline-rename state resets without an effect (cleaner than calling
@@ -2057,7 +2063,7 @@ export function StudyChat({
         />
 
         {activeId && !legacyActive ? (
-          <div className="mb-4 flex justify-end">
+          <div className="mb-3 flex justify-end">
             <Link
               href={`/voice?conversationId=${encodeURIComponent(activeId)}`}
               className="inline-flex h-8 items-center gap-2 rounded-md border border-emerald-300/25 bg-emerald-300/10 px-3 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-300/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/40"
@@ -2085,11 +2091,11 @@ export function StudyChat({
           </div>
         ) : null}
 
-        {/* â”€â”€â”€ Messages or empty state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+        {/* Messages or empty state */}
         {!messages.length ? (
         <ChatEmptyState onPick={(suggestion) => setQuestion(suggestion)} />
       ) : (
-        <div className="mx-auto max-w-3xl space-y-6">
+        <div className="mx-auto w-full max-w-3xl space-y-5 px-0.5">
           {messages.map((message) => {
             // Render via an explicit if/else chain so TypeScript's control-flow
             // analysis narrows the UiMessage discriminated union by `role` and
@@ -2345,7 +2351,7 @@ export function StudyChat({
         </div>
       )}
 
-      {/* â”€â”€â”€ Scroll to bottom â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      {/* Scroll to bottom */}
       {showScrollDown ? (
         <button
           type="button"
@@ -2357,12 +2363,15 @@ export function StudyChat({
         </button>
       ) : null}
 
-      {/* â”€â”€â”€ Composer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      {/* Composer */}
       <div className="fixed inset-x-0 bottom-0 z-30 border-t border-white/[0.06] bg-[#070b14]/90 px-3 pb-[calc(0.625rem+env(safe-area-inset-bottom))] pt-2.5 backdrop-blur-xl lg:left-[260px]">
         <div className="mx-auto max-w-3xl">
           {error ? (
-            <div className="mb-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-400/25 bg-red-400/[0.08] px-3 py-2 text-sm text-red-200">
-              <span className="min-w-0 break-words">{error}</span>
+            <div
+              className="mb-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-400/30 bg-red-400/[0.09] px-3 py-2 text-sm text-red-100 shadow-lg shadow-red-950/10"
+              role="alert"
+            >
+              <span className="min-w-0 break-words leading-5">{error}</span>
               {pendingRetry || pendingDiagramRetry ? (
                 <div className="flex shrink-0 flex-wrap items-center gap-2">
                   {pendingRetry?.mode === "deep_research" ? (
@@ -2396,11 +2405,18 @@ export function StudyChat({
             </div>
           ) : null}
           {uploadProgress ? (
-            <div className="mb-2 rounded-lg border border-emerald-300/25 bg-emerald-300/10 px-3 py-2 text-sm text-emerald-100">{uploadProgress}</div>
+            <div className="mb-2 rounded-lg border border-emerald-300/25 bg-emerald-300/10 px-3 py-2 text-sm text-emerald-100" role="status">
+              {uploadProgress}
+            </div>
+          ) : null}
+          {composerReadOnly ? (
+            <div className="mb-2 rounded-lg border border-amber-300/25 bg-amber-300/[0.08] px-3 py-2 text-xs font-medium text-amber-100">
+              Previous Study Chat is read-only. Start a new chat to continue editing.
+            </div>
           ) : null}
 
           {requestMode === "web_search" || requestMode === "deep_research" || requestMode === LEARN_STEP_BY_STEP_MODE ? (
-            <div className="mb-2 flex items-center gap-2">
+            <div className="mb-2 flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={
@@ -2437,7 +2453,7 @@ export function StudyChat({
                 {requestMode === "deep_research" ? "Deep research" : requestMode === LEARN_STEP_BY_STEP_MODE ? "Learn Step by Step" : "Web search"}
                 <IconX size={12} />
               </button>
-              <span className="text-[11px] text-slate-500">
+              <span className="text-[11px] font-medium text-slate-400">
                 {requestMode === "deep_research"
                   ? "Enter a focused research question"
                   : requestMode === LEARN_STEP_BY_STEP_MODE
@@ -2454,7 +2470,8 @@ export function StudyChat({
                   key={`${attachment.type}:${attachment.id}`}
                   type="button"
                   onClick={() => removeAttachment(attachment)}
-                  className="inline-flex max-w-full items-center gap-1 break-words rounded-md border border-emerald-300/25 bg-emerald-300/10 px-2 py-0.5 text-xs font-medium text-emerald-100 transition hover:bg-emerald-300/15"
+                  disabled={composerDisabled || loading}
+                  className="inline-flex max-w-full items-center gap-1 break-words rounded-md border border-emerald-300/25 bg-emerald-300/10 px-2 py-0.5 text-xs font-medium text-emerald-100 transition hover:bg-emerald-300/15 disabled:cursor-not-allowed disabled:opacity-60"
                   title="Remove attachment"
                 >
                   <span className="truncate">{attachment.label}</span>
@@ -2598,7 +2615,8 @@ export function StudyChat({
                 ref={menuButtonRef}
                 type="button"
                 onClick={() => setMenuOpen((open) => !open)}
-                className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070b14] ${
+                disabled={composerDisabled || loading}
+                className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070b14] disabled:cursor-not-allowed disabled:opacity-50 ${
                   menuOpen
                     ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
                     : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10 hover:text-white"
@@ -2614,7 +2632,7 @@ export function StudyChat({
                 value={question}
                 onChange={(event) => setQuestion(event.target.value)}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
+                  if (event.key === "Enter" && !event.shiftKey && !composerDisabled) {
                     event.preventDefault();
                     sendMessage();
                   }
@@ -2627,15 +2645,19 @@ export function StudyChat({
                       ? "What should StudyPilot research deeply?"
                       : requestMode === LEARN_STEP_BY_STEP_MODE
                         ? "What topic should we learn step by step?"
-                      : "Ask StudyPilot about your study material…"
+                      : composerReadOnly
+                        ? "Read-only previous chat"
+                        : "Ask StudyPilot about your study material…"
                 }
-                className="max-h-40 min-h-[2.5rem] min-w-0 flex-1 resize-none bg-transparent px-1 py-2.5 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500"
+                disabled={composerDisabled}
+                className="max-h-40 min-h-[2.5rem] min-w-0 flex-1 resize-none bg-transparent px-1 py-2.5 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500 disabled:cursor-not-allowed disabled:text-slate-500"
                 aria-label="Type your question"
               />
               <button
                 type="button"
                 onClick={startVoiceQuestion}
-                className="hidden h-10 w-10 shrink-0 place-items-center rounded-xl border border-white/10 bg-white/5 text-slate-300 transition hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070b14] sm:grid"
+                disabled={composerDisabled || loading}
+                className="hidden h-10 w-10 shrink-0 place-items-center rounded-xl border border-white/10 bg-white/5 text-slate-300 transition hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070b14] disabled:cursor-not-allowed disabled:opacity-50 sm:grid"
                 aria-label="Voice question"
               >
                 <IconMic size={18} />
@@ -2653,7 +2675,7 @@ export function StudyChat({
                 <button
                   type="button"
                   onClick={() => sendMessage()}
-                  disabled={!question.trim()}
+                  disabled={!canSubmit}
                   className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl text-slate-950 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070b14] disabled:cursor-not-allowed disabled:opacity-40 ${
                     requestMode === "web_search"
                       ? "bg-violet-300 hover:bg-violet-200 focus-visible:ring-violet-300/50"
@@ -2689,7 +2711,7 @@ export function StudyChat({
         </div>
       </div>
 
-      {/* â”€â”€â”€ Attachment picker modal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      {/* Attachment picker modal */}
       {diagramOpen ? (
         <DiagramComposer
           sources={diagramSources}
@@ -2768,7 +2790,7 @@ export function StudyChat({
         </div>
       ) : null}
       </div>
-      {/* â”€â”€â”€ end chat column â”€â”€â”€ */}
+      {/* End chat column */}
     </div>
   );
 }

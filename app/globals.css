@@ -3,6 +3,8 @@
 :root {
   --background: #070b14;
   --foreground: #f8fafc;
+  --font-geist-sans: Arial, Helvetica, sans-serif;
+  --font-geist-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   /* Orb waveform bar bounce — shared by VoiceOrb.tsx and VoiceTutor.tsx */
   --anim-voice-orb-bar-outer: voiceOrbBar 0.85s ease-in-out var(--_delay, 0s) infinite alternate;
   --anim-voice-orb-bar-inner: voiceOrbBar 0.75s ease-in-out var(--_delay, 0s) infinite alternate;

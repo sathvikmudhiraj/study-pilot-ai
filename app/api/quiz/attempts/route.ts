@@ -3,6 +3,7 @@ import { requireUser } from "@/backend/lib/auth";
 import { buildQuizAnalytics, gradeQuizAttempt } from "@/backend/lib/quizAnalytics";
 import { buildReviewAnswerKey, findUnknownAnswerQuestionIds, normalizeSubmittedAnswers } from "@/backend/lib/quizSecurity";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
+import { buildLearnerProfile, buildRevisionRecommendations } from "@/backend/lib/learnerProfile";
 
 export const runtime = "nodejs";
 
@@ -58,6 +59,21 @@ async function loadAnalytics(
 
   if (result.error) throw result.error;
   return buildQuizAnalytics(result.data ?? []);
+}
+
+async function loadLearnerProfile(
+  supabase: NonNullable<Awaited<ReturnType<typeof createServerSupabaseClient>>>,
+  userId: string,
+) {
+  const result = await supabase
+    .from("quiz_attempts")
+    .select("score, total_questions, percentage, weak_topics, strong_topics, topic_results, wrong_questions, created_at")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(100);
+
+  if (result.error) throw result.error;
+  return buildLearnerProfile(result.data ?? []);
 }
 
 export async function GET() {
@@ -166,7 +182,15 @@ export async function POST(request: Request) {
 
   try {
     const analytics = await loadAnalytics(supabase, user.id);
-    return NextResponse.json({ ...gradeResponse, attempt, answer_key: answerKey, analytics });
+    const learnerProfile = await loadLearnerProfile(supabase, user.id);
+    return NextResponse.json({
+      ...gradeResponse,
+      attempt,
+      answer_key: answerKey,
+      analytics,
+      learnerProfile,
+      revisionRecommendations: buildRevisionRecommendations(learnerProfile),
+    });
   } catch {
     return NextResponse.json({ ...gradeResponse, attempt, answer_key: answerKey, analytics: null });
   }

@@ -1,6 +1,8 @@
 import "server-only";
 
 import { generateSummaryAIText, isAiBusyError, isAiQuotaError, isAiTimeoutError } from "./aiProvider";
+import { DOCUMENT_PROCESSING_BUDGETS, chunkDocument } from "./documentProcessing";
+import { sanitizeSummaryForDisplay } from "@/shared/summarySanitizer";
 import {
   formatCitationLocator,
   segmentTextWithCitations,
@@ -60,6 +62,7 @@ export type SummarySourceContext = {
   sourceId?: string;
   sourceType: Extract<CitationSourceType, "file" | "note">;
   sourceName: string;
+  personalizationHint?: string;
 };
 
 const MAX_CHUNK_CHARS = 12000;
@@ -254,6 +257,9 @@ function devLog(message: string, details?: Record<string, unknown>) {
 }
 
 export function chunkText(text: string) {
+  const chunks = chunkDocument(text, { sourceId: "summary-source", maxChars: MAX_CHUNK_CHARS, dedupe: true });
+  if (chunks.length) return chunks.map((chunk) => chunk.text);
+
   return segmentTextWithCitations({
     text,
     sourceType: "file",
@@ -396,72 +402,8 @@ function cleanSummaryList(values: string[], limit = 24) {
   );
 }
 
-function cleanTopicSummaries(values: TopicSummary[], limit = 18) {
-  const seen = new Set<string>();
-  const cleaned: TopicSummary[] = [];
-
-  for (const item of values) {
-    const topic = cleanSummaryText(item.topic);
-    const explanation = cleanSummaryText(item.explanation);
-    const importantPoints = cleanSummaryList(item.important_points, 8);
-    const key = normalizeKey(topic || explanation);
-    if (!key || seen.has(key)) continue;
-    if (!topic && !explanation && !importantPoints.length) continue;
-    seen.add(key);
-    cleaned.push({
-      topic: topic || "Important concept",
-      explanation,
-      important_points: importantPoints,
-    });
-    if (cleaned.length >= limit) break;
-  }
-
-  return cleaned;
-}
-
 function sanitizeUserFacingSummary(summary: StructuredSummary): StructuredSummary {
-  const coveredTopics = cleanSummaryList(summary.covered_topics, 30);
-  const keyPoints = cleanSummaryList(summary.key_points, 24);
-  const topicWiseSummary = cleanTopicSummaries(summary.topic_wise_summary, 24);
-  const importantConcepts = cleanSummaryList(
-    [
-      ...summary.important_concepts,
-      ...coveredTopics,
-      ...topicWiseSummary.map((item) => item.topic),
-    ],
-    28,
-  );
-  const actionItems = cleanSummaryList(summary.action_items, 16);
-  const suggestedTags = cleanSummaryList(summary.suggested_tags, 12)
-    .map((tag) => tag.replace(/^#/, "").trim())
-    .filter(Boolean);
-
-  const sanitized: StructuredSummary = {
-    ...summary,
-    suggested_title: cleanSummaryText(summary.suggested_title, "Study summary"),
-    short_summary: cleanSummaryText(summary.short_summary, keyPoints.slice(0, 3).join(" ")),
-    module_overview: cleanSummaryText(summary.module_overview, summary.short_summary),
-    covered_topics: coveredTopics,
-    key_points: keyPoints,
-    topic_wise_summary: topicWiseSummary,
-    exam_focus_points: cleanSummaryList(summary.exam_focus_points, 20),
-    memory_lines: cleanSummaryList(summary.memory_lines, 14),
-    common_mistakes: cleanSummaryList(summary.common_mistakes, 14),
-    important_concepts: importantConcepts,
-    action_items: actionItems,
-    suggested_tags: uniqueList(suggestedTags, 12),
-    suggested_next_step: cleanSummaryText(summary.suggested_next_step, "Review the key points, then generate a quiz to check your understanding."),
-  };
-
-  if (!sanitized.short_summary) sanitized.short_summary = "StudyPilot generated a structured summary from the provided study material.";
-  if (!sanitized.module_overview) sanitized.module_overview = sanitized.short_summary;
-  if (!sanitized.covered_topics.length) sanitized.covered_topics = sanitized.important_concepts.slice(0, 12);
-  if (!sanitized.key_points.length) sanitized.key_points = sanitized.covered_topics.map((topic) => `Review ${topic}.`).slice(0, 8);
-  if (!sanitized.action_items.length) sanitized.action_items = ["Review the key points.", "Practice recall with a short quiz."];
-  if (!sanitized.important_concepts.length) sanitized.important_concepts = sanitized.covered_topics;
-  if (!sanitized.suggested_tags.length) sanitized.suggested_tags = sanitized.covered_topics.slice(0, 5);
-
-  return sanitized;
+  return sanitizeSummaryForDisplay(summary);
 }
 
 function missingTopics(baseTopics: string[], candidateTopics: string[]) {
@@ -818,6 +760,7 @@ async function generateStructuredSummary(
   chunkMaps: ChunkMap[] = [],
   coverageReminder?: string,
   partialCoverageHint?: { successfulChunks: number[]; failedChunks: number[]; totalChunks: number },
+  personalizationHint = "",
 ) {
   const materialLabel = sourceKind === "chunk-map" ? "clean study notes from the same uploaded file" : "uploaded study material";
   const chunkCount = Math.max(1, chunkMaps.length);
@@ -852,6 +795,7 @@ Critical summary rules:
 - The user-facing summary must read as one clean study document with these sections only: Short Summary, Key Points, Action Items, Important Concepts, Suggested Tags, Suggested Next Step.
 - Never include internal processing labels, JSON fragments, source-section labels, chunk numbers, headings, raw arrays, braces, or implementation metadata in any user-facing field.
 - For Cryptography and Network Security files, check for cryptography basics, security concepts, CIA triad, OSI security architecture, threats vs attacks, active/passive attacks, security services, mechanisms, symmetric cipher model, and classical encryption ciphers such as Caesar, monoalphabetic, Playfair, and Hill. Only include topics actually present in the material.
+${personalizationHint ? `\nLearner personalization:\n- ${personalizationHint}\n` : ""}
 ${chunkRule}${reminder}${partialHint}
 
 Return strict JSON only. Do not include markdown. The JSON shape must be:
@@ -931,14 +875,24 @@ export async function summarizeStudyText(
   text: string,
   source: SummarySourceContext = { sourceType: "file", sourceName: "Study material" },
 ): Promise<StructuredSummary> {
-  const segments = segmentTextWithCitations({
-    text,
-    sourceId: source.sourceId,
-    sourceType: source.sourceType,
-    sourceName: source.sourceName,
+  const deterministicChunks = chunkDocument(text, {
+    sourceId: source.sourceId ?? "summary-source",
     maxChars: MAX_CHUNK_CHARS,
-    idPrefix: "summary-source",
+    dedupe: true,
   });
+  const sourceName = source.sourceName.trim() || "Study material";
+  const segments = deterministicChunks.map((chunk) => ({
+    text: chunk.text,
+    citation: {
+      id: chunk.id,
+      ...(source.sourceId ? { source_id: source.sourceId } : {}),
+      source_type: source.sourceType,
+      source_name: sourceName,
+      locator_type: chunk.startPage ? "page" as const : "chunk" as const,
+      locator_start: chunk.startPage ?? chunk.index + 1,
+      locator_end: chunk.endPage ?? chunk.index + 1,
+    },
+  }));
   const chunks = segments.map((segment) => segment.text);
   const sourceCitations = uniqueSourceCitations(segments.map((segment) => segment.citation));
 
@@ -947,13 +901,14 @@ export async function summarizeStudyText(
   }
 
   const sourceTextLength = text.length;
+  const personalizationHint = source.personalizationHint ?? "";
 
   if (chunks.length === 1) {
-    let summary = await generateStructuredSummary(chunks[0], "full-text");
+    let summary = await generateStructuredSummary(chunks[0], "full-text", [], undefined, undefined, personalizationHint);
     const reminder = buildCoverageReminder(summary, [], chunks[0]);
     devLog("single-chunk coverage check", { missedCount: reminder ? 1 : 0, retry: Boolean(reminder) });
     if (reminder) {
-      const retried = await generateStructuredSummary(chunks[0], "full-text", [], reminder);
+      const retried = await generateStructuredSummary(chunks[0], "full-text", [], reminder, undefined, personalizationHint);
       // Keep the retry only if it actually improved coverage.
       if (retried.covered_topics.length >= summary.covered_topics.length) summary = retried;
     }
@@ -979,12 +934,16 @@ export async function summarizeStudyText(
   // synthesis. Chunk order is preserved so early/middle/late topics stay in
   // the right order in chunkMapsToMaterial and ensureFullModuleCoverage.
   const attemptedChunks = chunks.length;
+  const processableChunks = chunks.slice(0, DOCUMENT_PROCESSING_BUDGETS.maxChunksPerAiOperation);
   const successfulChunks: number[] = [];
-  const failedChunks: number[] = [];
+  const failedChunks: number[] = chunks.length > processableChunks.length
+    ? chunks.slice(processableChunks.length).map((_, index) => processableChunks.length + index + 1)
+    : [];
   const failureCategoriesSet = new Set<string>();
+  if (failedChunks.length) failureCategoriesSet.add("processing-budget");
   const chunkMaps: ChunkMap[] = [];
 
-  for (let index = 0; index < chunks.length; index += 1) {
+  for (let index = 0; index < processableChunks.length; index += 1) {
     const attempt = await attemptSummarizeChunk(chunks[index], index, chunks.length, segments[index].citation);
     if (attempt.ok) {
       chunkMaps.push(attempt.chunkMap);
@@ -1017,7 +976,7 @@ export async function summarizeStudyText(
   const partialHint = partialCoverage
     ? { successfulChunks, failedChunks, totalChunks: attemptedChunks }
     : undefined;
-  let summary = await generateStructuredSummary(material, "chunk-map", chunkMaps, undefined, partialHint);
+  let summary = await generateStructuredSummary(material, "chunk-map", chunkMaps, undefined, partialHint, personalizationHint);
   const reminder = buildCoverageReminder(summary, chunkMaps);
   devLog("multi-chunk coverage check", {
     detectedTopicCount,
@@ -1026,7 +985,7 @@ export async function summarizeStudyText(
     ...(reminder ? { missedReminder: reminder.slice(0, 200) } : {}),
   });
   if (reminder) {
-    const retried = await generateStructuredSummary(material, "chunk-map", chunkMaps, reminder, partialHint);
+    const retried = await generateStructuredSummary(material, "chunk-map", chunkMaps, reminder, partialHint, personalizationHint);
     if (retried.covered_topics.length >= summary.covered_topics.length) summary = retried;
     devLog("multi-chunk coverage retry complete", {
       retriedCovered: retried.covered_topics.length,

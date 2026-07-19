@@ -2,8 +2,14 @@ import "server-only";
 
 import JSZip from "jszip";
 import { PDFDocument } from "pdf-lib";
+import {
+  buildDocumentProcessingMetadata,
+  chunkDocument,
+  createProcessingProgress,
+  type DocumentProcessingMetadata,
+} from "./documentProcessing";
 import { askGeminiWithInlineData, getGeminiErrorCategory } from "./gemini";
-import { estimateChunks, extractPdfText } from "./pdfText";
+import { extractPdfText } from "./pdfText";
 import { STUDYPILOT_TUTOR_INSTRUCTION } from "./tutorPrompt";
 
 export type StudyContentType = "pdf" | "pptx" | "docx" | "text" | "image" | "zip";
@@ -21,6 +27,7 @@ export type StudyMaterialResult = {
   chunksCount: number;
   processingNotes: string[];
   pageMetadata?: StudyPageMetadata;
+  documentMetadata?: DocumentProcessingMetadata;
   extractionFailure?: {
     code: "quota" | "model" | "timeout" | "insufficient" | "unavailable";
     message: string;
@@ -55,6 +62,42 @@ const PDF_VISION_BATCH_CONCURRENCY = 2;
 const PDF_VISION_MAX_OUTPUT_TOKENS = 4096;
 const PDF_VISION_TIMEOUT_MS = 45_000;
 const MIN_VISION_BATCH_TEXT_LENGTH = 80;
+
+function materialResult({
+  extractedText,
+  contentType,
+  processingNotes,
+  pageMetadata,
+  extractionFailure,
+  childFiles,
+}: Omit<StudyMaterialResult, "chunksCount" | "documentMetadata">): StudyMaterialResult {
+  const chunks = chunkDocument(extractedText, { sourceId: contentType, dedupe: true });
+  const totalPages = pageMetadata?.totalPages ?? null;
+  const extractedPages = pageMetadata?.extractedPageCount ?? pageMetadata?.readablePages.length ?? null;
+  const stage = extractionFailure ? (extractedText ? "partially_complete" : "failed") : "chunked";
+
+  return {
+    extractedText,
+    contentType,
+    chunksCount: chunks.length,
+    processingNotes,
+    ...(pageMetadata ? { pageMetadata } : {}),
+    documentMetadata: buildDocumentProcessingMetadata({
+      text: extractedText,
+      chunks,
+      progress: createProcessingProgress(stage, {
+        pagesProcessed: extractedPages,
+        totalPages,
+        chunksProcessed: chunks.length,
+        totalChunks: chunks.length,
+        fallbackUsed: pageMetadata?.extractor === "gemini-vision-batches",
+        partialFailures: extractionFailure ? [extractionFailure.message] : [],
+      }),
+    }),
+    ...(extractionFailure ? { extractionFailure } : {}),
+    ...(childFiles ? { childFiles } : {}),
+  };
+}
 
 // Minimum extracted text we require before trusting standard PDF text
 // extraction for a file of a given size. A real text-based PDF yields far
@@ -512,11 +555,12 @@ async function processPdf(
       );
       notes.push(`PDF text extraction produced ${extracted.readableTextLength} characters using ${extracted.extractor}.`);
       return {
-        extractedText: extracted.text,
-        contentType: "pdf",
-        chunksCount: estimateChunks(extracted.text),
-        processingNotes: notes,
-        pageMetadata: standardMetadata,
+        ...materialResult({
+          extractedText: extracted.text,
+          contentType: "pdf",
+          processingNotes: notes,
+          pageMetadata: standardMetadata,
+        }),
       };
     }
 
@@ -542,21 +586,23 @@ async function processPdf(
         message: "Full-module coverage validation failed after page-batched PDF extraction.",
       };
       return {
-        extractedText: "",
-        contentType: "pdf",
-        chunksCount: 0,
-        processingNotes: Array.from(new Set([...notes, ...vision.processingNotes, failure.message])),
-        pageMetadata: vision.pageMetadata,
-        extractionFailure: failure,
+        ...materialResult({
+          extractedText: "",
+          contentType: "pdf",
+          processingNotes: Array.from(new Set([...notes, ...vision.processingNotes, failure.message])),
+          pageMetadata: vision.pageMetadata,
+          extractionFailure: failure,
+        }),
       };
     }
 
     return {
-      extractedText: vision.text,
-      contentType: "pdf",
-      chunksCount: estimateChunks(vision.text),
-      processingNotes: [...notes, ...vision.processingNotes],
-      pageMetadata: vision.pageMetadata,
+      ...materialResult({
+        extractedText: vision.text,
+        contentType: "pdf",
+        processingNotes: [...notes, ...vision.processingNotes],
+        pageMetadata: vision.pageMetadata,
+      }),
     };
   }
 
@@ -566,12 +612,13 @@ async function processPdf(
   };
 
   return {
-    extractedText: "",
-    contentType: "pdf",
-    chunksCount: 0,
-    processingNotes: Array.from(new Set([...notes, ...vision.processingNotes, failure.message])),
-    pageMetadata: vision.pageMetadata.totalPages ? vision.pageMetadata : standardMetadata,
-    extractionFailure: failure,
+    ...materialResult({
+      extractedText: "",
+      contentType: "pdf",
+      processingNotes: Array.from(new Set([...notes, ...vision.processingNotes, failure.message])),
+      pageMetadata: vision.pageMetadata.totalPages ? vision.pageMetadata : standardMetadata,
+      extractionFailure: failure,
+    }),
   };
 }
 
@@ -594,10 +641,7 @@ async function processDocx(buffer: Buffer): Promise<StudyMaterialResult> {
   const text = cleanText(xmlParts.map(stripXmlText).join("\n\n"));
 
   return {
-    extractedText: text,
-    contentType: "docx",
-    chunksCount: estimateChunks(text),
-    processingNotes: notes,
+    ...materialResult({ extractedText: text, contentType: "docx", processingNotes: notes }),
   };
 }
 
@@ -633,30 +677,21 @@ async function processPptx(buffer: Buffer): Promise<StudyMaterialResult> {
 
   const text = cleanText(sections.join("\n\n"));
   return {
-    extractedText: text,
-    contentType: "pptx",
-    chunksCount: estimateChunks(text),
-    processingNotes: notes,
+    ...materialResult({ extractedText: text, contentType: "pptx", processingNotes: notes }),
   };
 }
 
 async function processText(buffer: Buffer): Promise<StudyMaterialResult> {
   const text = cleanText(buffer.toString("utf8"));
   return {
-    extractedText: text,
-    contentType: "text",
-    chunksCount: estimateChunks(text),
-    processingNotes: ["Text notes read directly."],
+    ...materialResult({ extractedText: text, contentType: "text", processingNotes: ["Text notes read directly."] }),
   };
 }
 
 async function processImage(buffer: Buffer, mimeType: string): Promise<StudyMaterialResult> {
   const text = cleanText(await explainImage(buffer, mimeType));
   return {
-    extractedText: text,
-    contentType: "image",
-    chunksCount: estimateChunks(text),
-    processingNotes: ["Image explained with Gemini Vision server-side."],
+    ...materialResult({ extractedText: text, contentType: "image", processingNotes: ["Image explained with Gemini Vision server-side."] }),
   };
 }
 
@@ -728,20 +763,17 @@ async function processZip(buffer: Buffer, userId: string): Promise<StudyMaterial
   const text = cleanText(sections.join("\n\n---\n\n"));
   if (!text) {
     return {
-      extractedText: "",
-      contentType: "zip",
-      chunksCount: 0,
-      processingNotes: [...notes, "No supported study files found inside this ZIP."],
-      childFiles,
+      ...materialResult({
+        extractedText: "",
+        contentType: "zip",
+        processingNotes: [...notes, "No supported study files found inside this ZIP."],
+        childFiles,
+      }),
     };
   }
 
   return {
-    extractedText: text,
-    contentType: "zip",
-    chunksCount: estimateChunks(text),
-    processingNotes: notes,
-    childFiles,
+    ...materialResult({ extractedText: text, contentType: "zip", processingNotes: notes, childFiles }),
   };
 }
 
@@ -778,10 +810,7 @@ export async function processStudyMaterial({
   if (contentType === "zip") {
     if (!allowZip) {
       return {
-        extractedText: "",
-        contentType: "zip",
-        chunksCount: 0,
-        processingNotes: ["Nested ZIP skipped."],
+        ...materialResult({ extractedText: "", contentType: "zip", processingNotes: ["Nested ZIP skipped."] }),
       };
     }
     return processZip(buffer, userId);
