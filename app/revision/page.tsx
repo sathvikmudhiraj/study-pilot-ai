@@ -15,8 +15,9 @@ export default async function RevisionPage() {
   if (supabase && user) {
     const result = await supabase
       .from("revision_plans")
-      .select("id, title, important_topics, revise_first, pending_topics, daily_plan, plan, starts_on, ends_on, created_at")
+      .select("id, title, important_topics, revise_first, pending_topics, daily_plan, plan, starts_on, ends_on, language_code, created_at")
       .eq("user_id", user.id)
+      .eq("language_code", user.preferredLanguage)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -32,7 +33,7 @@ export default async function RevisionPage() {
         title="Revision Planner"
         description="Generate a structured revision plan from your files, notes, summaries, and quizzes."
       />
-      <RevisionPlanPanel initialPlan={initialPlan} />
+      <RevisionPlanPanel initialPlan={initialPlan} preferredLanguage={user?.preferredLanguage ?? "en"} />
     </AppShell>
   );
 }

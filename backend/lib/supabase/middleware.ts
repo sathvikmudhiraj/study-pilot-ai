@@ -4,6 +4,23 @@ import { hasSupabaseEnv, getSupabaseEnv } from "./env";
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
+const PROTECTED_PREFIXES = [
+  "/dashboard",
+  "/upload",
+  "/files",
+  "/ai-chat",
+  "/ask",
+  "/chat",
+  "/summary",
+  "/summaries",
+  "/quiz",
+  "/quizzes",
+  "/revision",
+  "/voice",
+  "/settings",
+  "/admin",
+];
+
 const SECURITY_HEADERS: Array<[string, string]> = [
   ["X-Content-Type-Options", "nosniff"],
   ["X-Frame-Options", "DENY"],
@@ -72,6 +89,16 @@ export async function updateSession(request: NextRequest) {
     return withSecurityHeaders(response);
   }
 
+  const isProtected = PROTECTED_PREFIXES.some(
+    (prefix) => request.nextUrl.pathname === prefix || request.nextUrl.pathname.startsWith(`${prefix}/`),
+  );
+
+  // Public pages perform their own optional session lookup when they need it.
+  // Avoid a network request in the proxy for every landing/auth page visit.
+  if (!isProtected) {
+    return withSecurityHeaders(response);
+  }
+
   const { url, anonKey } = getSupabaseEnv();
   const supabase = createServerClient(url, anonKey, {
     cookies: {
@@ -89,24 +116,6 @@ export async function updateSession(request: NextRequest) {
   const {
     data: { user },
   } = await supabase.auth.getUser();
-
-  const protectedPrefixes = [
-    "/dashboard",
-    "/upload",
-    "/files",
-    "/ai-chat",
-    "/ask",
-    "/chat",
-    "/summary",
-    "/summaries",
-    "/quiz",
-    "/quizzes",
-    "/revision",
-    "/voice",
-    "/settings",
-    "/admin",
-  ];
-  const isProtected = protectedPrefixes.some((prefix) => request.nextUrl.pathname === prefix || request.nextUrl.pathname.startsWith(`${prefix}/`));
 
   if (isProtected && !user) {
     const redirectUrl = request.nextUrl.clone();

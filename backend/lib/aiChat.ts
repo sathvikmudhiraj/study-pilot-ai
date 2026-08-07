@@ -1,6 +1,8 @@
 import "server-only";
 
 import { generateAIText } from "./aiProvider";
+import { generateLocalizedText } from "./aiLanguage";
+import { DEFAULT_LANGUAGE, type SupportedLanguageCode } from "@/shared/languages";
 import { STUDYPILOT_TUTOR_INSTRUCTION } from "./tutorPrompt";
 
 export type StructuredChatAnswer = {
@@ -205,9 +207,11 @@ function fallbackAnswerFromText(raw: string): StructuredChatAnswer | null {
 export async function answerStudyQuestion({
   question,
   context,
+  language = DEFAULT_LANGUAGE,
 }: {
   question: string;
   context: string;
+  language?: SupportedLanguageCode;
 }) {
   const prompt = `${STUDYPILOT_TUTOR_INSTRUCTION}
 
@@ -242,11 +246,13 @@ ${context || "No readable user study context was found."}
 QUESTION:
 ${question}`;
 
-  const response = await generateAIText(prompt, {
-    temperature: 0.2,
-    maxOutputTokens: 2400,
-    responseMimeType: "application/json",
-  });
+  const response = await generateLocalizedText(prompt, language, (localizedPrompt) =>
+    generateAIText(localizedPrompt, {
+      temperature: 0.2,
+      maxOutputTokens: 2400,
+      responseMimeType: "application/json",
+    }),
+  );
   devLog("Gemini chat response received", { rawLength: response.length });
   const parsed = parseChatJson(response);
   if (parsed) return parsed;
@@ -263,9 +269,11 @@ ${question}`;
 export async function answerLearnStepByStep({
   question,
   context,
+  language = DEFAULT_LANGUAGE,
 }: {
   question: string;
   context: string;
+  language?: SupportedLanguageCode;
 }) {
   const prompt = `${STUDYPILOT_TUTOR_INSTRUCTION}
 
@@ -326,11 +334,13 @@ ${context || "No readable user study context was found."}
 LATEST STUDENT MESSAGE:
 ${question}`;
 
-  const response = await generateAIText(prompt, {
-    temperature: 0.25,
-    maxOutputTokens: 1800,
-    responseMimeType: "application/json",
-  });
+  const response = await generateLocalizedText(prompt, language, (localizedPrompt) =>
+    generateAIText(localizedPrompt, {
+      temperature: 0.25,
+      maxOutputTokens: 1800,
+      responseMimeType: "application/json",
+    }),
+  );
   devLog("Learn Step by Step response received", { rawLength: response.length });
   const parsed = parseChatJson(response);
   if (parsed?.learning_step) return parsed;

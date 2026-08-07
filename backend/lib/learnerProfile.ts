@@ -1,3 +1,18 @@
+import { canonicalTopicId } from "@/shared/languages";
+
+export type TopicImprovementPoint = {
+  attemptedAt: string;
+  percentage: number;
+  correct: number;
+  total: number;
+};
+
+export type TopicImprovementSeries = {
+  topicId: string;
+  topic: string;
+  points: TopicImprovementPoint[];
+};
+
 type QuizAnalytics = {
   attemptCount: number;
   strongTopics: string[];
@@ -12,6 +27,7 @@ type QuizAnalytics = {
 
 type TopicResult = {
   topic: string;
+  topic_id: string;
   correct: number;
   total: number;
 };
@@ -20,14 +36,15 @@ type WrongQuestion = {
   question_id: string;
   question: string;
   topic: string;
+  topic_id: string;
   user_answer: string;
   correct_answer: string;
 };
 
 export type LearnerProfile = {
-  weakTopics: Array<{ topic: string; accuracy: number; misses: number; attempts: number }>;
-  strongTopics: Array<{ topic: string; accuracy: number; attempts: number }>;
-  recentMistakes: Array<{ topic: string; question: string; misses: number }>;
+  weakTopics: Array<{ canonicalId: string; topic: string; accuracy: number; misses: number; attempts: number }>;
+  strongTopics: Array<{ canonicalId: string; topic: string; accuracy: number; attempts: number }>;
+  recentMistakes: Array<{ canonicalId: string; topic: string; question: string; misses: number }>;
   quizHistory: Array<{ percentage: number; score: number; total: number; attemptedAt: string }>;
   preferredDifficulty: "easy" | "medium" | "hard";
   learningPace: "new" | "steady" | "intensive";
@@ -57,6 +74,21 @@ export type DashboardLearningMetrics = {
     reason: string;
     href: string;
   } | null;
+  topicImprovementHistory: TopicImprovementSeries[];
+  beforeVsLatest: Array<{
+    topicId: string;
+    topic: string;
+    first: number | null;
+    latest: number | null;
+    improvement: number | null;
+  }>;
+  masteryProgress: Array<{
+    canonicalId: string;
+    topic: string;
+    accuracy: number;
+    attempts: number;
+    mastery: "weak" | "developing" | "strong";
+  }>;
 };
 
 type AttemptRow = {
@@ -113,6 +145,7 @@ function parseTopicResults(value: unknown): TopicResult[] {
       if (!topic) return null;
       return {
         topic,
+        topic_id: canonicalTopicId(record.topic_id ?? topic),
         correct: numeric(record.correct),
         total: numeric(record.total),
       };
@@ -131,6 +164,7 @@ function parseWrongQuestions(value: unknown): WrongQuestion[] {
         question_id: text(record.question_id ?? record.questionId),
         question: text(record.question),
         topic,
+        topic_id: canonicalTopicId(record.topic_id ?? topic),
         user_answer: text(record.user_answer ?? record.userAnswer),
         correct_answer: text(record.correct_answer ?? record.correctAnswer),
       };
@@ -157,16 +191,16 @@ export function buildLearnerProfile(attemptRows: unknown[], activityRows: unknow
     .filter((row): row is AttemptRow => Boolean(row) && typeof row === "object")
     .sort((a, b) => text(b.created_at).localeCompare(text(a.created_at)));
 
-  const topicTotals = new Map<string, { topic: string; correct: number; total: number; misses: number }>();
-  const mistakeTotals = new Map<string, { topic: string; question: string; misses: number }>();
+  const topicTotals = new Map<string, { canonicalId: string; topic: string; correct: number; total: number; misses: number }>();
+  const mistakeTotals = new Map<string, { canonicalId: string; topic: string; question: string; misses: number }>();
 
   for (const attempt of attempts) {
     const topicResults = parseTopicResults(attempt.topic_results);
     if (topicResults.length) {
       for (const result of topicResults) {
-        const key = normalizeTopic(result.topic);
+        const key = result.topic_id || canonicalTopicId(result.topic);
         if (!key) continue;
-        const aggregate = topicTotals.get(key) ?? { topic: result.topic, correct: 0, total: 0, misses: 0 };
+        const aggregate = topicTotals.get(key) ?? { canonicalId: key, topic: result.topic, correct: 0, total: 0, misses: 0 };
         aggregate.topic = displayTopic(aggregate.topic, result.topic);
         aggregate.correct += result.correct;
         aggregate.total += result.total;
@@ -175,17 +209,17 @@ export function buildLearnerProfile(attemptRows: unknown[], activityRows: unknow
       }
     } else {
       for (const topic of list(attempt.weak_topics)) {
-        const key = normalizeTopic(topic);
+        const key = canonicalTopicId(topic);
         if (!key) continue;
-        const aggregate = topicTotals.get(key) ?? { topic, correct: 0, total: 0, misses: 0 };
+        const aggregate = topicTotals.get(key) ?? { canonicalId: key, topic, correct: 0, total: 0, misses: 0 };
         aggregate.total += 1;
         aggregate.misses += 1;
         topicTotals.set(key, aggregate);
       }
       for (const topic of list(attempt.strong_topics)) {
-        const key = normalizeTopic(topic);
+        const key = canonicalTopicId(topic);
         if (!key) continue;
-        const aggregate = topicTotals.get(key) ?? { topic, correct: 0, total: 0, misses: 0 };
+        const aggregate = topicTotals.get(key) ?? { canonicalId: key, topic, correct: 0, total: 0, misses: 0 };
         aggregate.correct += 1;
         aggregate.total += 1;
         topicTotals.set(key, aggregate);
@@ -193,9 +227,9 @@ export function buildLearnerProfile(attemptRows: unknown[], activityRows: unknow
     }
 
     for (const wrong of parseWrongQuestions(attempt.wrong_questions)) {
-      const key = `${normalizeTopic(wrong.topic)}::${normalizeTopic(wrong.question)}`;
+      const key = `${wrong.topic_id}::${normalizeTopic(wrong.question)}`;
       if (!key.trim()) continue;
-      const current = mistakeTotals.get(key) ?? { topic: wrong.topic, question: wrong.question, misses: 0 };
+      const current = mistakeTotals.get(key) ?? { canonicalId: wrong.topic_id, topic: wrong.topic, question: wrong.question, misses: 0 };
       current.misses += 1;
       mistakeTotals.set(key, current);
     }
@@ -206,6 +240,7 @@ export function buildLearnerProfile(attemptRows: unknown[], activityRows: unknow
     .filter((topic) => topic.correct / Math.max(topic.total, 1) < 0.7)
     .sort((a, b) => b.misses - a.misses || a.correct / a.total - b.correct / b.total || a.topic.localeCompare(b.topic))
     .map((topic) => ({
+      canonicalId: topic.canonicalId,
       topic: topic.topic,
       accuracy: Math.round((topic.correct / Math.max(topic.total, 1)) * 100),
       misses: topic.misses,
@@ -217,6 +252,7 @@ export function buildLearnerProfile(attemptRows: unknown[], activityRows: unknow
     .filter((topic) => topic.correct / Math.max(topic.total, 1) >= 0.7)
     .sort((a, b) => b.correct / b.total - a.correct / a.total || b.total - a.total || a.topic.localeCompare(b.topic))
     .map((topic) => ({
+      canonicalId: topic.canonicalId,
       topic: topic.topic,
       accuracy: Math.round((topic.correct / Math.max(topic.total, 1)) * 100),
       attempts: topic.total,
@@ -363,6 +399,79 @@ function revisionProgress(revisionPlans: unknown[]) {
   return { completed: 0, pending, completionPercent: 0 };
 }
 
+function buildTopicImprovementHistory(attemptRows: unknown[]): TopicImprovementSeries[] {
+  const attempts = attemptRows
+    .filter((row): row is AttemptRow => Boolean(row) && typeof row === "object")
+    .sort((a, b) => text(a.created_at).localeCompare(text(b.created_at)));
+
+  if (!attempts.length) return [];
+
+  const seriesByTopic = new Map<string, { topicId: string; topic: string; points: Map<string, { correct: number; total: number }> }>();
+
+  for (const attempt of attempts) {
+    const createdAt = text(attempt.created_at);
+    if (!createdAt) continue;
+    const topicResults = parseTopicResults(attempt.topic_results);
+
+    if (topicResults.length) {
+      for (const result of topicResults) {
+        const key = result.topic_id || canonicalTopicId(result.topic);
+        if (!key) continue;
+        let series = seriesByTopic.get(key);
+        if (!series) {
+          series = { topicId: key, topic: result.topic, points: new Map() };
+          seriesByTopic.set(key, series);
+        }
+        series.topic = displayTopic(series.topic, result.topic);
+        const point = series.points.get(createdAt) ?? { correct: 0, total: 0 };
+        point.correct += result.correct;
+        point.total += result.total;
+        series.points.set(createdAt, point);
+      }
+    } else {
+      for (const topic of list(attempt.weak_topics)) {
+        const key = canonicalTopicId(topic);
+        if (!key) continue;
+        let series = seriesByTopic.get(key);
+        if (!series) {
+          series = { topicId: key, topic, points: new Map() };
+          seriesByTopic.set(key, series);
+        }
+        const existing = series.points.get(createdAt) ?? { correct: 0, total: 0 };
+        existing.total += 1;
+        series.points.set(createdAt, existing);
+      }
+      for (const topic of list(attempt.strong_topics)) {
+        const key = canonicalTopicId(topic);
+        if (!key) continue;
+        let series = seriesByTopic.get(key);
+        if (!series) {
+          series = { topicId: key, topic, points: new Map() };
+          seriesByTopic.set(key, series);
+        }
+        const existing = series.points.get(createdAt) ?? { correct: 0, total: 0 };
+        existing.correct += 1;
+        existing.total += 1;
+        series.points.set(createdAt, existing);
+      }
+    }
+  }
+
+  return [...seriesByTopic.values()]
+    .map(({ topicId, topic, points }) => ({
+      topicId,
+      topic,
+      points: [...points.entries()]
+        .map(([attemptedAt, stats]) => ({
+          attemptedAt,
+          correct: stats.correct,
+          total: stats.total,
+          percentage: stats.total ? Math.round((stats.correct / stats.total) * 100) : 0,
+        })),
+    }))
+    .filter((series) => series.points.length >= 1);
+}
+
 export function buildDashboardLearningMetrics({
   attempts,
   quizAnalytics,
@@ -399,6 +508,42 @@ export function buildDashboardLearningMetrics({
   if (!insights.length && quizAnalytics.attemptCount > 0) insights.push("Take another targeted quiz to refine your weak-topic profile");
   if (!insights.length) insights.push("Upload material, generate a quiz, then StudyPilot will build learning insights here");
 
+  const topicHistory = buildTopicImprovementHistory(attempts);
+  const weakTopicHistory = topicHistory.filter((series) => {
+    const totalCorrect = series.points.reduce((sum, p) => sum + p.correct, 0);
+    const totalQuestions = series.points.reduce((sum, p) => sum + p.total, 0);
+    return totalQuestions > 0 && totalCorrect / totalQuestions < 0.7;
+  });
+
+  const beforeVsLatest = topicHistory
+    .filter((series) => series.points.length >= 2)
+    .map((series) => {
+      const first = series.points[0].percentage;
+      const latestPoint = series.points[series.points.length - 1].percentage;
+      return {
+        topicId: series.topicId,
+        topic: series.topic,
+        first,
+        latest: latestPoint,
+        improvement: Math.round((latestPoint - first) * 10) / 10,
+      };
+    })
+    .sort((a, b) => Math.abs(b.improvement ?? 0) - Math.abs(a.improvement ?? 0) || a.topic.localeCompare(b.topic))
+    .slice(0, 8);
+
+  const masteryProgress = [...new Map(
+    [...profile.weakTopics, ...profile.strongTopics].map((topic) => [topic.canonicalId, topic]),
+  ).values()]
+    .sort((a, b) => b.attempts - a.attempts || a.topic.localeCompare(b.topic))
+    .slice(0, 5)
+    .map((topic) => ({
+      canonicalId: topic.canonicalId,
+      topic: topic.topic,
+      accuracy: topic.accuracy,
+      attempts: topic.attempts,
+      mastery: topic.accuracy >= 80 ? "strong" as const : topic.accuracy >= 50 ? "developing" as const : "weak" as const,
+    }));
+
   return {
     quizImprovement: {
       previous,
@@ -419,5 +564,8 @@ export function buildDashboardLearningMetrics({
           href: `/chat?topic=${encodeURIComponent(recommendedTopic)}`,
         }
       : null,
+    topicImprovementHistory: weakTopicHistory.slice(0, 3),
+    beforeVsLatest,
+    masteryProgress,
   };
 }

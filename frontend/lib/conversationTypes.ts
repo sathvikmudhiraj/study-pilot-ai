@@ -13,6 +13,7 @@ export type Conversation = {
   context_mode: ContextMode;
   active_file_ids: string[] | null;
   active_note_ids: string[] | null;
+  language_code?: import("@/shared/languages").SupportedLanguageCode;
   created_at: string;
   updated_at: string;
 };

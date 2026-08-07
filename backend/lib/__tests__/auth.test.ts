@@ -89,4 +89,13 @@ describe("trusted admin authorization", () => {
       message: "Admin access required.",
     });
   });
+
+  it("restores the preferred language from authenticated user metadata", async () => {
+    setSupabaseUser(authUser({
+      user_metadata: { preferred_language: "te" },
+      app_metadata: { role: "student" },
+    }));
+
+    await expect(getCurrentUser()).resolves.toMatchObject({ preferredLanguage: "te" });
+  });
 });

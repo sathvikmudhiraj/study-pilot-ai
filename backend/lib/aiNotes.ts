@@ -10,10 +10,15 @@ import {
   type SourceCitation,
 } from "./sourceCitations";
 import { STUDYPILOT_TUTOR_INSTRUCTION } from "./tutorPrompt";
+import { isSupportedLanguageCode, languageInstruction } from "@/shared/languages";
+import { generateLocalizedText } from "./aiLanguage";
 
 export const STUDY_NOTE_SOURCE_TYPES = ["summary", "answer", "file", "topic"] as const;
 export const STUDY_NOTE_STYLES = ["standard", "exam", "one_page"] as const;
-export const STUDY_NOTE_LANGUAGES = ["auto", "english", "telugu", "hindi", "telugu_english"] as const;
+export const STUDY_NOTE_LANGUAGES = [
+  "auto", "en", "hi", "te", "ta", "kn", "ml", "mr", "bn",
+  "english", "telugu", "hindi", "telugu_english",
+] as const;
 
 export type StudyNoteSourceType = (typeof STUDY_NOTE_SOURCE_TYPES)[number];
 export type StudyNoteStyle = (typeof STUDY_NOTE_STYLES)[number];
@@ -108,6 +113,14 @@ const LANGUAGE_INSTRUCTIONS: Record<StudyNoteLanguage, string> = {
     "Write the notes in natural Hindi. Keep established technical terms in their original English form when translation would reduce accuracy.",
   telugu_english:
     "Write in a natural Telugu-English mixed style used by college students. Keep technical terms in English and explain them in Telugu-English where helpful.",
+  en: languageInstruction("en"),
+  hi: languageInstruction("hi"),
+  te: languageInstruction("te"),
+  ta: languageInstruction("ta"),
+  kn: languageInstruction("kn"),
+  ml: languageInstruction("ml"),
+  mr: languageInstruction("mr"),
+  bn: languageInstruction("bn"),
 };
 
 const STYLE_INSTRUCTIONS: Record<StudyNoteStyle, string> = {
@@ -651,11 +664,14 @@ ${promptMaterial}
 END_STUDYPILOT_SOURCE`;
 
   const maxOutputTokens = source.style === "one_page" ? 1_800 : source.style === "exam" ? 3_400 : 3_800;
-  const response = await generateSummaryAIText(prompt, {
+  const generate = (localizedPrompt: string) => generateSummaryAIText(localizedPrompt, {
     temperature: 0.2,
     maxOutputTokens,
     responseMimeType: "application/json",
   });
+  const response = isSupportedLanguageCode(source.language)
+    ? await generateLocalizedText(prompt, source.language, generate)
+    : await generate(prompt);
   const generated = parseGeneratedNoteJson(response);
   if (!generated) {
     throw new StudyNoteGenerationError(

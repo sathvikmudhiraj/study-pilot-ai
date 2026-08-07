@@ -4,6 +4,7 @@ import { normalizeSourceCitations, SourceCitationChips } from "@/frontend/compon
 import { getCurrentUser } from "@/backend/lib/auth";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { sanitizeSummaryForDisplay } from "@/shared/summarySanitizer";
+import { languageDetails, type SupportedLanguageCode } from "@/shared/languages";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +21,7 @@ type SummaryRow = {
   suggested_next_step: string | null;
   content: string | null;
   created_at: string;
+  language_code: SupportedLanguageCode;
 };
 
 function asList(value: unknown) {
@@ -58,7 +60,7 @@ export default async function SummaryPage() {
   if (supabase && user) {
     const result = await supabase
       .from("ai_outputs")
-      .select("id, file_id, note_id, short_summary, key_points, suggested_tags, suggested_title, suggested_next_step, content, created_at")
+      .select("id, file_id, note_id, short_summary, key_points, suggested_tags, suggested_title, suggested_next_step, content, language_code, created_at")
       .eq("user_id", user.id)
       .order("created_at", { ascending: false })
       .limit(SUMMARY_LIST_LIMIT);
@@ -119,6 +121,7 @@ export default async function SummaryPage() {
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <div className="min-w-0">
                   <div className="text-xs font-semibold uppercase text-emerald-300">{source}</div>
+                  <div className="mt-1 text-[11px] font-medium text-slate-500">{languageDetails(summary.language_code).label}</div>
                   <h2 className="mt-2 break-words text-lg font-bold text-white sm:text-xl">{title}</h2>
                   <div className="mt-1 text-xs text-slate-500">{new Date(summary.created_at).toLocaleDateString()}</div>
                 </div>

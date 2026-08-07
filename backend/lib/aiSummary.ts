@@ -11,6 +11,8 @@ import {
   type SourceCitation,
 } from "./sourceCitations";
 import { STUDYPILOT_TUTOR_INSTRUCTION } from "./tutorPrompt";
+import { generateLocalizedText } from "./aiLanguage";
+import { DEFAULT_LANGUAGE, type SupportedLanguageCode } from "@/shared/languages";
 
 export type TopicSummary = {
   topic: string;
@@ -25,6 +27,7 @@ export type SummaryGenerationMetadata = {
   failureCategories: string[];
   partialCoverage: boolean;
   sourceTextLength: number;
+  language: SupportedLanguageCode;
 };
 
 export type StructuredSummary = {
@@ -63,6 +66,7 @@ export type SummarySourceContext = {
   sourceType: Extract<CitationSourceType, "file" | "note">;
   sourceName: string;
   personalizationHint?: string;
+  language?: SupportedLanguageCode;
 };
 
 const MAX_CHUNK_CHARS = 12000;
@@ -477,6 +481,7 @@ function validateSummary(value: unknown): StructuredSummary | null {
       failureCategories: [],
       partialCoverage: false,
       sourceTextLength: 0,
+      language: DEFAULT_LANGUAGE,
     },
   };
 
@@ -660,9 +665,14 @@ function ensureFullModuleCoverage(summary: StructuredSummary, chunkMaps: ChunkMa
   };
 }
 
-async function summarizeChunk(chunk: string, index: number, total: number, citation: SourceCitation) {
-  const response = await generateSummaryAIText(
-    `${STUDYPILOT_TUTOR_INSTRUCTION}
+async function summarizeChunk(
+  chunk: string,
+  index: number,
+  total: number,
+  citation: SourceCitation,
+  language: SupportedLanguageCode,
+) {
+  const prompt = `${STUDYPILOT_TUTOR_INSTRUCTION}
 
 You are preparing a compact study map for ONE source section of a larger module.
 Do not summarize it as the whole file. Capture only what is present in this source section.
@@ -684,12 +694,13 @@ SOURCE LOCATOR:
 ${formatCitationLocator(citation)}
 
 SOURCE SECTION TEXT:
-${chunk}`,
-    {
+${chunk}`;
+  const response = await generateLocalizedText(prompt, language, (localizedPrompt) =>
+    generateSummaryAIText(localizedPrompt, {
       temperature: 0.2,
       maxOutputTokens: 2200,
       responseMimeType: "application/json",
-    },
+    }),
   );
 
   const parsed = parseChunkMapJson(response, index, total, citation);
@@ -739,9 +750,10 @@ async function attemptSummarizeChunk(
   index: number,
   total: number,
   citation: SourceCitation,
+  language: SupportedLanguageCode,
 ): Promise<ChunkAttemptResult> {
   try {
-    const chunkMap = await summarizeChunk(chunk, index, total, citation);
+    const chunkMap = await summarizeChunk(chunk, index, total, citation, language);
     return { ok: true, chunkMap };
   } catch (error) {
     const failureCategory = classifyChunkFailure(error);
@@ -761,6 +773,7 @@ async function generateStructuredSummary(
   coverageReminder?: string,
   partialCoverageHint?: { successfulChunks: number[]; failedChunks: number[]; totalChunks: number },
   personalizationHint = "",
+  language: SupportedLanguageCode = DEFAULT_LANGUAGE,
 ) {
   const materialLabel = sourceKind === "chunk-map" ? "clean study notes from the same uploaded file" : "uploaded study material";
   const chunkCount = Math.max(1, chunkMaps.length);
@@ -824,11 +837,13 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
 MATERIAL:
 ${text}`;
 
-  const response = await generateSummaryAIText(prompt, {
-    temperature: coverageReminder ? 0.3 : 0.2,
-    maxOutputTokens,
-    responseMimeType: "application/json",
-  });
+  const response = await generateLocalizedText(prompt, language, (localizedPrompt) =>
+    generateSummaryAIText(localizedPrompt, {
+      temperature: coverageReminder ? 0.3 : 0.2,
+      maxOutputTokens,
+      responseMimeType: "application/json",
+    }),
+  );
   devLog("AI structured response received", {
     rawLength: response.length,
     sourceKind,
@@ -902,13 +917,14 @@ export async function summarizeStudyText(
 
   const sourceTextLength = text.length;
   const personalizationHint = source.personalizationHint ?? "";
+  const language = source.language ?? DEFAULT_LANGUAGE;
 
   if (chunks.length === 1) {
-    let summary = await generateStructuredSummary(chunks[0], "full-text", [], undefined, undefined, personalizationHint);
+    let summary = await generateStructuredSummary(chunks[0], "full-text", [], undefined, undefined, personalizationHint, language);
     const reminder = buildCoverageReminder(summary, [], chunks[0]);
     devLog("single-chunk coverage check", { missedCount: reminder ? 1 : 0, retry: Boolean(reminder) });
     if (reminder) {
-      const retried = await generateStructuredSummary(chunks[0], "full-text", [], reminder, undefined, personalizationHint);
+      const retried = await generateStructuredSummary(chunks[0], "full-text", [], reminder, undefined, personalizationHint, language);
       // Keep the retry only if it actually improved coverage.
       if (retried.covered_topics.length >= summary.covered_topics.length) summary = retried;
     }
@@ -922,6 +938,7 @@ export async function summarizeStudyText(
         failureCategories: [],
         partialCoverage: false,
         sourceTextLength,
+        language,
       },
     });
     devLog("summary complete", { chunkCount: 1, coveredTopicsCount: final.covered_topics.length });
@@ -944,7 +961,7 @@ export async function summarizeStudyText(
   const chunkMaps: ChunkMap[] = [];
 
   for (let index = 0; index < processableChunks.length; index += 1) {
-    const attempt = await attemptSummarizeChunk(chunks[index], index, chunks.length, segments[index].citation);
+    const attempt = await attemptSummarizeChunk(chunks[index], index, chunks.length, segments[index].citation, language);
     if (attempt.ok) {
       chunkMaps.push(attempt.chunkMap);
       successfulChunks.push(index + 1);
@@ -976,7 +993,7 @@ export async function summarizeStudyText(
   const partialHint = partialCoverage
     ? { successfulChunks, failedChunks, totalChunks: attemptedChunks }
     : undefined;
-  let summary = await generateStructuredSummary(material, "chunk-map", chunkMaps, undefined, partialHint, personalizationHint);
+  let summary = await generateStructuredSummary(material, "chunk-map", chunkMaps, undefined, partialHint, personalizationHint, language);
   const reminder = buildCoverageReminder(summary, chunkMaps);
   devLog("multi-chunk coverage check", {
     detectedTopicCount,
@@ -985,7 +1002,7 @@ export async function summarizeStudyText(
     ...(reminder ? { missedReminder: reminder.slice(0, 200) } : {}),
   });
   if (reminder) {
-    const retried = await generateStructuredSummary(material, "chunk-map", chunkMaps, reminder, partialHint, personalizationHint);
+    const retried = await generateStructuredSummary(material, "chunk-map", chunkMaps, reminder, partialHint, personalizationHint, language);
     if (retried.covered_topics.length >= summary.covered_topics.length) summary = retried;
     devLog("multi-chunk coverage retry complete", {
       retriedCovered: retried.covered_topics.length,
@@ -1003,6 +1020,7 @@ export async function summarizeStudyText(
       failureCategories,
       partialCoverage,
       sourceTextLength,
+      language,
     },
     // If the synthesis did not flag the partial status itself in
     // module_overview, ensure the user-visible field reflects it.

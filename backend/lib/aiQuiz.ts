@@ -1,6 +1,8 @@
 import "server-only";
 
 import { generateAIText } from "./aiProvider";
+import { generateLocalizedText } from "./aiLanguage";
+import { canonicalTopicId, DEFAULT_LANGUAGE, type SupportedLanguageCode } from "@/shared/languages";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -13,6 +15,8 @@ export type QuizQuestion = {
   type: QuizQuestionType;
   question: string;
   topic: string;
+  topic_id: string;
+  topic_en: string;
   options: string[];
   correct_index: number | null;
   acceptable_answers: string[];
@@ -34,6 +38,7 @@ export type QuizOptions = {
   questionTypes?: QuizQuestionType[];
   focusTopics?: string[];
   personalizationNote?: string;
+  language?: SupportedLanguageCode;
 };
 
 // ---------------------------------------------------------------------------
@@ -229,6 +234,8 @@ function validateQuestion(raw: unknown, index: number, requestedTypes: QuizQuest
 
   const explanation = textValue(record, "explanation", "rationale", "explanation_text", "reason", "why");
   const topic = textValue(record, "topic", "subject", "concept") || "General review";
+  const topicEn = textValue(record, "topic_en", "topicEnglish") || topic;
+  const topicId = canonicalTopicId(textValue(record, "topic_id", "canonical_topic") || topicEn);
 
   if (type === "short") {
     // Accept several plausible key names for short-answer answer sets.
@@ -243,6 +250,8 @@ function validateQuestion(raw: unknown, index: number, requestedTypes: QuizQuest
       type: "short",
       question,
       topic,
+      topic_id: topicId,
+      topic_en: topicEn,
       options: [],
       correct_index: null,
       acceptable_answers: acceptable,
@@ -286,6 +295,8 @@ function validateQuestion(raw: unknown, index: number, requestedTypes: QuizQuest
     type: "mcq",
     question,
     topic,
+    topic_id: topicId,
+    topic_en: topicEn,
     options,
     correct_index: correctIndex,
     acceptable_answers: [],
@@ -320,6 +331,7 @@ export async function generateQuiz(sourceText: string, options: QuizOptions = {}
   const difficulty = normalizeDifficulty(options.difficulty);
   const text = compactQuizContext((sourceText || "").trim(), MAX_TEXT_CHARS);
   const focusTopics = uniqueStrings(options.focusTopics ?? [], 8);
+  const language = options.language ?? DEFAULT_LANGUAGE;
 
   if (!text) {
     throw new Error("No readable text found to generate a quiz from. Try another file or add manual notes.");
@@ -342,6 +354,8 @@ Quiz requirements:
 - Every question must be answerable from the material.
 - Each multiple-choice question has 2 to 4 options with exactly ONE correct option.
 - Each short-answer question has 1 to 5 acceptable answers.
+- For every question, return topic_id as a stable English snake_case identifier, topic_en as the English topic name, and topic as the user-facing translated topic label.
+- For short-answer questions in a non-English quiz, acceptable_answers must include valid answers in the selected language AND equivalent English answers.
 - Write a clear, student-friendly explanation for every question explaining why the correct answer is correct (and, for MCQs, why the others are wrong when useful).
 - Keep coverage balanced: about 70% of the quiz should test the overall chapter/module and about 30% may emphasize weak or focus topics.
 - Do not generate only from weak topics unless the source material itself is narrowly about those topics.
@@ -356,6 +370,8 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
   "questions": [
     {
       "type": "mcq",
+      "topic_id": "stable_english_topic_id",
+      "topic_en": "English topic name",
       "topic": "The specific topic being tested",
       "question": "string",
       "options": ["string", "string", "string"],
@@ -364,6 +380,8 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
     },
     {
       "type": "short",
+      "topic_id": "stable_english_topic_id",
+      "topic_en": "English topic name",
       "topic": "The specific topic being tested",
       "question": "string",
       "acceptable_answers": ["string"],
@@ -375,11 +393,13 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
 STUDY MATERIAL:
 ${text}`;
 
-  const response = await generateAIText(prompt, {
-    temperature: 0.4,
-    maxOutputTokens: Math.min(1200 + count * 260, 5200),
-    responseMimeType: "application/json",
-  });
+  const response = await generateLocalizedText(prompt, language, (localizedPrompt) =>
+    generateAIText(localizedPrompt, {
+      temperature: 0.4,
+      maxOutputTokens: Math.min(1200 + count * 260, 5200),
+      responseMimeType: "application/json",
+    }),
+  );
 
   devLog("AI quiz response received", { rawLength: response.length });
 
@@ -433,6 +453,8 @@ export function buildAnswerKey(questions: QuizQuestion[]) {
     id: q.id,
     type: q.type,
     topic: q.topic,
+    topic_id: q.topic_id,
+    topic_en: q.topic_en,
     correct_index: q.correct_index,
     acceptable_answers: q.acceptable_answers,
     explanation: q.explanation,

@@ -56,6 +56,7 @@ export type GenerationCacheKeyInput = {
   model?: string;
   promptVersion: string;
   personalizationHash?: string;
+  languageCode?: string;
   options?: Record<string, unknown>;
 };
 
@@ -274,6 +275,7 @@ export function buildGenerationCacheKey(input: GenerationCacheKeyInput) {
     model: input.model ?? "default",
     promptVersion: input.promptVersion,
     personalizationHash: input.personalizationHash ?? "none",
+    languageCode: input.languageCode ?? "en",
     options: input.options ?? {},
   });
 }

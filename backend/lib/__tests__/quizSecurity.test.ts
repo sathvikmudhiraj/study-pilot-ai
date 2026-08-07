@@ -124,8 +124,8 @@ describe("quiz server-side grading inputs", () => {
     expect(graded.score).toBe(2);
     expect(graded.total_questions).toBe(2);
     expect(graded.user_answers).toEqual([
-      { question_id: "q1", topic: "Hill Cipher", user_answer: "1", is_correct: true },
-      { question_id: "q2", topic: "Hill Cipher", user_answer: "invertible matrix", is_correct: true },
+      { question_id: "q1", topic: "Hill Cipher", topic_id: "hill_cipher", user_answer: "1", is_correct: true },
+      { question_id: "q2", topic: "Hill Cipher", topic_id: "hill_cipher", user_answer: "invertible matrix", is_correct: true },
     ]);
   });
 

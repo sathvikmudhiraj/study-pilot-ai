@@ -1,12 +1,14 @@
 import crypto from "crypto";
 import type { Role } from "./types";
 import { createServerSupabaseClient } from "./supabase/server";
+import { normalizeLanguageCode, type SupportedLanguageCode } from "@/shared/languages";
 
 export type CurrentUser = {
   id: string;
   name: string;
   email: string;
   role: Role;
+  preferredLanguage: SupportedLanguageCode;
 };
 
 export function makeId(prefix: string) {
@@ -33,6 +35,7 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
     name: user.user_metadata?.name ?? user.email?.split("@")[0] ?? "Student",
     email: user.email ?? "",
     role: trustedRole,
+    preferredLanguage: normalizeLanguageCode(user.user_metadata?.preferred_language),
   };
 }
 

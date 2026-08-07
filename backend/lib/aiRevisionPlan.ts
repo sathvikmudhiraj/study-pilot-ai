@@ -1,8 +1,10 @@
 import "server-only";
 
 import { generateAIText, getAIProviderRuntimeInfo, type AIProviderTelemetryEvent } from "./aiProvider";
+import { generateLocalizedText } from "./aiLanguage";
 import { STUDYPILOT_TUTOR_INSTRUCTION } from "./tutorPrompt";
 import type { LearnerProfile } from "./learnerProfile";
+import { DEFAULT_LANGUAGE, type SupportedLanguageCode } from "@/shared/languages";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -291,7 +293,7 @@ function learnerProfileRevisionSection(ctx: StudyContext) {
     profile.weakTopics.length
       ? `Highest-priority weak topics: ${profile.weakTopics
           .slice(0, 6)
-          .map((topic) => `${topic.topic} (${topic.accuracy}% accuracy, ${topic.misses} misses)`)
+          .map((topic) => `${topic.topic} [canonical: ${topic.canonicalId}] (${topic.accuracy}% accuracy, ${topic.misses} misses)`)
           .join("; ")}`
       : "",
     profile.recentMistakes.length
@@ -588,7 +590,10 @@ function validateRevisionPlan(record: Record<string, unknown>, ctx: StudyContext
 // Main exported function
 // ---------------------------------------------------------------------------
 
-export async function generateRevisionPlan(ctx: StudyContext): Promise<RevisionPlan> {
+export async function generateRevisionPlan(
+  ctx: StudyContext,
+  language: SupportedLanguageCode = DEFAULT_LANGUAGE,
+): Promise<RevisionPlan> {
   const { text: contextText, stats } = buildReducedStudyContextText(ctx);
   const providerInfo = getAIProviderRuntimeInfo("default");
   const telemetryEvents: AIProviderTelemetryEvent[] = [];
@@ -679,22 +684,24 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
   const aiStartedAt = Date.now();
   let response = "";
   try {
-    response = await generateAIText(prompt, {
-      temperature: 0.25,
-      maxOutputTokens: 6000,
-      responseMimeType: "application/json",
-      telemetry(event) {
-        telemetryEvents.push(event);
-        if (event.event === "provider_started" || event.event === "final_provider") {
-          if (event.provider !== "auto") actualProvider = event.provider;
-          if (event.model) actualModel = event.model;
-          if (event.timeoutMs) actualTimeoutMs = event.timeoutMs;
-        }
-        if (event.event === "provider_finished" && typeof event.durationMs === "number") {
-          aiLatencyMs = event.durationMs;
-        }
-      },
-    });
+    response = await generateLocalizedText(prompt, language, (localizedPrompt) =>
+      generateAIText(localizedPrompt, {
+        temperature: 0.25,
+        maxOutputTokens: 6000,
+        responseMimeType: "application/json",
+        telemetry(event) {
+          telemetryEvents.push(event);
+          if (event.event === "provider_started" || event.event === "final_provider") {
+            if (event.provider !== "auto") actualProvider = event.provider;
+            if (event.model) actualModel = event.model;
+            if (event.timeoutMs) actualTimeoutMs = event.timeoutMs;
+          }
+          if (event.event === "provider_finished" && typeof event.durationMs === "number") {
+            aiLatencyMs = event.durationMs;
+          }
+        },
+      }),
+    );
   } catch (error) {
     const failed = telemetryEvents.findLast((event) => event.event === "provider_failed");
     telemetryLog("revision ai request failed", {

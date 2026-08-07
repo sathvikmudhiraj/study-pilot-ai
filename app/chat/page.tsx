@@ -25,6 +25,7 @@ export default async function ChatPage() {
       .from("assistant_questions")
       .select("id, question, answer, related_file_ids, related_note_ids, conversation_id, created_at")
       .eq("user_id", user.id)
+      .eq("language_code", user.preferredLanguage)
       .is("conversation_id", null)
       .order("created_at", { ascending: false })
       .limit(30),
@@ -52,7 +53,7 @@ export default async function ChatPage() {
             {supabaseSetupMessage(setupError.message)}
           </div>
         ) : (
-          <StudyChat legacyChats={chatsResult.data ?? []} files={filesResult.data ?? []} notes={notesResult.data ?? []} />
+          <StudyChat legacyChats={chatsResult.data ?? []} files={filesResult.data ?? []} notes={notesResult.data ?? []} preferredLanguage={user.preferredLanguage} />
         )}
       </div>
     </AppShell>

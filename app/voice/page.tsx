@@ -59,12 +59,21 @@ export default async function VoicePage({ searchParams }: VoicePageProps) {
     if (!UUID_RE.test(requestedConversationId)) {
       conversationError = "That conversation link is invalid. Voice Tutor opened safely without it.";
     } else {
-      const conversationResult = await supabase
-        .from("conversations")
-        .select("id, title, pinned, context_mode, active_file_ids, active_note_ids, created_at, updated_at")
-        .eq("id", requestedConversationId)
-        .eq("user_id", user.id)
-        .maybeSingle();
+      const [conversationResult, messagesResult] = await Promise.all([
+        supabase
+          .from("conversations")
+          .select("id, title, pinned, context_mode, active_file_ids, active_note_ids, language_code, created_at, updated_at")
+          .eq("id", requestedConversationId)
+          .eq("user_id", user.id)
+          .maybeSingle(),
+        supabase
+          .from("assistant_questions")
+          .select("id, question, answer, related_file_ids, related_note_ids, conversation_id, created_at")
+          .eq("user_id", user.id)
+          .eq("conversation_id", requestedConversationId)
+          .order("created_at", { ascending: true })
+          .limit(100),
+      ]);
 
       if (conversationResult.error) {
         conversationError = supabaseSetupMessage(conversationResult.error.message);
@@ -72,14 +81,6 @@ export default async function VoicePage({ searchParams }: VoicePageProps) {
         conversationError = "That conversation is unavailable or does not belong to this account. Voice Tutor opened safely without it.";
       } else {
         conversation = conversationResult.data;
-        const messagesResult = await supabase
-          .from("assistant_questions")
-          .select("id, question, answer, related_file_ids, related_note_ids, conversation_id, created_at")
-          .eq("user_id", user.id)
-          .eq("conversation_id", requestedConversationId)
-          .order("created_at", { ascending: true })
-          .limit(100);
-
         if (messagesResult.error) {
           conversationError = supabaseSetupMessage(messagesResult.error.message);
         } else {
@@ -122,6 +123,7 @@ export default async function VoicePage({ searchParams }: VoicePageProps) {
           initialConversationError={conversationError}
           files={filesResult.data ?? []}
           notes={notesResult.data ?? []}
+          preferredLanguage={user.preferredLanguage}
         />
       )}
     </AppShell>

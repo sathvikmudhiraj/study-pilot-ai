@@ -605,7 +605,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const input = validateInput(body);
+    const input = validateInput({ ...body, language: body.language ?? user.preferredLanguage });
     const source = await resolveSource(supabase, user.id, input);
     const draft = await generateStudyNoteDraft(source);
     return NextResponse.json({ draft });

@@ -1,8 +1,10 @@
 import "server-only";
+import { canonicalTopicId } from "@/shared/languages";
 
 export type QuizAttemptAnswer = {
   question_id: string;
   topic: string;
+  topic_id: string;
   user_answer: string;
   is_correct: boolean;
 };
@@ -11,12 +13,14 @@ export type WrongQuestion = {
   question_id: string;
   question: string;
   topic: string;
+  topic_id: string;
   user_answer: string;
   correct_answer: string;
 };
 
 export type TopicResult = {
   topic: string;
+  topic_id: string;
   correct: number;
   total: number;
 };
@@ -36,6 +40,8 @@ export type QuizAnalytics = {
   attemptCount: number;
   strongTopics: string[];
   weakTopics: string[];
+  strongTopicIds: string[];
+  weakTopicIds: string[];
   lastQuizScore: {
     score: number;
     total: number;
@@ -48,6 +54,8 @@ export const emptyQuizAnalytics: QuizAnalytics = {
   attemptCount: 0,
   strongTopics: [],
   weakTopics: [],
+  strongTopicIds: [],
+  weakTopicIds: [],
   lastQuizScore: null,
 };
 
@@ -74,7 +82,12 @@ function shortAnswerMatches(answer: string, acceptable: string[]) {
 }
 
 function questionTopic(question: Record<string, unknown>) {
-  return text(question.topic ?? question.subject ?? question.concept) || "General review";
+  const label = text(question.topic ?? question.subject ?? question.concept) || "General review";
+  const english = text(question.topic_en ?? question.topicEnglish) || label;
+  return {
+    id: canonicalTopicId(question.topic_id ?? question.canonical_topic ?? english),
+    label,
+  };
 }
 
 export function gradeQuizAttempt({
@@ -120,18 +133,19 @@ export function gradeQuizAttempt({
     }
 
     if (isCorrect) score += 1;
-    userAnswers.push({ question_id: questionId, topic, user_answer: userAnswer, is_correct: isCorrect });
+    userAnswers.push({ question_id: questionId, topic: topic.label, topic_id: topic.id, user_answer: userAnswer, is_correct: isCorrect });
 
-    const topicResult = topicMap.get(topic) ?? { topic, correct: 0, total: 0 };
+    const topicResult = topicMap.get(topic.id) ?? { topic: topic.label, topic_id: topic.id, correct: 0, total: 0 };
     topicResult.total += 1;
     if (isCorrect) topicResult.correct += 1;
-    topicMap.set(topic, topicResult);
+    topicMap.set(topic.id, topicResult);
 
     if (!isCorrect) {
       wrongQuestions.push({
         question_id: questionId,
         question: text(question.question ?? question.prompt ?? question.stem),
-        topic,
+        topic: topic.label,
+        topic_id: topic.id,
         user_answer: userAnswer,
         correct_answer: correctAnswer,
       });
@@ -139,8 +153,8 @@ export function gradeQuizAttempt({
   }
 
   const topicResults = [...topicMap.values()];
-  const weakTopics = topicResults.filter((result) => result.correct / Math.max(result.total, 1) < 0.7).map((result) => result.topic);
-  const strongTopics = topicResults.filter((result) => result.correct / Math.max(result.total, 1) >= 0.7).map((result) => result.topic);
+  const weakTopics = topicResults.filter((result) => result.correct / Math.max(result.total, 1) < 0.7).map((result) => result.topic_id);
+  const strongTopics = topicResults.filter((result) => result.correct / Math.max(result.total, 1) >= 0.7).map((result) => result.topic_id);
   const totalQuestions = questionRows.length;
 
   return {
@@ -167,7 +181,7 @@ export function buildQuizAnalytics(rows: unknown[]): QuizAnalytics {
 
   if (!attempts.length) return emptyQuizAnalytics;
 
-  const totals = new Map<string, { correct: number; total: number }>();
+  const totals = new Map<string, { label: string; correct: number; total: number }>();
   for (const attempt of attempts) {
     const topicResults = Array.isArray(attempt.topic_results) ? attempt.topic_results : [];
     if (topicResults.length) {
@@ -175,31 +189,37 @@ export function buildQuizAnalytics(rows: unknown[]): QuizAnalytics {
         if (!item || typeof item !== "object") continue;
         const result = item as Record<string, unknown>;
         const topic = text(result.topic);
+        const topicId = canonicalTopicId(result.topic_id ?? topic);
         if (!topic) continue;
-        const aggregate = totals.get(topic) ?? { correct: 0, total: 0 };
+        const aggregate = totals.get(topicId) ?? { label: topic, correct: 0, total: 0 };
+        aggregate.label = topic || aggregate.label;
         aggregate.correct += numeric(result.correct);
         aggregate.total += numeric(result.total);
-        totals.set(topic, aggregate);
+        totals.set(topicId, aggregate);
       }
       continue;
     }
 
     for (const topic of stringList(attempt.weak_topics)) {
-      const aggregate = totals.get(topic) ?? { correct: 0, total: 0 };
+      const topicId = canonicalTopicId(topic);
+      const aggregate = totals.get(topicId) ?? { label: topic, correct: 0, total: 0 };
       aggregate.total += 1;
-      totals.set(topic, aggregate);
+      totals.set(topicId, aggregate);
     }
     for (const topic of stringList(attempt.strong_topics)) {
-      const aggregate = totals.get(topic) ?? { correct: 0, total: 0 };
+      const topicId = canonicalTopicId(topic);
+      const aggregate = totals.get(topicId) ?? { label: topic, correct: 0, total: 0 };
       aggregate.correct += 1;
       aggregate.total += 1;
-      totals.set(topic, aggregate);
+      totals.set(topicId, aggregate);
     }
   }
 
   const ranked = [...totals.entries()].sort((a, b) => b[1].total - a[1].total || a[0].localeCompare(b[0]));
-  const weakTopics = ranked.filter(([, result]) => result.correct / Math.max(result.total, 1) < 0.7).map(([topic]) => topic).slice(0, 10);
-  const strongTopics = ranked.filter(([, result]) => result.correct / Math.max(result.total, 1) >= 0.7).map(([topic]) => topic).slice(0, 10);
+  const weakRows = ranked.filter(([, result]) => result.correct / Math.max(result.total, 1) < 0.7).slice(0, 10);
+  const strongRows = ranked.filter(([, result]) => result.correct / Math.max(result.total, 1) >= 0.7).slice(0, 10);
+  const weakTopics = weakRows.map(([, result]) => result.label);
+  const strongTopics = strongRows.map(([, result]) => result.label);
   const latest = attempts[0];
   const total = numeric(latest.total_questions);
   const score = numeric(latest.score);
@@ -208,6 +228,8 @@ export function buildQuizAnalytics(rows: unknown[]): QuizAnalytics {
     attemptCount: attempts.length,
     strongTopics,
     weakTopics,
+    weakTopicIds: weakRows.map(([topicId]) => topicId),
+    strongTopicIds: strongRows.map(([topicId]) => topicId),
     lastQuizScore: {
       score,
       total,

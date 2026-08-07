@@ -72,6 +72,8 @@ export type ClientQuizQuestion = {
   type: QuestionType;
   question: string;
   topic: string;
+  topic_id: string;
+  topic_en: string;
   options: string[];
   marks: number | null;
   difficulty: string | null;
@@ -90,12 +92,15 @@ export type ClientQuiz = {
   source_summary?: string | null;
   created_at: string;
   updated_at?: string;
+  language_code: string;
 };
 
 export type ReviewAnswerKeyEntry = {
   id: string;
   type: QuestionType;
   topic?: string;
+  topic_id?: string;
+  topic_en?: string;
   correct_index: number | null;
   acceptable_answers: string[];
   explanation: string;
@@ -126,6 +131,8 @@ export function sanitizeQuizQuestionForClient(raw: unknown, index: number): Clie
     type,
     question,
     topic: text(record.topic ?? record.subject ?? record.concept, "General review"),
+    topic_id: text(record.topic_id ?? record.canonical_topic, "general_review"),
+    topic_en: text(record.topic_en ?? record.topicEnglish ?? record.topic, "General review"),
     options: type === "mcq" ? options : [],
     marks: numberOrNull(record.marks ?? record.points),
     difficulty: maybeText(record.difficulty),
@@ -155,6 +162,7 @@ export function sanitizeQuizForClient(
     difficulty: maybeText(row.difficulty),
     questions: sanitizeQuizQuestionsForClient(overrides.questions ?? row.questions),
     source_summary: maybeText(overrides.source_summary ?? row.source_summary),
+    language_code: text(row.language_code, "en"),
     created_at: text(row.created_at, new Date().toISOString()),
     ...(typeof row.updated_at === "string" ? { updated_at: row.updated_at } : {}),
   };
@@ -180,10 +188,14 @@ export function buildReviewAnswerKey({
     const key = keyById.get(id) ?? question;
     const type: QuestionType = text(question.type ?? key.type).toLowerCase().includes("short") ? "short" : "mcq";
 
+    const topicId = text(question.topic_id ?? key.topic_id);
+    const topicEn = text(question.topic_en ?? key.topic_en);
     return {
       id,
       type,
       topic: text(question.topic ?? key.topic),
+      ...(topicId ? { topic_id: topicId } : {}),
+      ...(topicEn ? { topic_en: topicEn } : {}),
       correct_index: numberOrNull(key.correct_index ?? key.correctIndex ?? question.correct_index ?? question.correctIndex),
       acceptable_answers: stringList(key.acceptable_answers ?? key.acceptableAnswers ?? question.acceptable_answers ?? question.acceptableAnswers),
       explanation: text(key.explanation ?? key.rationale ?? key.reason ?? question.explanation ?? question.rationale ?? question.reason),

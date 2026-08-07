@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/backend/lib/auth";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
+import { isSupportedLanguageCode } from "@/shared/languages";
 
 export const runtime = "nodejs";
 
@@ -20,7 +21,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 // Columns returned for list responses (no heavy data)
 const CONVERSATION_LIST_SELECT =
-  "id, title, pinned, context_mode, active_file_ids, active_note_ids, created_at, updated_at";
+  "id, title, pinned, context_mode, active_file_ids, active_note_ids, language_code, created_at, updated_at";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -126,6 +127,10 @@ export async function POST(request: Request) {
 
   const title = sanitizeTitle(body.title);
   const contextMode = sanitizeContextMode(body.context_mode ?? body.contextMode);
+  if (body.language_code !== undefined && !isSupportedLanguageCode(body.language_code)) {
+    return apiError("Choose a supported language.", 400);
+  }
+  const language = isSupportedLanguageCode(body.language_code) ? body.language_code : user.preferredLanguage;
 
   // Validate fileIds: each must be a UUID owned by this user.
   const requestedFileIds = cleanIds(body.active_file_ids ?? body.activeFileIds, MAX_FILE_IDS);
@@ -168,6 +173,7 @@ export async function POST(request: Request) {
         context_mode: contextMode,
         active_file_ids: verifiedFileIds,
         active_note_ids: verifiedNoteIds,
+        language_code: language,
       })
       .select(CONVERSATION_LIST_SELECT)
       .single();

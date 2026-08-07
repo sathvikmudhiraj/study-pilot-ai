@@ -2,6 +2,8 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
+import { LanguageSelector } from "./LanguageSelector";
+import { languageDetails, type SupportedLanguageCode } from "@/shared/languages";
 
 // ---------------------------------------------------------------------------
 // Shared types (kept loose - they mirror backend/lib/aiQuiz.ts but are
@@ -15,6 +17,8 @@ type QuizQuestion = {
   type: QuestionType;
   question: string;
   topic: string;
+  topic_id?: string;
+  topic_en?: string;
   options: string[];
   marks?: number | null;
   difficulty?: string | null;
@@ -40,6 +44,7 @@ type Quiz = {
   answer_key?: AnswerKeyEntry[] | null;
   source_summary?: string | null;
   created_at: string;
+  language_code: SupportedLanguageCode;
 };
 
 type SourceOption = {
@@ -114,13 +119,15 @@ function normalizeQuestion(raw: unknown, index: number): QuizQuestion | null {
         : "short";
 
   const topic = textOr(record.topic ?? record.subject ?? record.concept, "General review");
+  const topic_id = textOr(record.topic_id ?? record.canonical_topic, "general_review");
+  const topic_en = textOr(record.topic_en ?? record.topicEnglish ?? record.topic, "General review");
   const options = asList(record.options ?? record.choices);
   const marks = typeof record.marks === "number" && Number.isFinite(record.marks) ? record.marks : null;
   const displayOrder = typeof record.display_order === "number" && Number.isFinite(record.display_order) ? record.display_order : index + 1;
 
   if (type === "mcq") {
     if (options.length < 2) return null;
-    return { id: textOr(record.id, `q${index + 1}`), type, question, topic, options, marks, difficulty: textOr(record.difficulty) || null, display_order: displayOrder };
+    return { id: textOr(record.id, `q${index + 1}`), type, question, topic, topic_id, topic_en, options, marks, difficulty: textOr(record.difficulty) || null, display_order: displayOrder };
   }
 
   return {
@@ -128,6 +135,8 @@ function normalizeQuestion(raw: unknown, index: number): QuizQuestion | null {
     type: "short",
     question,
     topic,
+    topic_id,
+    topic_en,
     options: [],
     marks,
     difficulty: textOr(record.difficulty) || null,
@@ -177,6 +186,7 @@ function normalizeQuiz(raw: unknown): Quiz | null {
     questions: normalized,
     answer_key: answerKey.length ? answerKey : null,
     source_summary: textOr(record.source_summary) || null,
+    language_code: (textOr(record.language_code, "en") || "en") as SupportedLanguageCode,
     created_at: textOr(record.created_at, new Date().toISOString()),
   };
 }
@@ -205,11 +215,13 @@ function SourcePicker({
   onGenerate,
   generating,
   initialSource,
+  preferredLanguage,
 }: {
   sources: QuizSources;
   onGenerate: (params: GenerateParams) => void;
   generating: boolean;
   initialSource: InitialSource;
+  preferredLanguage: SupportedLanguageCode;
 }) {
   const allEmpty = !sources.files.length && !sources.notes.length && !sources.summaries.length;
 
@@ -236,6 +248,7 @@ function SourcePicker({
   const [count, setCount] = useState<number>(8);
   const [difficulty, setDifficulty] = useState<QuizDifficulty>("medium");
   const [types, setTypes] = useState<QuizTypeSelection>("all");
+  const [language, setLanguage] = useState<SupportedLanguageCode>(preferredLanguage);
 
   function handleKindChange(kind: "file" | "note" | "summary") {
     setSourceKind(kind);
@@ -251,6 +264,7 @@ function SourcePicker({
       count,
       difficulty,
       types,
+      language,
     });
   }
 
@@ -362,6 +376,8 @@ function SourcePicker({
           </label>
         </div>
 
+        <LanguageSelector value={language} onChange={setLanguage} compact />
+
         <button
           type="button"
           onClick={submit}
@@ -383,6 +399,7 @@ type GenerateParams = {
   count: number;
   difficulty: QuizDifficulty;
   types: QuizTypeSelection;
+  language: SupportedLanguageCode;
 };
 
 // ---------------------------------------------------------------------------
@@ -553,11 +570,13 @@ export function QuizWorkspace({
   sources,
   initialAnalytics,
   initialSource = null,
+  preferredLanguage,
 }: {
   savedQuizzes: unknown[];
   sources: QuizSources;
   initialAnalytics: QuizAnalytics;
   initialSource?: InitialSource;
+  preferredLanguage: SupportedLanguageCode;
 }) {
   const normalizedSaved = useMemo(() => savedQuizzes.map(normalizeQuiz).filter((q): q is Quiz => Boolean(q)), [savedQuizzes]);
 
@@ -654,6 +673,7 @@ export function QuizWorkspace({
       count: params.count,
       difficulty: params.difficulty,
       questionTypes: params.types === "all" ? ["mcq", "short"] : [params.types],
+      language: params.language,
     };
     if (params.sourceKind === "file") payload.fileId = params.sourceId;
     else if (params.sourceKind === "note") payload.noteId = params.sourceId;
@@ -695,7 +715,7 @@ export function QuizWorkspace({
             <div className="rounded-lg border border-red-400/30 bg-red-400/10 p-4 text-sm leading-6 text-red-200">{error}</div>
           ) : null}
 
-          <SourcePicker sources={sources} onGenerate={handleGenerate} generating={generating} initialSource={initialSource} />
+          <SourcePicker sources={sources} onGenerate={handleGenerate} generating={generating} initialSource={initialSource} preferredLanguage={preferredLanguage} />
 
           {generating ? (
             <div className="rounded-lg border border-emerald-300/20 bg-emerald-300/10 p-5 text-sm text-emerald-100">
@@ -720,6 +740,9 @@ export function QuizWorkspace({
                           <h3 className="break-words font-semibold text-white">{quiz.title || "Practice quiz"}</h3>
                           <span className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${difficultyColor(quiz.difficulty)}`}>
                             {quiz.difficulty}
+                          </span>
+                          <span className="rounded border border-white/10 bg-white/5 px-1.5 py-0.5 text-[10px] font-semibold text-slate-300">
+                            {languageDetails(quiz.language_code).label}
                           </span>
                         </div>
                         <p className="mt-1 text-xs text-slate-500">

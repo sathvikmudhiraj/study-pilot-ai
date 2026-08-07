@@ -81,8 +81,9 @@ export function isSpeechSynthesisSupported(): boolean {
 // ---------------------------------------------------------------------------
 // Language selector
 // ---------------------------------------------------------------------------
+import { SUPPORTED_LANGUAGES, type SupportedLanguageCode } from "@/shared/languages";
 
-export type VoiceLanguageCode = "auto" | "en-IN" | "te-IN" | "hi-IN" | "ta-IN" | "kn-IN" | "ml-IN" | "en-US";
+export type VoiceLanguageCode = "auto" | SupportedLanguageCode;
 
 export type VoiceLanguage = {
   code: VoiceLanguageCode;
@@ -105,13 +106,13 @@ export type VoiceLanguage = {
 
 export const VOICE_LANGUAGES: VoiceLanguage[] = [
   { code: "auto", label: "Auto detect", recognitionLocale: "", speechLocale: "", languageName: "the same language you speak" },
-  { code: "en-IN", label: "English (India)", recognitionLocale: "en-IN", speechLocale: "en-IN", languageName: "Indian English" },
-  { code: "te-IN", label: "Telugu", recognitionLocale: "te-IN", speechLocale: "te-IN", languageName: "Telugu" },
-  { code: "hi-IN", label: "Hindi", recognitionLocale: "hi-IN", speechLocale: "hi-IN", languageName: "Hindi" },
-  { code: "ta-IN", label: "Tamil", recognitionLocale: "ta-IN", speechLocale: "ta-IN", languageName: "Tamil" },
-  { code: "kn-IN", label: "Kannada", recognitionLocale: "kn-IN", speechLocale: "kn-IN", languageName: "Kannada" },
-  { code: "ml-IN", label: "Malayalam", recognitionLocale: "ml-IN", speechLocale: "ml-IN", languageName: "Malayalam" },
-  { code: "en-US", label: "English (US)", recognitionLocale: "en-US", speechLocale: "en-US", languageName: "American English" },
+  ...SUPPORTED_LANGUAGES.map((language) => ({
+    code: language.code,
+    label: language.label,
+    recognitionLocale: language.locale,
+    speechLocale: language.locale,
+    languageName: language.promptName,
+  })),
 ];
 
 export function findVoiceLanguage(code: string | undefined | null): VoiceLanguage {
@@ -135,5 +136,7 @@ export function pickVoiceForLocale(locale: string): SpeechSynthesisVoice | null 
   const samePrefix = voices.find((voice) => voice.lang?.toLowerCase().startsWith(langPrefix));
   if (samePrefix) return samePrefix;
 
-  return null;
+  const english = voices.find((voice) => voice.lang?.toLowerCase() === "en-in")
+    ?? voices.find((voice) => voice.lang?.toLowerCase().startsWith("en"));
+  return english ?? voices.find((voice) => voice.default) ?? voices[0] ?? null;
 }

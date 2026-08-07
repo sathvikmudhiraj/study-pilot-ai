@@ -85,6 +85,7 @@ import {
   IconVolumeOff,
   IconZap,
 } from "./icons";
+import type { SupportedLanguageCode } from "@/shared/languages";
 
 // ---------------------------------------------------------------------------
 // Answer shape (mirrors the StudyPilot chat API response)
@@ -314,6 +315,7 @@ export function VoiceTutor({
   initialConversationError = "",
   files = [],
   notes = [],
+  preferredLanguage,
 }: {
   initialFileId?: string | null;
   initialFileName?: string | null;
@@ -322,8 +324,9 @@ export function VoiceTutor({
   initialConversationError?: string | null;
   files?: FileOption[];
   notes?: NoteOption[];
+  preferredLanguage: SupportedLanguageCode;
 }) {
-  const [language, setLanguage] = useState<string>("auto");
+  const [language, setLanguage] = useState<string>(initialConversation?.language_code ?? preferredLanguage);
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState("");
   const [turns, setTurns] = useState<Turn[]>(() => initialMessages.flatMap((message) => recordToTurns(message)));
@@ -508,6 +511,7 @@ export function VoiceTutor({
       contextMode: "general",
       activeFileIds: [],
       activeNoteIds: [],
+      language: activeLanguage.code === "auto" ? preferredLanguage : activeLanguage.code,
     });
     if (!result.ok) throw new Error(result.message);
 
@@ -577,6 +581,7 @@ export function VoiceTutor({
           noteIds: studyNoteIds,
           conversationId: activeConversation.id,
           deferPersistence: true,
+          language: activeLanguage.code === "auto" ? preferredLanguage : activeLanguage.code,
         }),
         signal: controller.signal,
       });
@@ -873,13 +878,7 @@ export function VoiceTutor({
   }
 
   function selectedNotesLanguage() {
-    if (activeLanguage.code === "te-IN") return "telugu";
-    if (activeLanguage.code === "hi-IN") return "hindi";
-    if (activeLanguage.code === "ta-IN") return "tamil";
-    if (activeLanguage.code === "kn-IN") return "kannada";
-    if (activeLanguage.code === "ml-IN") return "malayalam";
-    if (activeLanguage.code === "en-IN" || activeLanguage.code === "en-US") return "english";
-    return "auto";
+    return activeLanguage.code === "auto" ? preferredLanguage : activeLanguage.code;
   }
 
   function latestAnswerTurn() {
@@ -1727,7 +1726,13 @@ export function VoiceTutor({
               <span className="uppercase text-slate-400">Speaking language</span>
               <select
                 value={language}
-                onChange={(event) => setLanguage(event.target.value)}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setLanguage(value);
+                  if (conversationId && value !== "auto") {
+                    void patchConversation(conversationId, { language: value as SupportedLanguageCode });
+                  }
+                }}
                 className="h-11 w-full rounded-md border border-white/12 bg-[#080f1e] px-3 text-sm text-slate-100 outline-none transition focus:border-emerald-300 focus:ring-2 focus:ring-emerald-300/10"
               >
                 {VOICE_LANGUAGES.map((option) => (

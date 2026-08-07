@@ -10,6 +10,8 @@ import {
 import { StudyNoteEditor } from "./StudyNoteEditor";
 import { adaptStudyNoteRow, type StudyNoteDraft } from "@/frontend/lib/studyNotes";
 import { sanitizeSummaryForDisplay } from "@/shared/summarySanitizer";
+import { LanguageSelector } from "./LanguageSelector";
+import { languageDetails, type SupportedLanguageCode } from "@/shared/languages";
 
 type Summary = {
   id?: string;
@@ -38,6 +40,7 @@ type GenerationMetadata = {
   failureCategories: string[];
   partialCoverage: boolean;
   sourceTextLength: number;
+  language?: SupportedLanguageCode;
 };
 
 type TopicSummary = {
@@ -168,11 +171,13 @@ export function SummaryPanel({
   noteId,
   initialSummary,
   canCreateStudyActions = false,
+  initialLanguage,
 }: {
   fileId?: string;
   noteId?: string;
   initialSummary: Summary | null;
   canCreateStudyActions?: boolean;
+  initialLanguage: SupportedLanguageCode;
 }) {
   const router = useRouter();
   const [summary, setSummary] = useState<Summary | null>(() => normalizeSummary(initialSummary));
@@ -185,6 +190,7 @@ export function SummaryPanel({
   const [staleSummary, setStaleSummary] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [finalElapsedMs, setFinalElapsedMs] = useState<number | null>(null);
+  const [language, setLanguage] = useState(initialLanguage);
   const summaryStartedAtRef = useRef<number | null>(null);
 
   // Mounted state is initialised from the latest initialSummary prop, so when
@@ -239,7 +245,7 @@ export function SummaryPanel({
       const response = await fetch("/api/ai/summarize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileId, noteId }),
+        body: JSON.stringify({ fileId, noteId, language }),
       });
       const data: Record<string, unknown> = await response.json();
 
@@ -314,7 +320,7 @@ export function SummaryPanel({
       const response = await fetch("/api/ai/summarize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileId, reextractOnly: true }),
+        body: JSON.stringify({ fileId, reextractOnly: true, language }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "File re-extraction failed.");
@@ -339,7 +345,9 @@ export function SummaryPanel({
   function readAloud() {
     if (!readText || typeof window === "undefined" || !("speechSynthesis" in window)) return;
     window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(new SpeechSynthesisUtterance(readText));
+    const utterance = new SpeechSynthesisUtterance(readText);
+    utterance.lang = languageDetails(language).locale;
+    window.speechSynthesis.speak(utterance);
   }
 
   function sourceQuery() {
@@ -387,7 +395,7 @@ export function SummaryPanel({
           ...(noteId ? { noteId } : {}),
           ...(selectedTopic ? { topic: selectedTopic } : {}),
           style: "standard",
-          language: "auto",
+          language,
         }),
       });
       const data = await response.json();
@@ -412,7 +420,16 @@ export function SummaryPanel({
           <div className="text-sm font-semibold uppercase text-emerald-300">AI Summary</div>
           <h2 className="mt-3 break-words text-xl font-bold text-white sm:text-2xl">{summary?.suggested_title || "Study summary"}</h2>
         </div>
-        <div className="grid w-full gap-2 sm:w-auto sm:grid-cols-2">
+        <div className="grid w-full gap-2 sm:w-auto sm:grid-cols-[180px_auto_auto] sm:items-end">
+          <LanguageSelector
+            value={language}
+            onChange={(value) => {
+              setLanguage(value);
+              const base = fileId ? `/files/${encodeURIComponent(fileId)}` : "/summary";
+              router.replace(`${base}?language=${encodeURIComponent(value)}`);
+            }}
+            compact
+          />
           {fileId ? (
             <button
               type="button"

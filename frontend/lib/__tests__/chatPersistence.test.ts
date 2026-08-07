@@ -101,6 +101,10 @@ describe("chat persistence helpers", () => {
     expect(formatConversationTimestamp("2026-07-17T02:30:00.000Z", Date.parse("2026-07-17T03:00:00.000Z"))).toBe("30m ago");
   });
 
+  it("keeps the saved conversation language available for restore", () => {
+    expect(conversation("telugu", "2026-07-17T01:00:00.000Z", { language_code: "te" }).language_code).toBe("te");
+  });
+
   it("tracks loaded assistant rows so duplicate message loading is prevented", () => {
     const ids = assistantIdsFromRows([{ id: "row-1" }, { id: "row-2" }, { id: "row-1" }]);
 

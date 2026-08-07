@@ -44,7 +44,7 @@ export default async function QuizPage({ searchParams }: { searchParams?: Promis
     const [quizzesResult, filesResult, notesResult, summariesResult, attemptsResult] = await Promise.all([
       supabase
         .from("quizzes")
-        .select("id, file_id, note_id, quiz_title, title, difficulty, questions, created_at")
+        .select("id, file_id, note_id, quiz_title, title, difficulty, questions, language_code, created_at")
         .eq("user_id", user.id)
         .order("created_at", { ascending: false })
         .limit(20),
@@ -64,8 +64,9 @@ export default async function QuizPage({ searchParams }: { searchParams?: Promis
         .limit(QUIZ_SOURCE_LIMIT),
       supabase
         .from("ai_outputs")
-        .select("id, suggested_title")
+        .select("id, suggested_title, language_code")
         .eq("user_id", user.id)
+        .eq("language_code", user.preferredLanguage)
         .order("created_at", { ascending: false })
         .limit(50),
       supabase
@@ -108,7 +109,7 @@ export default async function QuizPage({ searchParams }: { searchParams?: Promis
         <div className="mb-6 rounded-xl border border-amber-400/25 bg-amber-400/[0.08] p-5 text-sm leading-6 text-amber-100 animate-fade-in">{error}</div>
       ) : null}
 
-      <QuizWorkspace savedQuizzes={savedQuizzes} sources={sources} initialAnalytics={quizAnalytics} initialSource={initialSource} />
+      <QuizWorkspace savedQuizzes={savedQuizzes} sources={sources} initialAnalytics={quizAnalytics} initialSource={initialSource} preferredLanguage={user?.preferredLanguage ?? "en"} />
     </AppShell>
   );
 }

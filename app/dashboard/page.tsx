@@ -13,6 +13,7 @@ import {
   IconSparkles,
   IconChevronRight,
   IconPlus,
+  IconTarget,
 } from "@/frontend/components/icons";
 import { getCurrentUser } from "@/backend/lib/auth";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
@@ -25,6 +26,12 @@ function formatDate(iso: string) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+}
+
+function formatShortDate(iso: string) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
 
 function formatPercent(value: number | null) {
@@ -123,6 +130,96 @@ export default async function DashboardPage() {
           {formatMinutes(learningMetrics.timeStudiedMinutes)} studied
         </MetricCard>
       </div>
+
+      {learningMetrics.topicImprovementHistory.length || learningMetrics.beforeVsLatest.length || learningMetrics.masteryProgress.length ? (
+        <div className="mt-8 grid gap-6 lg:grid-cols-3 animate-fade-in-up" style={{ animationDelay: "140ms" }}>
+          <section className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-5 lg:col-span-2">
+            <div className="mb-4 flex items-center gap-2">
+              <IconZap size={16} className="text-amber-300 shrink-0" />
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-amber-200">Weak-topic improvement</h2>
+            </div>
+            {learningMetrics.topicImprovementHistory.length ? (
+              <div className="grid gap-5">
+                {learningMetrics.topicImprovementHistory.map((series) => (
+                  <div key={series.topicId} className="rounded-lg border border-white/10 bg-slate-950/50 p-4">
+                    <div className="mb-2 flex items-center justify-between">
+                      <span className="text-sm font-semibold text-white truncate">{series.topic}</span>
+                      <span className="text-xs text-slate-500 shrink-0 ml-2">{series.points.length} attempt{series.points.length !== 1 ? "s" : ""}</span>
+                    </div>
+                    <ImprovementLineChart points={series.points} />
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-slate-500">Take multiple quizzes on the same topic to see your improvement trend over time.</p>
+            )}
+
+            {learningMetrics.beforeVsLatest.length ? (
+              <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                {learningMetrics.beforeVsLatest.map((item) => (
+                  <div key={item.topicId} className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.05] p-3">
+                    <p className="text-xs font-semibold text-cyan-200 truncate">{item.topic}</p>
+                    <div className="mt-1 flex items-baseline gap-2">
+                      <span className="text-lg font-bold tabular-nums text-white">{item.latest}%</span>
+                      {item.improvement !== null && item.improvement !== 0 ? (
+                        <span className={`text-xs font-semibold tabular-nums ${item.improvement >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
+                          {item.improvement >= 0 ? "+" : ""}{item.improvement}%
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="mt-1 flex items-center gap-2 text-xs text-slate-500">
+                      <span>First {item.first}%</span>
+                      <span className="text-slate-700">→</span>
+                      <span>Now {item.latest}%</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </section>
+
+          <section className="bg-white/[0.03] bg-white/[0.03] rounded-xl border border-white/[0.06] p-5">
+            <div className="mb-4 flex items-center gap-2">
+              <IconTarget size={16} className="text-emerald-300 shrink-0" />
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-emerald-200">Topic mastery</h2>
+            </div>
+            {learningMetrics.masteryProgress.length ? (
+              <div className="grid gap-3">
+                {learningMetrics.masteryProgress.map((topic) => {
+                  const barColor =
+                    topic.mastery === "strong" ? "bg-emerald-400/60" :
+                    topic.mastery === "developing" ? "bg-cyan-400/50" : "bg-amber-400/50";
+                  const textColor =
+                    topic.mastery === "strong" ? "text-emerald-200" :
+                    topic.mastery === "developing" ? "text-cyan-200" : "text-amber-200";
+                  return (
+                    <div key={topic.canonicalId} className="rounded-lg border border-white/10 bg-slate-950/50 p-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-medium text-white truncate">{topic.topic}</span>
+                        <span className={`text-xs font-semibold tabular-nums ${textColor}`}>{topic.accuracy}%</span>
+                      </div>
+                      <div className="h-2 rounded-full bg-white/10 overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-500 ${barColor}`}
+                          style={{ width: `${topic.accuracy}%` }}
+                          role="progressbar"
+                          aria-valuenow={topic.accuracy}
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-label={`${topic.topic} mastery ${topic.accuracy}%`}
+                        />
+                      </div>
+                      <p className="mt-1 text-xs text-slate-500">{topic.attempts} question{topic.attempts !== 1 ? "s" : ""} answered</p>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-sm text-slate-500">Complete quiz attempts to see topic-level mastery bars.</p>
+            )}
+          </section>
+        </div>
+      ) : null}
 
       <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]">
         <section className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-5 animate-fade-in-up">
@@ -292,6 +389,93 @@ export default async function DashboardPage() {
         </div>
       </div>
     </AppShell>
+  );
+}
+
+function ImprovementLineChart({ points }: { points: { attemptedAt: string; percentage: number; correct: number; total: number }[] }) {
+  if (points.length < 2) {
+    return (
+      <div className="rounded border border-white/[0.08] bg-slate-950/70 p-3 text-center">
+        <p className="text-xs tabular-nums text-amber-100">{points[0].percentage}%</p>
+        <p className="text-[10px] text-slate-500">{points[0].correct}/{points[0].total} correct</p>
+      </div>
+    );
+  }
+
+  const minVal = Math.min(...points.map((p) => p.percentage));
+  const maxVal = Math.max(...points.map((p) => p.percentage));
+  const range = Math.max(maxVal - minVal, 1);
+  const paddedMin = Math.max(0, minVal - range * 0.15);
+  const paddedMax = Math.min(100, maxVal + range * 0.15);
+
+  const viewWidth = 400;
+  const viewHeight = 100;
+  const padLeft = 32;
+  const padRight = 16;
+  const padTop = 8;
+  const padBottom = 20;
+  const plotWidth = viewWidth - padLeft - padRight;
+  const plotHeight = viewHeight - padTop - padBottom;
+
+  function sx(i: number) {
+    return padLeft + (i / Math.max(points.length - 1, 1)) * plotWidth;
+  }
+
+  function sy(percentage: number) {
+    return padTop + plotHeight - ((percentage - paddedMin) / Math.max(paddedMax - paddedMin, 1)) * plotHeight;
+  }
+
+  const gradeLines: number[] = [];
+  for (let g = 0; g <= 100; g += 20) {
+    if (g >= paddedMin && g <= paddedMax) {
+      gradeLines.push(g);
+    }
+  }
+
+  const pathD = points.map((point, i) => `${i === 0 ? "M" : "L"}${sx(i)} ${sy(point.percentage)}`).join(" ");
+  const areaD = `${pathD} L${sx(points.length - 1)} ${sy(paddedMin)} L${sx(0)} ${sy(paddedMin)} Z`;
+
+  return (
+    <div className="rounded border border-white/[0.08] bg-slate-950/50 p-3">
+      <svg
+        viewBox={`0 0 ${viewWidth} ${viewHeight}`}
+        width="100%"
+        height={viewHeight}
+        role="img"
+        aria-label={`Improvement line chart: ${points.map((p) => `${p.percentage}%`).join(", ")}`}
+        className="w-full"
+      >
+        {gradeLines.map((grade) => (
+          <line
+            key={`grade-${grade}`}
+            x1={padLeft}
+            y1={sy(grade)}
+            x2={viewWidth - padRight}
+            y2={sy(grade)}
+            stroke="rgb(255 255 255 / 0.06)"
+            strokeWidth={1}
+          />
+        ))}
+        <polygon points={areaD.split("L").join(",")} fill="rgb(217 164 14 / 0.08)" aria-hidden="true" />
+        <path d={pathD} fill="none" stroke="rgb(252 211 77 / 0.7)" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+        {points.map((point, i) => (
+          <g key={point.attemptedAt}>
+            <circle cx={sx(i)} cy={sy(point.percentage)} r={3} fill="#0d1224" stroke="rgb(252 211 77)" strokeWidth={1.5} />
+            <text x={sx(i)} y={sy(point.percentage) - 6} textAnchor="middle" fill="#fcd34d" fontSize={9} fontFamily="system-ui" fontWeight={600}>
+              {point.percentage}%
+            </text>
+            <text x={sx(i)} y={viewHeight - 2} textAnchor="middle" fill="rgb(100 116 139)" fontSize={8} fontFamily="system-ui">
+              {formatShortDate(point.attemptedAt)}
+            </text>
+          </g>
+        ))}
+        {points.length >= 2 && (
+          <text x={padLeft} y={10} textAnchor="start" fill="rgb(148 163 184)" fontSize={9} fontFamily="system-ui">
+            {points[0].percentage}% → {points[points.length - 1].percentage}%
+          </text>
+        )}
+      </svg>
+    </div>
   );
 }
 

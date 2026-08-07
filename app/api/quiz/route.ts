@@ -7,6 +7,7 @@ import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { getAiUserMessage, isAiBusyError, isAiQuotaError } from "@/backend/lib/aiProvider";
 import { sanitizeQuizForClient } from "@/backend/lib/quizSecurity";
 import { buildLearnerProfile, buildPersonalizedQuizOptions } from "@/backend/lib/learnerProfile";
+import { isSupportedLanguageCode, type SupportedLanguageCode } from "@/shared/languages";
 
 export const runtime = "nodejs";
 
@@ -358,6 +359,7 @@ type QuizRow = {
   answer_key: unknown;
   created_at: string;
   updated_at: string;
+  language_code: SupportedLanguageCode;
 };
 
 async function saveQuiz(
@@ -365,6 +367,7 @@ async function saveQuiz(
   user: { id: string },
   source: SourceResolution,
   quiz: Awaited<ReturnType<typeof generateQuiz>>,
+  language: SupportedLanguageCode,
 ): Promise<QuizRow> {
   const payload = {
     user_id: user.id,
@@ -375,6 +378,7 @@ async function saveQuiz(
     difficulty: quiz.difficulty,
     questions: quiz.questions,
     answer_key: buildAnswerKey(quiz.questions),
+    language_code: language,
   };
 
   const result = await supabase.from("quizzes").insert(payload).select().single();
@@ -419,6 +423,7 @@ type QuizBody = {
   count?: number;
   difficulty?: string;
   questionTypes?: unknown;
+  language?: SupportedLanguageCode;
 };
 
 // ---------------------------------------------------------------------------
@@ -434,7 +439,7 @@ export async function GET() {
 
   const result = await supabase
     .from("quizzes")
-    .select("id, user_id, file_id, note_id, quiz_title, title, difficulty, questions, created_at, updated_at")
+    .select("id, user_id, file_id, note_id, quiz_title, title, difficulty, questions, language_code, created_at, updated_at")
     .eq("user_id", user.id)
     .order("created_at", { ascending: false })
     .limit(20);
@@ -468,6 +473,10 @@ export async function POST(request: Request) {
   }
 
   const count = typeof body.count === "number" && Number.isFinite(body.count) ? body.count : undefined;
+  if (body.language !== undefined && !isSupportedLanguageCode(body.language)) {
+    return apiError("Choose a supported language.", 400);
+  }
+  const language = body.language ?? user.preferredLanguage;
   const difficulty = asDifficulty(body.difficulty);
   const questionTypes = asQuestionTypes(body.questionTypes);
 
@@ -478,6 +487,7 @@ export async function POST(request: Request) {
     count: count ?? null,
     difficulty: difficulty ?? null,
     questionTypes: questionTypes ?? null,
+    language,
   };
   devLog("request received", debug);
 
@@ -495,6 +505,7 @@ export async function POST(request: Request) {
       questionTypes,
       focusTopics: personalized.focusTopics,
       personalizationNote: personalized.extraQuestionBias,
+      language,
     });
 
     devLog("quiz generated", {
@@ -503,7 +514,7 @@ export async function POST(request: Request) {
       questionCount: quiz.questions.length,
     });
 
-    const saved = await saveQuiz(supabase, user, source, quiz);
+    const saved = await saveQuiz(supabase, user, source, quiz, language);
 
     devLog("quiz saved", { quizId: saved.id });
 

@@ -14,6 +14,7 @@ import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { getAiUserMessage, isAiBusyError, isAiQuotaError } from "@/backend/lib/aiProvider";
 import { isGreeting, greetingResponse } from "@/backend/lib/greetingDetector";
 import { buildLearnerProfile, buildPersonalizedChatContext, recommendWeakTopic } from "@/backend/lib/learnerProfile";
+import { isSupportedLanguageCode, type SupportedLanguageCode } from "@/shared/languages";
 
 export const runtime = "nodejs";
 
@@ -26,6 +27,7 @@ type AskBody = {
   conversationId?: string;
   /** Voice Tutor can speak from the response immediately while persistence runs after response. */
   deferPersistence?: boolean;
+  language?: SupportedLanguageCode;
 };
 
 const CONVERSATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -453,10 +455,12 @@ async function getLatestSummaryTextByFileId({
   supabase,
   userId,
   fileIds,
+  language,
 }: {
   supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>;
   userId: string;
   fileIds: string[];
+  language: SupportedLanguageCode;
 }) {
   const summaries = new Map<string, string>();
   if (!supabase || !fileIds.length) return summaries;
@@ -470,6 +474,7 @@ async function getLatestSummaryTextByFileId({
     .from("ai_outputs")
     .select(fullColumns)
     .eq("user_id", userId)
+    .eq("language_code", language)
     .in("file_id", uniqueFileIds)
     .order("created_at", { ascending: false });
 
@@ -480,6 +485,7 @@ async function getLatestSummaryTextByFileId({
       .from("ai_outputs")
       .select(baseColumns)
       .eq("user_id", userId)
+      .eq("language_code", language)
       .in("file_id", uniqueFileIds)
       .order("created_at", { ascending: false });
 
@@ -559,12 +565,14 @@ async function getSelectedFileContext({
   fileIds,
   question,
   broadQuestion,
+  language,
 }: {
   supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>;
   userId: string;
   fileIds: string[];
   question: string;
   broadQuestion: boolean;
+  language: SupportedLanguageCode;
 }) {
   if (!supabase || !fileIds.length) return [];
 
@@ -581,6 +589,7 @@ async function getSelectedFileContext({
     supabase,
     userId,
     fileIds: (data ?? []).map((file) => file.id),
+    language,
   });
 
   for (const file of data ?? []) {
@@ -715,10 +724,12 @@ async function getKeywordContext({
   supabase,
   userId,
   question,
+  language,
 }: {
   supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>;
   userId: string;
   question: string;
+  language: SupportedLanguageCode;
 }) {
   if (!supabase) return [];
   const queryTokens = tokens(question);
@@ -742,6 +753,7 @@ async function getKeywordContext({
     .from("ai_outputs")
     .select("id, suggested_title, short_summary, key_points, important_concepts, content, file_id, note_id, created_at")
     .eq("user_id", userId)
+    .eq("language_code", language)
     .order("created_at", { ascending: false })
     .limit(20);
   let summaryRows = (summariesResult.data ?? []) as Record<string, unknown>[];
@@ -752,6 +764,7 @@ async function getKeywordContext({
       .from("ai_outputs")
       .select("id, suggested_title, short_summary, key_points, important_concepts, file_id, note_id, created_at")
       .eq("user_id", userId)
+      .eq("language_code", language)
       .order("created_at", { ascending: false })
       .limit(20);
     summaryRows = (fallbackSummaries.data ?? []) as Record<string, unknown>[];
@@ -809,12 +822,14 @@ async function getPreviousAnswerContext({
   userId,
   question,
   conversationId,
+  language,
 }: {
   supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>;
   userId: string;
   question: string;
   /** When set, previous-answer context is scoped to this conversation only. */
   conversationId: string | null;
+  language: SupportedLanguageCode;
 }) {
   if (!supabase) return [];
 
@@ -823,6 +838,7 @@ async function getPreviousAnswerContext({
     .from("assistant_questions")
     .select("id, question, answer, created_at")
     .eq("user_id", userId)
+    .eq("language_code", language)
     .order("created_at", { ascending: false })
     .limit(12);
 
@@ -887,6 +903,7 @@ async function getCachedAnswer({
   fileIds,
   noteIds,
   conversationId,
+  language,
 }: {
   supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>;
   userId: string;
@@ -895,6 +912,7 @@ async function getCachedAnswer({
   noteIds: string[];
   /** Scope cache lookup to this conversation to avoid cross-conversation hits. */
   conversationId: string | null;
+  language: SupportedLanguageCode;
 }) {
   if (!supabase) return null;
   if (!fileIds.length && !noteIds.length) return null;
@@ -907,6 +925,7 @@ async function getCachedAnswer({
     .select("id, question, answer, related_file_ids, related_note_ids, created_at")
     .eq("user_id", userId)
     .eq("question", question)
+    .eq("language_code", language)
     .order("created_at", { ascending: false })
     .limit(12);
 
@@ -970,6 +989,10 @@ export async function POST(request: Request) {
   }
 
   const question = body.question?.trim();
+  if (body.language !== undefined && !isSupportedLanguageCode(body.language)) {
+    return apiError("Choose a supported language.", 400);
+  }
+  let language = body.language ?? user.preferredLanguage;
   const requestMode = body.mode === "learn_step_by_step" ? "learn_step_by_step" : "study";
   let fileIds = cleanIds(body.fileIds);
   let noteIds = cleanIds(body.noteIds);
@@ -993,7 +1016,7 @@ export async function POST(request: Request) {
     const { data: convo, error: convoError } = await measure("conversation_loading", async () =>
       await supabase
         .from("conversations")
-        .select("id, context_mode, active_file_ids, active_note_ids")
+        .select("id, context_mode, active_file_ids, active_note_ids, language_code")
         .eq("id", rawConversationId)
         .eq("user_id", user.id)
         .maybeSingle(),
@@ -1007,6 +1030,9 @@ export async function POST(request: Request) {
     }
     conversationId = rawConversationId;
     conversationContextMode = typeof convo.context_mode === "string" ? convo.context_mode : "general";
+    if (body.language === undefined && isSupportedLanguageCode(convo.language_code)) {
+      language = convo.language_code;
+    }
 
     if (conversationContextMode === "file" || conversationContextMode === "image") {
       fileIds = cleanIds(convo.active_file_ids);
@@ -1025,7 +1051,7 @@ export async function POST(request: Request) {
   // Intercept casual greetings BEFORE any file-context lookup or DB access.
   // This prevents PDF text or offline-fallback content from appearing in
   // response to "hello", "thanks", "bye", etc.
-  if (isGreeting(question)) {
+  if (language === "en" && isGreeting(question)) {
     const msg = greetingResponse(question);
     const greetingAnswer: ChatAnswerWithMode = {
       response_mode: "ai",
@@ -1053,6 +1079,7 @@ export async function POST(request: Request) {
           related_note_ids: [],
           mode: "ai",
           status: "answered",
+          language_code: language,
           ...(conversationId ? { conversation_id: conversationId } : {}),
         })
         .select("id, question, answer, related_file_ids, related_note_ids, created_at")
@@ -1080,6 +1107,7 @@ export async function POST(request: Request) {
         fileIds,
         question,
         broadQuestion: broadAttachedFileQuestion,
+        language,
       })),
       ...(await getSelectedNoteContext({ supabase, userId: user.id, noteIds })),
     ]);
@@ -1087,7 +1115,7 @@ export async function POST(request: Request) {
       ? []
       : conversationId
         ? []
-        : await measure("file_context_loading", () => getKeywordContext({ supabase, userId: user.id, question }));
+        : await measure("file_context_loading", () => getKeywordContext({ supabase, userId: user.id, question, language }));
     const contextItems = selectedContext.length ? selectedContext : keywordContext;
     const cached = requestMode === "learn_step_by_step" || broadAttachedFileQuestion
       ? null
@@ -1099,6 +1127,7 @@ export async function POST(request: Request) {
             fileIds,
             noteIds,
             conversationId,
+            language,
           }),
         );
 
@@ -1118,6 +1147,7 @@ export async function POST(request: Request) {
         userId: user.id,
         question,
         conversationId,
+        language,
       }),
     );
     const learnerProfile = await measure("learner_profile_loading", () => getLearnerProfileForChat({ supabase, userId: user.id }));
@@ -1145,8 +1175,8 @@ export async function POST(request: Request) {
     try {
       answer = {
         ...(requestMode === "learn_step_by_step"
-          ? await measure("ai_provider_request", () => answerLearnStepByStep({ question: personalizedQuestion, context: promptContext }))
-          : await measure("ai_provider_request", () => answerStudyQuestion({ question, context: promptContext }))),
+          ? await measure("ai_provider_request", () => answerLearnStepByStep({ question: personalizedQuestion, context: promptContext, language }))
+          : await measure("ai_provider_request", () => answerStudyQuestion({ question, context: promptContext, language }))),
         response_mode: "ai",
         source_citations: preparedContext.citations,
       };
@@ -1175,6 +1205,7 @@ export async function POST(request: Request) {
       related_note_ids: relatedNoteIds,
       mode,
       status: "answered",
+      language_code: language,
       ...(conversationId ? { conversation_id: conversationId } : {}),
     };
 

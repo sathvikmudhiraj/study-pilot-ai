@@ -1,93 +1,120 @@
 # StudyPilot AI
 
-StudyPilot AI is a Next.js App Router project for a secure student workspace with Supabase-backed uploads, notes, files, summaries, quizzes, and protected routes.
+StudyPilot AI is a Next.js App Router learning workspace with Supabase authentication, private uploads, notes, summaries, quizzes, revision plans, AI chat, and protected routes.
 
 ## Environment
 
-Create `.env.local` with:
+Create `.env.local` from `.env.example`. Keep all provider keys server-side and never commit real secrets.
 
 ```bash
-NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
-GEMINI_API_KEY=your_gemini_api_key
-GEMINI_MODEL=your_gemini_model
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+AI_PROVIDER=auto
+AI_PROVIDER_TIMEOUT_MS=30000
+SUMMARY_AI_PROVIDER=auto
+SUMMARY_AI_TIMEOUT_MS=120000
+SUMMARY_NVIDIA_MODEL=z-ai/glm-5.2
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-2.5-flash
+GEMINI_FALLBACK_MODEL=gemini-2.0-flash
+NVIDIA_API_KEY=
+NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
+NVIDIA_MODEL=z-ai/glm-5.2
+TAVILY_API_KEY=
 ```
 
-Do not put service role keys in `.env.local` for the browser app.
+## Supabase Setup
 
-## Supabase Manual Setup
+Run these SQL files in the Supabase SQL Editor in order:
 
-Run the database schema first, then storage.
+1. `supabase/schema.sql`
+2. `supabase/storage.sql`
+3. `supabase/multilingual.sql` when upgrading an existing database that has not received the multilingual migration
 
-### 1. Run the database schema
-
-1. Open `supabase/schema.sql` in VS Code.
-2. Select the full file content.
-3. Copy the selected SQL.
-4. Open your Supabase project.
-5. Go to SQL Editor.
-6. Paste the copied SQL into the SQL Editor.
-7. Click Run.
-
-Do not paste the text `supabase/schema.sql` into Supabase SQL Editor.
-Do not paste PowerShell commands into Supabase SQL Editor.
-
-### 2. Run the storage setup
-
-1. Open `supabase/storage.sql` in VS Code.
-2. Select the full file content.
-3. Copy the selected SQL.
-4. Open your Supabase project.
-5. Go to SQL Editor.
-6. Paste the copied SQL into the SQL Editor.
-7. Click Run.
-
-Do not paste the text `supabase/storage.sql` into Supabase SQL Editor.
-Do not paste PowerShell commands into Supabase SQL Editor.
-
-## Verification SQL
-
-After running `supabase/schema.sql`, verify the public tables:
-
-```sql
-select table_name
-from information_schema.tables
-where table_schema = 'public'
-and table_name in (
-  'files',
-  'notes',
-  'ai_outputs',
-  'quizzes',
-  'revision_plans',
-  'assistant_questions'
-);
-```
-
-After running `supabase/storage.sql`, verify the private storage bucket:
-
-```sql
-select id, name, public
-from storage.buckets
-where id = 'study-files';
-```
-
-The `public` column should be `false`.
+The storage bucket must remain private. RLS policies in the SQL files restrict user-owned records and storage objects.
 
 ## Development
 
-Run the development server:
-
 ```bash
+npm ci
 npm run dev
 ```
 
-Open the local URL printed by Next.js, usually [http://localhost:3000](http://localhost:3000).
+Open the local URL printed by Next.js, normally `http://localhost:3000`.
 
-## Checks
+## Continuous Integration
 
-Run:
+`.github/workflows/ci.yml` runs for every push and pull request targeting `main`. The job uses Node.js 24 LTS with npm caching and runs these gates in order:
 
 ```bash
 npm run lint
+npx tsc --noEmit
+npm test
+npm run test:e2e
 npm run build
+git diff --check
 ```
+
+Older runs for the same branch are cancelled. The workflow has read-only repository permissions and a 40-minute job timeout.
+
+### E2E Modes
+
+When Supabase and isolated E2E credentials are configured, CI runs the complete authenticated Playwright suite. When they are unavailable, such as on an untrusted fork, CI emits a visible warning and runs only signed-out smoke tests. A smoke-only run must not be treated as full authenticated E2E coverage.
+
+Chromium and its Linux dependencies are installed in CI. Playwright screenshots, traces, videos, and HTML reports are uploaded as a seven-day GitHub Actions artifact only when a workflow fails.
+
+## GitHub Actions Secrets
+
+Configure these under **Repository settings > Secrets and variables > Actions**:
+
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `GEMINI_API_KEY`
+- `NVIDIA_API_KEY`
+- `TAVILY_API_KEY`
+- `STUDYPILOT_E2E_EMAIL`
+- `STUDYPILOT_E2E_PASSWORD`
+
+The E2E account must be an isolated test user, never a personal or production administrator account. Configure the equivalent runtime variables separately in Vercel; GitHub Actions secrets are not automatically shared with Vercel.
+
+## Failed Workflow Artifacts
+
+Open the failed run under the repository's **Actions** tab. The job log identifies the failed gate and whether E2E ran in `full` or `smoke` mode. For Playwright failures, download the `playwright-failure-<run>-<attempt>` artifact from the run summary and inspect `playwright-report` or the retained trace with:
+
+```bash
+npx playwright show-trace path/to/trace.zip
+```
+
+## Deployment
+
+Use Vercel Git integration as the deployment owner. No `deploy.yml` is included because a second GitHub Actions deployment would duplicate Vercel's automatic Git deployment and could create competing production releases.
+
+Recommended configuration:
+
+1. Connect the GitHub repository to Vercel.
+2. Set `main` as the production branch.
+3. Keep pull-request preview deployments separate from production.
+4. Add all runtime environment variables to the correct Vercel Preview and Production environments.
+5. Protect `main` and require the `CI / Validate` check before merging.
+6. Block direct pushes and require branches to be current before merge. This ensures production commits were validated before reaching `main`.
+
+Do not add an Actions-based Vercel deployment unless Vercel Git integration is intentionally disabled. If that strategy changes, the deployment workflow must depend on successful CI and use separate preview and production environments.
+
+## Rollback
+
+For an application regression, promote the previous known-good Vercel deployment or revert the offending commit and allow CI to validate the revert before it reaches `main`. For database changes, use forward-compatible corrective migrations; do not roll back by deleting production data or editing previously applied migrations.
+
+## Local Validation
+
+Run the same checks before opening a pull request:
+
+```bash
+npm run lint
+npx tsc --noEmit
+npm test
+npm run test:e2e
+npm run build
+git diff --check
+```
+
+Set `STUDYPILOT_E2E_EMAIL` and `STUDYPILOT_E2E_PASSWORD` locally to run authenticated E2E scenarios. Without them, credential-dependent Playwright tests are skipped and the result is smoke coverage only.

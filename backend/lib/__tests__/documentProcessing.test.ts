@@ -63,6 +63,7 @@ describe("documentProcessing", () => {
       provider: "gemini",
       model: "flash",
       promptVersion: "summary-v1",
+      languageCode: "en",
       personalizationHash: stableHash(["subnetting"]),
       options: { difficulty: "medium" },
     });
@@ -78,6 +79,19 @@ describe("documentProcessing", () => {
         model: "flash",
         promptVersion: "summary-v1",
         personalizationHash: stableHash(["routing"]),
+        options: { difficulty: "medium" },
+      }),
+    ).not.toBe(key);
+    expect(
+      buildGenerationCacheKey({
+        fileId: "file-1",
+        contentHash,
+        generationType: "summary",
+        provider: "gemini",
+        model: "flash",
+        promptVersion: "summary-v1",
+        personalizationHash: stableHash(["subnetting"]),
+        languageCode: "te",
         options: { difficulty: "medium" },
       }),
     ).not.toBe(key);

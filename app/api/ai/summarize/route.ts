@@ -27,6 +27,7 @@ import {
   isAiTimeoutError,
   SUMMARY_TIMEOUT_MESSAGE,
 } from "@/backend/lib/aiProvider";
+import { isSupportedLanguageCode, type SupportedLanguageCode } from "@/shared/languages";
 
 export const runtime = "nodejs";
 
@@ -47,6 +48,7 @@ type SummarizeBody = {
   forceRefresh?: boolean;
   // Alternate flag name accepted by the API (true | "true").
   regenerate?: boolean | string;
+  language?: SupportedLanguageCode;
 };
 
 const FULL_EXTRACTION_INCOMPLETE_MESSAGE =
@@ -420,11 +422,16 @@ export async function POST(request: Request) {
 
   const fileId = body.fileId?.trim();
   const noteId = body.noteId?.trim();
+  if (body.language !== undefined && !isSupportedLanguageCode(body.language)) {
+    return apiError("Choose a supported language.", 400);
+  }
+  const language = body.language ?? user.preferredLanguage;
   const reextractOnly = body.reextractOnly === true || body.forceRefresh === true || body.regenerate === true || body.regenerate === "true";
   const debug: Record<string, unknown> = {
     fileId: fileId ?? null,
     noteId: noteId ?? null,
     reextractOnly,
+    language,
   };
 
   devLog("request received", debug);
@@ -752,6 +759,8 @@ export async function POST(request: Request) {
       model: runtimeInfo.primaryModel,
       promptVersion: "summary-v3-sanitized-hierarchical",
       personalizationHash: stableHash(personalizationHint || "none"),
+      languageCode: language,
+      options: { language },
     });
     debug.personalizedSummary = Boolean(personalizationHint);
     debug.summaryCacheKey = summaryCacheKey.slice(0, 12);
@@ -778,6 +787,7 @@ export async function POST(request: Request) {
           sourceType: sourceFileId ? "file" : "note",
           sourceName,
           personalizationHint,
+          language,
         }),
         orchestrationTimer,
       ]));
@@ -852,6 +862,7 @@ export async function POST(request: Request) {
       .from("ai_outputs")
       .select("id")
       .eq("user_id", user.id)
+      .eq("language_code", language)
       // Order by created_at desc so the row we update is the same row the
       // file-detail RSC displays (which also orders by created_at desc).
       // Without this, the lookup is non-deterministic and regeneration could
@@ -872,6 +883,7 @@ export async function POST(request: Request) {
       file_id: sourceFileId,
       note_id: sourceNoteId,
       output_type: "summary",
+      language_code: language,
       content: JSON.stringify(sanitizedSummary),
       ...sanitizedSummary,
     };

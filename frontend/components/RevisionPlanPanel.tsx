@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import { LanguageSelector } from "./LanguageSelector";
+import type { SupportedLanguageCode } from "@/shared/languages";
 
 // ---------------------------------------------------------------------------
 // Types (mirror backend, but nullable for initial state from server)
@@ -39,6 +41,7 @@ type RevisionPlan = {
   starts_on: string | null;
   ends_on: string | null;
   created_at?: string;
+  language_code?: SupportedLanguageCode;
 };
 
 // ---------------------------------------------------------------------------
@@ -182,11 +185,32 @@ function DayCard({ day }: { day: DayPlan }) {
 // Main component
 // ---------------------------------------------------------------------------
 
-export function RevisionPlanPanel({ initialPlan }: { initialPlan: RevisionPlan | null }) {
+export function RevisionPlanPanel({
+  initialPlan,
+  preferredLanguage,
+}: {
+  initialPlan: RevisionPlan | null;
+  preferredLanguage: SupportedLanguageCode;
+}) {
   const [plan, setPlan] = useState<RevisionPlan | null>(() => normalizePlan(initialPlan));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [language, setLanguage] = useState(preferredLanguage);
+
+  async function switchLanguage(nextLanguage: SupportedLanguageCode) {
+    setLanguage(nextLanguage);
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(`/api/revision?language=${encodeURIComponent(nextLanguage)}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Could not load this language version.");
+      setPlan(normalizePlan(data.plan));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load this language version.");
+    }
+  }
 
   async function generate() {
     setLoading(true);
@@ -194,7 +218,11 @@ export function RevisionPlanPanel({ initialPlan }: { initialPlan: RevisionPlan |
     setNotice("");
 
     try {
-      const response = await fetch("/api/revision", { method: "POST" });
+      const response = await fetch("/api/revision", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ language }),
+      });
       const data = await response.json();
 
       if (!response.ok) {
@@ -230,14 +258,17 @@ export function RevisionPlanPanel({ initialPlan }: { initialPlan: RevisionPlan |
             <p className="text-xs text-slate-500">Generated {new Date(plan.created_at).toLocaleDateString()}</p>
           ) : null}
         </div>
-        <button
-          type="button"
-          onClick={generate}
-          disabled={loading}
-          className="h-10 w-full rounded-md bg-emerald-400 px-4 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
-        >
-          {loading ? "Generating..." : plan ? "Regenerate Plan" : "Generate Plan"}
-        </button>
+        <div className="grid w-full gap-2 sm:w-auto sm:grid-cols-[180px_auto] sm:items-end">
+          <LanguageSelector value={language} onChange={(value) => void switchLanguage(value)} compact />
+          <button
+            type="button"
+            onClick={generate}
+            disabled={loading}
+            className="h-10 w-full rounded-md bg-emerald-400 px-4 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
+          >
+            {loading ? "Generating..." : plan ? "Regenerate Plan" : "Generate Plan"}
+          </button>
+        </div>
       </div>
 
       {/* Error */}

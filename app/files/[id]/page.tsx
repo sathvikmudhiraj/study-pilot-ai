@@ -7,6 +7,7 @@ import { IconChevronLeft, IconFileText } from "@/frontend/components/icons";
 import { getCurrentUser } from "@/backend/lib/auth";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { supabaseSetupMessage } from "@/frontend/lib/supabase/errors";
+import { isSupportedLanguageCode } from "@/shared/languages";
 
 export const dynamic = "force-dynamic";
 
@@ -52,9 +53,18 @@ function cleanProcessingNotes(notes: string[] | null) {
   return Array.from(new Set(friendly));
 }
 
-export default async function FileDetailPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function FileDetailPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams?: Promise<{ language?: string | string[] }>;
+}) {
   const { id } = await params;
   const user = await getCurrentUser();
+  const query = searchParams ? await searchParams : {};
+  const requestedLanguage = Array.isArray(query.language) ? query.language[0] : query.language;
+  const language = isSupportedLanguageCode(requestedLanguage) ? requestedLanguage : user?.preferredLanguage ?? "en";
   const supabase = await createServerSupabaseClient();
 
   let signedUrl: string | null = null;
@@ -148,6 +158,7 @@ export default async function FileDetailPage({ params }: { params: Promise<{ id:
     .select("id, short_summary, key_points, action_items, important_concepts, suggested_tags, suggested_title, suggested_next_step")
     .eq("user_id", user.id)
     .eq("file_id", file.id)
+    .eq("language_code", language)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -277,10 +288,11 @@ export default async function FileDetailPage({ params }: { params: Promise<{ id:
             reflects a freshly-uploaded file's null summary correctly.
           */}
           <SummaryPanel
-            key={`file-${file.id}-summary-${summary?.id ?? "none"}`}
+            key={`file-${file.id}-summary-${language}-${summary?.id ?? "none"}`}
             fileId={file.id}
             initialSummary={summary ?? null}
             canCreateStudyActions={canCreateStudyActions}
+            initialLanguage={language}
           />
         </div>
       </div>

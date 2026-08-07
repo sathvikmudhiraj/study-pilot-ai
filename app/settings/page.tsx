@@ -1,5 +1,6 @@
 import { AppShell } from "@/frontend/components/AppShell";
 import { getCurrentUser } from "@/backend/lib/auth";
+import { PreferredLanguageSetting } from "@/frontend/components/PreferredLanguageSetting";
 
 export const dynamic = "force-dynamic";
 
@@ -12,9 +13,14 @@ export default async function SettingsPage() {
         <h1 className="text-3xl font-bold text-white">Settings</h1>
         <p className="mt-2 text-slate-400">Authenticated account details.</p>
       </div>
-      <div className="max-w-xl rounded-lg border border-white/10 bg-white/[0.04] p-6">
-        <div className="text-sm text-slate-400">Email</div>
-        <div className="mt-1 break-words font-medium text-white">{user?.email || "Email unavailable"}</div>
+      <div className="grid max-w-xl gap-4">
+        <section className="rounded-lg border border-white/10 bg-white/[0.04] p-6">
+          <div className="text-sm text-slate-400">Email</div>
+          <div className="mt-1 break-words font-medium text-white">{user?.email || "Email unavailable"}</div>
+        </section>
+        <section className="rounded-lg border border-white/10 bg-white/[0.04] p-6">
+          <PreferredLanguageSetting initialLanguage={user?.preferredLanguage ?? "en"} />
+        </section>
       </div>
     </AppShell>
   );

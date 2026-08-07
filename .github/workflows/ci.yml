@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CI: "true"
+      NEXT_TELEMETRY_DISABLED: "1"
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      STUDYPILOT_E2E_EMAIL: ${{ secrets.STUDYPILOT_E2E_EMAIL }}
+      STUDYPILOT_E2E_PASSWORD: ${{ secrets.STUDYPILOT_E2E_PASSWORD }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 24 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        timeout-minutes: 8
+
+      - name: Lint
+        run: npm run lint
+        timeout-minutes: 5
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+        timeout-minutes: 5
+
+      - name: Unit tests
+        run: npm test
+        timeout-minutes: 8
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+        timeout-minutes: 8
+
+      - name: Determine E2E mode
+        id: e2e-mode
+        shell: bash
+        run: |
+          set +x
+          if [[ -n "$NEXT_PUBLIC_SUPABASE_URL" && -n "$NEXT_PUBLIC_SUPABASE_ANON_KEY" && -n "$STUDYPILOT_E2E_EMAIL" && -n "$STUDYPILOT_E2E_PASSWORD" ]]; then
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            echo "### E2E mode: full authenticated suite" >> "$GITHUB_STEP_SUMMARY"
+            echo "Isolated E2E credentials and Supabase configuration are available." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "mode=smoke" >> "$GITHUB_OUTPUT"
+            echo "::warning title=E2E smoke mode::Authenticated E2E secrets are incomplete. Running only signed-out, non-production smoke tests; credential-dependent coverage is not being claimed."
+            echo "### E2E mode: smoke only" >> "$GITHUB_STEP_SUMMARY"
+            echo "Authenticated scenarios were not run because one or more E2E/Supabase secrets are unavailable." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Full authenticated E2E tests
+        if: steps.e2e-mode.outputs.mode == 'full'
+        run: npm run test:e2e
+        timeout-minutes: 12
+
+      - name: Signed-out E2E smoke tests
+        if: steps.e2e-mode.outputs.mode == 'smoke'
+        run: npm run test:e2e -- --grep "redirects protected routes to auth when signed out|shows a clear invalid-login state"
+        timeout-minutes: 8
+
+      - name: Upload Playwright failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Production build
+        run: npm run build
+        timeout-minutes: 12
+
+      - name: Whitespace validation
+        run: git diff --check
+        timeout-minutes: 2
+
+      - name: Validation summary
+        run: |
+          echo "### Validation complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "Lint, typecheck, unit tests, E2E (${{ steps.e2e-mode.outputs.mode }} mode), production build, and whitespace validation passed." >> "$GITHUB_STEP_SUMMARY"

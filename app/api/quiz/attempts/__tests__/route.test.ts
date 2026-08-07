@@ -164,6 +164,6 @@ describe("quiz attempt route", () => {
       wrongAnswers: [],
     });
     expect(body.answer_key).toEqual(answerKey);
-    expect(body.attempt.user_answers).toEqual([{ question_id: "q1", topic: "Hill Cipher", user_answer: "1", is_correct: true }]);
+    expect(body.attempt.user_answers).toEqual([{ question_id: "q1", topic: "Hill Cipher", topic_id: "hill_cipher", user_answer: "1", is_correct: true }]);
   });
 });

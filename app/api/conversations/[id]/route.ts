@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/backend/lib/auth";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
+import { isSupportedLanguageCode } from "@/shared/languages";
 
 export const runtime = "nodejs";
 
@@ -17,7 +18,7 @@ const MAX_NOTE_IDS = 8;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const CONVERSATION_SELECT =
-  "id, title, pinned, context_mode, active_file_ids, active_note_ids, created_at, updated_at";
+  "id, title, pinned, context_mode, active_file_ids, active_note_ids, language_code, created_at, updated_at";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -147,6 +148,12 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     if ("pinned" in body) {
       if (typeof body.pinned !== "boolean") return apiError("pinned must be true or false.", 400);
       updates.pinned = body.pinned;
+    }
+
+    if ("language_code" in body || "languageCode" in body) {
+      const language = body.language_code ?? body.languageCode;
+      if (!isSupportedLanguageCode(language)) return apiError("Choose a supported language.", 400);
+      updates.language_code = language;
     }
 
     // context_mode

@@ -1,6 +1,7 @@
 "use client";
 
 import type { Conversation, ConversationMessage, ContextMode } from "./conversationTypes";
+import type { SupportedLanguageCode } from "@/shared/languages";
 
 // Thin Typed wrappers around the Phase 1A conversation REST endpoints. These
 // helpers purely own fetch (de)serialisation and friendly error messages —
@@ -44,6 +45,7 @@ export async function createConversation(payload: {
   contextMode?: ContextMode;
   activeFileIds?: string[];
   activeNoteIds?: string[];
+  language?: SupportedLanguageCode;
 }): Promise<CreateResult> {
   let res: Response;
   try {
@@ -55,6 +57,7 @@ export async function createConversation(payload: {
         context_mode: payload.contextMode ?? "general",
         active_file_ids: payload.activeFileIds ?? [],
         active_note_ids: payload.activeNoteIds ?? [],
+        language_code: payload.language,
       }),
     });
   } catch {
@@ -129,6 +132,7 @@ export async function patchConversation(
     contextMode?: ContextMode;
     activeFileIds?: string[];
     activeNoteIds?: string[];
+    language?: SupportedLanguageCode;
   },
 ): Promise<PatchResult> {
   const body: Record<string, unknown> = {};
@@ -137,6 +141,7 @@ export async function patchConversation(
   if ("contextMode" in patch) body.context_mode = patch.contextMode;
   if ("activeFileIds" in patch) body.active_file_ids = patch.activeFileIds;
   if ("activeNoteIds" in patch) body.active_note_ids = patch.activeNoteIds;
+  if ("language" in patch) body.language_code = patch.language;
 
   let res: Response;
   try {

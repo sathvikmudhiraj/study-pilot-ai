@@ -6,6 +6,7 @@ import { buildQuizAnalytics, emptyQuizAnalytics } from "@/backend/lib/quizAnalyt
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { getAiUserMessage, isAiBusyError, isAiQuotaError } from "@/backend/lib/aiProvider";
 import { buildLearnerProfile } from "@/backend/lib/learnerProfile";
+import { isSupportedLanguageCode, type SupportedLanguageCode } from "@/shared/languages";
 
 export const runtime = "nodejs";
 
@@ -101,6 +102,7 @@ function revisionCoverageText(text: string, fileName: string, maxChunks = 18) {
 async function aggregateStudyContext(
   supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>,
   userId: string,
+  language: SupportedLanguageCode,
 ): Promise<StudyContext> {
   const empty: StudyContext = {
     files: [],
@@ -125,9 +127,10 @@ async function aggregateStudyContext(
         "suggested_title, covered_topics, key_points, exam_focus_points, common_mistakes, memory_lines, action_items, important_concepts",
       )
       .eq("user_id", userId)
+      .eq("language_code", language)
       .order("created_at", { ascending: false })
       .limit(20),
-    supabase.from("quizzes").select("title, difficulty, questions").eq("user_id", userId),
+    supabase.from("quizzes").select("title, difficulty, questions").eq("user_id", userId).eq("language_code", language),
     supabase
       .from("quiz_attempts")
       .select("score, total_questions, percentage, weak_topics, strong_topics, topic_results, wrong_questions, created_at")
@@ -208,6 +211,7 @@ async function savePlan(
   supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>,
   userId: string,
   plan: Awaited<ReturnType<typeof generateRevisionPlan>>,
+  language: SupportedLanguageCode,
 ): Promise<PlanRow> {
   const payload = {
     user_id: userId,
@@ -219,13 +223,14 @@ async function savePlan(
     plan: plan.plan,
     starts_on: plan.starts_on,
     ends_on: plan.ends_on,
+    language_code: language,
   };
 
   if (!supabase) throw new Error("Supabase is not configured.");
 
   // Try replacing any existing plan first (upsert semantics: one active plan
   // per user). If that fails with a missing column, try without new columns.
-  const existing = await supabase.from("revision_plans").select("id").eq("user_id", userId).order("created_at", { ascending: false }).limit(1).maybeSingle();
+  const existing = await supabase.from("revision_plans").select("id").eq("user_id", userId).eq("language_code", language).order("created_at", { ascending: false }).limit(1).maybeSingle();
 
   if (existing.data && !existing.error) {
     const result = await supabase.from("revision_plans").update(payload).eq("id", existing.data.id).eq("user_id", userId).select().single();
@@ -260,17 +265,21 @@ async function savePlan(
 // GET — fetch the latest plan
 // ---------------------------------------------------------------------------
 
-export async function GET() {
+export async function GET(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
   const supabase = await createServerSupabaseClient();
   if (!supabase) return apiError("Supabase is not configured.", 500);
+  const requestedLanguage = new URL(request.url).searchParams.get("language");
+  if (requestedLanguage && !isSupportedLanguageCode(requestedLanguage)) return apiError("Choose a supported language.", 400);
+  const language = requestedLanguage ?? user.preferredLanguage;
 
   const result = await supabase
     .from("revision_plans")
     .select("*")
     .eq("user_id", user.id)
+    .eq("language_code", language)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -291,17 +300,25 @@ export async function GET() {
 // POST — aggregate data, generate plan, save
 // ---------------------------------------------------------------------------
 
-export async function POST() {
+export async function POST(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
   const supabase = await createServerSupabaseClient();
   if (!supabase) return apiError("Supabase is not configured.", 500);
+  let body: { language?: SupportedLanguageCode } = {};
+  try {
+    body = await request.json();
+  } catch {
+    // Empty body is valid and uses the saved preference.
+  }
+  if (body.language !== undefined && !isSupportedLanguageCode(body.language)) return apiError("Choose a supported language.", 400);
+  const language = body.language ?? user.preferredLanguage;
 
   devLog("request received", { userId: user.id });
 
   try {
-    const ctx = await aggregateStudyContext(supabase, user.id);
+    const ctx = await aggregateStudyContext(supabase, user.id, language);
 
     devLog("study context aggregated", {
       fileCount: ctx.files.length,
@@ -316,9 +333,9 @@ export async function POST() {
       return errorResponse("No study material found. Upload files or add notes before generating a revision plan.", 400);
     }
 
-    const plan = await generateRevisionPlan(ctx);
+    const plan = await generateRevisionPlan(ctx, language);
 
-    const saved = await savePlan(supabase, user.id, plan);
+    const saved = await savePlan(supabase, user.id, plan, language);
 
     devLog("plan saved", { planId: saved.id, title: saved.title });
 

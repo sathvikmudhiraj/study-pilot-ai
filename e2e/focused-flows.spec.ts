@@ -82,4 +82,14 @@ test.describe("focused E2E scenarios", () => {
     await expect(page.getByRole("heading", { name: /voice tutor/i })).toBeVisible();
     await expect(page.getByText(/voice assistant|start listening|browser does not support|microphone/i)).toBeVisible();
   });
+
+  test("language preference and feature selectors expose the approved languages", async ({ page }) => {
+    await page.goto("/settings");
+    const preference = page.getByLabel("Preferred language");
+    await expect(preference).toBeVisible();
+    await expect(preference.locator("option")).toHaveCount(8);
+
+    await page.goto("/chat");
+    await expect(page.getByLabel("Language").last()).toBeVisible();
+  });
 });

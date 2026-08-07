@@ -68,6 +68,8 @@ import {
 } from "@/frontend/lib/chatPersistence";
 import { ConversationList } from "./ConversationList";
 import { ConversationHeader } from "./ConversationHeader";
+import { LanguageSelector } from "./LanguageSelector";
+import { languageDetails, type SupportedLanguageCode } from "@/shared/languages";
 import {
   LEARN_STEP_BY_STEP_MODE,
   buildLearningControlQuestion,
@@ -514,10 +516,12 @@ export function StudyChat({
   legacyChats,
   files,
   notes,
+  preferredLanguage,
 }: {
   legacyChats: ChatRecord[];
   files: FileOption[];
   notes: NoteOption[];
+  preferredLanguage: SupportedLanguageCode;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -744,6 +748,7 @@ export function StudyChat({
     setRequestMode(mapContextModeToRequestMode(mode));
     setActiveFileIdsState(conversation.active_file_ids ?? []);
     setActiveNoteIdsState(conversation.active_note_ids ?? []);
+    setLanguage(conversation.language_code ?? preferredLanguage);
     if (titledConversationIdsRef.current.has(conversation.id) || conversation.title) {
       titledConversationIdsRef.current.add(conversation.id);
     }
@@ -838,6 +843,7 @@ export function StudyChat({
       contextMode: mode,
       activeFileIds: fileIds,
       activeNoteIds: noteIds,
+      language,
     });
     if (!result.ok) return { ok: false, message: result.message };
     bumpConversationVersion();
@@ -988,6 +994,7 @@ export function StudyChat({
   const [pendingDiagramRetry, setPendingDiagramRetry] = useState<DiagramRetryPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [requestMode, setRequestMode] = useState<RequestMode>("study");
+  const [language, setLanguage] = useState<SupportedLanguageCode>(preferredLanguage);
   const [loadingMode, setLoadingMode] = useState<LoadingMode | null>(null);
   const [researchProgressIndex, setResearchProgressIndex] = useState(0);
   const [speakingId, setSpeakingId] = useState("");
@@ -1774,6 +1781,7 @@ export function StudyChat({
           mode,
           fileIds: currentAttachments.filter((attachment) => attachment.type === "file").map((attachment) => attachment.id),
           noteIds: currentAttachments.filter((attachment) => attachment.type === "note").map((attachment) => attachment.id),
+          language,
           ...(sendConversationId ? { conversationId: sendConversationId } : {}),
         }),
         signal: controller.signal,
@@ -1964,7 +1972,7 @@ export function StudyChat({
     setError("");
     setMenuOpen(false);
     const recognition = new SpeechRecognition();
-    recognition.lang = "en-US";
+    recognition.lang = languageDetails(language).locale;
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
     recognition.onresult = (event) => {
@@ -1980,6 +1988,7 @@ export function StudyChat({
     window.speechSynthesis.cancel();
     setSpeakingId(id);
     const utterance = new SpeechSynthesisUtterance(answerToText(answer));
+    utterance.lang = languageDetails(language).locale;
     utterance.onend = () => setSpeakingId("");
     window.speechSynthesis.speak(utterance);
   }
@@ -2608,6 +2617,17 @@ export function StudyChat({
                 </div>
               </>
             ) : null}
+
+            <div className="mb-2 flex justify-end">
+              <LanguageSelector
+                value={language}
+                onChange={(value) => {
+                  setLanguage(value);
+                  if (activeId && !legacyActive) void patchConversation(activeId, { language: value });
+                }}
+                compact
+              />
+            </div>
 
             {/* Input row */}
             <div className="flex items-end gap-2">
