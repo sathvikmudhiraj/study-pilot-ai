@@ -11,6 +11,7 @@ import {
   type SourceCitation,
 } from "@/backend/lib/sourceCitations";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
+import { withRequestObservability } from "@/backend/lib/observability";
 import { getAiUserMessage, isAiBusyError, isAiQuotaError } from "@/backend/lib/aiProvider";
 import { isGreeting, greetingResponse } from "@/backend/lib/greetingDetector";
 import { buildLearnerProfile, buildPersonalizedChatContext, recommendWeakTopic } from "@/backend/lib/learnerProfile";
@@ -962,7 +963,7 @@ async function getCachedAnswer({
   };
 }
 
-export async function POST(request: Request) {
+async function handlePost(request: Request) {
   const requestStartedAt = Date.now();
   const timings: Record<string, number> = {};
   const measure = async <T,>(name: string, task: () => Promise<T>): Promise<T> => {
@@ -1259,4 +1260,8 @@ export async function POST(request: Request) {
       error: normalized,
     });
   }
+}
+
+export async function POST(request: Request) {
+  return withRequestObservability(request, "/api/ai/ask", async () => handlePost(request));
 }

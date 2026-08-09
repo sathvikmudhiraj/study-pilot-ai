@@ -7,6 +7,7 @@ import {
   isGeminiBusyError,
   isGeminiQuotaError,
 } from "./gemini";
+import { logProviderTelemetry } from "./observability";
 
 type AIProvider = "gemini" | "nvidia" | "auto";
 type AIErrorKind = "busy" | "quota" | "config" | "auth" | "empty" | "request" | "timeout" | "cancelled";
@@ -141,6 +142,7 @@ export function getAIProviderRuntimeInfo(profile: AIProviderProfile = "default")
 
 function emitTelemetry(generationConfig: TextGenerationConfig | undefined, event: AIProviderTelemetryEvent) {
   try {
+    logProviderTelemetry(event);
     generationConfig?.telemetry?.(event);
   } catch {
     // Telemetry must never affect AI generation.

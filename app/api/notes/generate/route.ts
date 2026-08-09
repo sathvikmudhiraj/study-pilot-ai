@@ -18,6 +18,7 @@ import {
   isAiTimeoutError,
 } from "@/backend/lib/aiProvider";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
+import { withRequestObservability } from "@/backend/lib/observability";
 
 export const runtime = "nodejs";
 
@@ -586,7 +587,7 @@ async function resolveSource(
   };
 }
 
-export async function POST(request: Request) {
+async function handlePost(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -631,4 +632,8 @@ export async function POST(request: Request) {
     }
     return apiError("Could not generate notes. Please try again.", 500);
   }
+}
+
+export async function POST(request: Request) {
+  return withRequestObservability(request, "/api/notes/generate", async () => handlePost(request));
 }

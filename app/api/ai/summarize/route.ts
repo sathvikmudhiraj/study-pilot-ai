@@ -18,6 +18,7 @@ import {
 } from "@/backend/lib/documentProcessing";
 import { processStudyMaterial, type StudyPageMetadata } from "@/backend/lib/studyMaterial";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
+import { withRequestObservability } from "@/backend/lib/observability";
 import { buildLearnerProfile, buildSummaryPersonalization } from "@/backend/lib/learnerProfile";
 import {
   getAIProviderRuntimeInfo,
@@ -406,7 +407,7 @@ function metadataForSourceText(text: string, sourceId: string | null, stage: "ex
   });
 }
 
-export async function POST(request: Request) {
+async function handlePost(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -979,4 +980,8 @@ export async function POST(request: Request) {
       regenerationSucceeded: false,
     });
   }
+}
+
+export async function POST(request: Request) {
+  return withRequestObservability(request, "/api/ai/summarize", async () => handlePost(request));
 }

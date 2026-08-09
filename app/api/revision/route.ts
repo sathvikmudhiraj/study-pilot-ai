@@ -4,6 +4,7 @@ import { generateRevisionPlan, type StudyContext } from "@/backend/lib/aiRevisio
 import { chunkDocument } from "@/backend/lib/documentProcessing";
 import { buildQuizAnalytics, emptyQuizAnalytics } from "@/backend/lib/quizAnalytics";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
+import { withRequestObservability } from "@/backend/lib/observability";
 import { getAiUserMessage, isAiBusyError, isAiQuotaError } from "@/backend/lib/aiProvider";
 import { buildLearnerProfile } from "@/backend/lib/learnerProfile";
 import { isSupportedLanguageCode, type SupportedLanguageCode } from "@/shared/languages";
@@ -265,7 +266,7 @@ async function savePlan(
 // GET — fetch the latest plan
 // ---------------------------------------------------------------------------
 
-export async function GET(request: Request) {
+async function handleGet(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -300,7 +301,7 @@ export async function GET(request: Request) {
 // POST — aggregate data, generate plan, save
 // ---------------------------------------------------------------------------
 
-export async function POST(request: Request) {
+async function handlePost(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -362,4 +363,12 @@ export async function POST(request: Request) {
       { error: normalized },
     );
   }
+}
+
+export async function GET(request: Request) {
+  return withRequestObservability(request, "/api/revision", async () => handleGet(request));
+}
+
+export async function POST(request: Request) {
+  return withRequestObservability(request, "/api/revision", async () => handlePost(request));
 }

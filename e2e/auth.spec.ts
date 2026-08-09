@@ -11,6 +11,18 @@ test.describe("authentication", () => {
   });
 
   test("shows a clear invalid-login state", async ({ page }) => {
+    await page.route("**/auth/v1/token?grant_type=password", async (route) => {
+      await route.fulfill({
+        status: 400,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: "invalid_grant",
+          error_description: "Invalid login credentials",
+          msg: "Invalid login credentials",
+        }),
+      });
+    });
+
     await page.goto("/auth?mode=login");
     const email = page.getByLabel("Email");
     test.skip(!(await email.isVisible().catch(() => false)), "Auth form is in re-auth mode or Supabase is not configured.");

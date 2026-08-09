@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/backend/lib/auth";
+import { withRequestObservability } from "@/backend/lib/observability";
 
-export async function POST() {
+async function handlePost() {
   const user = await requireUser();
   if (!user) return NextResponse.json({ error: "Please log in first." }, { status: 401 });
 
@@ -11,4 +12,8 @@ export async function POST() {
     },
     { status: 410 },
   );
+}
+
+export async function POST(request: Request) {
+  return withRequestObservability(request, "/api/upload", async () => handlePost());
 }

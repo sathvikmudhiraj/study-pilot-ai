@@ -4,6 +4,7 @@ import { buildAnswerKey, generateQuiz, type QuizDifficulty, type QuizQuestionTyp
 import { chunkDocument } from "@/backend/lib/documentProcessing";
 import { processStudyMaterial } from "@/backend/lib/studyMaterial";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
+import { withRequestObservability } from "@/backend/lib/observability";
 import { getAiUserMessage, isAiBusyError, isAiQuotaError } from "@/backend/lib/aiProvider";
 import { sanitizeQuizForClient } from "@/backend/lib/quizSecurity";
 import { buildLearnerProfile, buildPersonalizedQuizOptions } from "@/backend/lib/learnerProfile";
@@ -430,7 +431,7 @@ type QuizBody = {
 // GET — return the user's saved quizzes
 // ---------------------------------------------------------------------------
 
-export async function GET() {
+async function handleGet() {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -458,7 +459,7 @@ export async function GET() {
 // POST — resolve source, generate quiz, save
 // ---------------------------------------------------------------------------
 
-export async function POST(request: Request) {
+async function handlePost(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -549,4 +550,12 @@ export async function POST(request: Request) {
       { ...debug, error: normalized },
     );
   }
+}
+
+export async function GET(request: Request) {
+  return withRequestObservability(request, "/api/quiz", async () => handleGet());
+}
+
+export async function POST(request: Request) {
+  return withRequestObservability(request, "/api/quiz", async () => handlePost(request));
 }

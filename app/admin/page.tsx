@@ -1,6 +1,6 @@
 import { AppShell } from "@/frontend/components/AppShell";
 import { Card } from "@/frontend/components/ui";
-import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
+import { getPlatformAdminStats } from "@/backend/lib/adminStats";
 import { requireAdmin } from "@/backend/lib/auth";
 import { redirect } from "next/navigation";
 
@@ -9,39 +9,28 @@ export const dynamic = "force-dynamic";
 type Stat = {
   label: string;
   value: number;
-  error?: string;
+  error?: boolean;
 };
-
-async function countRows(supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>, table: string): Promise<Stat> {
-  if (!supabase) return { label: table, value: 0, error: "Supabase is not configured." };
-
-  const result = await supabase.from(table).select("id", { count: "exact", head: true });
-  return {
-    label: table,
-    value: result.count ?? 0,
-    error: result.error?.message,
-  };
-}
 
 export default async function AdminPage() {
   const admin = await requireAdmin();
   if (!admin.ok) redirect(admin.status === 401 ? "/auth" : "/dashboard");
 
-  const supabase = await createServerSupabaseClient();
-  const [files, notes, summaries, chats, quizzes] = await Promise.all([
-    countRows(supabase, "files"),
-    countRows(supabase, "notes"),
-    countRows(supabase, "ai_outputs"),
-    countRows(supabase, "assistant_questions"),
-    countRows(supabase, "quizzes"),
-  ]);
+  let platformStats;
+  let statsFailed = false;
+  try {
+    platformStats = await getPlatformAdminStats();
+  } catch {
+    statsFailed = true;
+    platformStats = { files: 0, notes: 0, summaries: 0, chats: 0, quizzes: 0 };
+  }
 
   const stats: Stat[] = [
-    { ...files, label: "Files" },
-    { ...notes, label: "Notes" },
-    { ...summaries, label: "Summaries" },
-    { ...chats, label: "AI chats" },
-    { ...quizzes, label: "Quizzes" },
+    { label: "Files", value: platformStats.files, error: statsFailed },
+    { label: "Notes", value: platformStats.notes, error: statsFailed },
+    { label: "Summaries", value: platformStats.summaries, error: statsFailed },
+    { label: "AI chats", value: platformStats.chats, error: statsFailed },
+    { label: "Quizzes", value: platformStats.quizzes, error: statsFailed },
   ];
 
   const errors = stats.filter((stat) => stat.error);
@@ -50,11 +39,11 @@ export default async function AdminPage() {
     <AppShell admin>
       <div className="mb-8">
         <h1 className="text-3xl font-bold text-white">Admin dashboard</h1>
-        <p className="mt-2 text-slate-400">Live Supabase record counts visible to the current admin session.</p>
+        <p className="mt-2 text-slate-400">Platform-wide aggregate activity from StudyPilot&apos;s production data.</p>
       </div>
 
-      <div className="mb-6 rounded-lg border border-amber-300/25 bg-amber-300/10 p-4 text-sm leading-6 text-amber-100">
-        Auth user totals are managed inside Supabase Auth. Platform-wide data counts require admin RLS policies or a server-only service role; this dashboard does not use fake local data.
+      <div className="mb-6 rounded-lg border border-emerald-300/25 bg-emerald-300/10 p-4 text-sm leading-6 text-emerald-100">
+        Counts are aggregated by a server-only privileged client after trusted admin authorization. No student records or private content are returned to the browser.
       </div>
 
       {errors.length ? (
@@ -68,7 +57,7 @@ export default async function AdminPage() {
           <Card key={stat.label} className="p-5">
             <p className="text-sm text-slate-400">{stat.label}</p>
             <p className="mt-3 text-4xl font-bold text-white">{stat.value}</p>
-            {stat.error ? <p className="mt-3 text-xs leading-5 text-red-200">{stat.error}</p> : null}
+            {stat.error ? <p className="mt-3 text-xs leading-5 text-red-200">Temporarily unavailable</p> : null}
           </Card>
         ))}
       </div>
