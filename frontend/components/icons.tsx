@@ -435,3 +435,123 @@ export function IconMoreHorizontal({ size, ...props }: IconProps) {
     </Icon>
   );
 }
+
+export function IconActivity({ size, ...props }: IconProps) {
+  return (
+    <Icon size={size} {...props}>
+      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+    </Icon>
+  );
+}
+
+export function IconServer({ size, ...props }: IconProps) {
+  return (
+    <Icon size={size} {...props}>
+      <rect x="2" y="2" width="20" height="8" rx="2" ry="2" />
+      <rect x="2" y="14" width="20" height="8" rx="2" ry="2" />
+      <line x1="6" y1="6" x2="6.01" y2="6" />
+      <line x1="6" y1="18" x2="6.01" y2="18" />
+    </Icon>
+  );
+}
+
+export function IconInfo({ size, ...props }: IconProps) {
+  return (
+    <Icon size={size} {...props}>
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" y1="16" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12.01" y2="8" />
+    </Icon>
+  );
+}
+
+export function IconAlertTriangle({ size, ...props }: IconProps) {
+  return (
+    <Icon size={size} {...props}>
+      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </Icon>
+  );
+}
+
+export function IconAlertCircle({ size, ...props }: IconProps) {
+  return (
+    <Icon size={size} {...props}>
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" y1="8" x2="12" y2="12" />
+      <line x1="12" y1="16" x2="12.01" y2="16" />
+    </Icon>
+  );
+}
+
+export function IconClipboardList({ size, ...props }: IconProps) {
+  return (
+    <Icon size={size} {...props}>
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+      <line x1="9" y1="18" x2="15" y2="18" />
+      <line x1="9" y1="14" x2="15" y2="14" />
+      <line x1="9" y1="10" x2="15" y2="10" />
+    </Icon>
+  );
+}
+
+export function IconBarChart({ size, ...props }: IconProps) {
+  return (
+    <Icon size={size} {...props}>
+      <line x1="18" y1="20" x2="18" y2="10" />
+      <line x1="12" y1="20" x2="12" y2="4" />
+      <line x1="6" y1="20" x2="6" y2="14" />
+    </Icon>
+  );
+}
+
+export function IconTrendingUp({ size, ...props }: IconProps) {
+  return (
+    <Icon size={size} {...props}>
+      <polyline points="23 6 13.5 15.5 8.5 10.5 1 18" />
+      <polyline points="17 6 23 6 23 12" />
+    </Icon>
+  );
+}
+
+export function IconAward({ size, ...props }: IconProps) {
+  return (
+    <Icon size={size} {...props}>
+      <circle cx="12" cy="8" r="7" />
+      <polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88" />
+    </Icon>
+  );
+}
+
+export function IconUsers({ size, ...props }: IconProps) {
+  return (
+    <Icon size={size} {...props}>
+      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+    </Icon>
+  );
+}
+
+export function IconDatabase({ size, ...props }: IconProps) {
+  return (
+    <Icon size={size} {...props}>
+      <ellipse cx="12" cy="5" rx="9" ry="3" />
+      <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+      <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+    </Icon>
+  );
+}
+
+export function IconHelpCircle({ size, ...props }: IconProps) {
+  return (
+    <Icon size={size} {...props}>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </Icon>
+  );
+}

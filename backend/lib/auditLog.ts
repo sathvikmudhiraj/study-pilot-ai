@@ -3,6 +3,8 @@ import "server-only";
 import { createAdminSupabaseClient, hasAdminSupabaseEnv } from "./adminSupabase";
 import { sanitizeForLogging, type RequestId } from "./observability";
 
+export { hasAdminSupabaseEnv } from "./adminSupabase";
+
 export type AuditAction =
   | "user_suspend"
   | "user_unsuspend"

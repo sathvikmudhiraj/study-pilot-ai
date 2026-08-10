@@ -118,6 +118,7 @@ export interface LogContext {
   fallbackUsed?: boolean;
   errorCategory?: string;
   metadata?: Record<string, unknown>;
+  error?: string;
 }
 
 export interface StructuredLogEntry {
