@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/backend/lib/auth";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
+import { withRequestObservability } from "@/backend/lib/observability";
 
 export const runtime = "nodejs";
 
@@ -49,7 +50,7 @@ type RouteContext = { params: Promise<{ id: string }> };
 //   { messages: [...], next_cursor: string | null, has_more: boolean }
 // ---------------------------------------------------------------------------
 
-export async function GET(request: Request, { params }: RouteContext) {
+async function handleGet(request: Request, { params }: RouteContext) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -129,4 +130,8 @@ export async function GET(request: Request, { params }: RouteContext) {
     const message = error instanceof Error ? error.message : "Could not load messages.";
     return apiError(message, 500);
   }
+}
+
+export async function GET(request: Request, context: RouteContext) {
+  return withRequestObservability(request, "/api/conversations/[id]/messages", async () => handleGet(request, context));
 }

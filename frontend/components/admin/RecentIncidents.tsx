@@ -47,7 +47,7 @@ export function RecentIncidents({ incidents }: { incidents: Incident[] }) {
         {
           key: "requestId",
           header: "Request ID",
-          render: (row) => (row.requestId ? <span className="font-mono text-xs text-slate-400">{row.requestId}</span> : <span className="text-slate-500">—</span>),
+          render: (row) => (row.requestId ? <span className="font-mono text-xs text-slate-400">{row.requestId}</span> : <span className="text-slate-500">-</span>),
         },
       ]}
       data={incidents}

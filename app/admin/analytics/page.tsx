@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { fetchInternalApi } from "@/backend/lib/internalApiFetch";
 import { PageHeader, Divider } from "@/frontend/components/ui";
 import { LearningMetrics } from "@/frontend/components/admin/LearningMetrics";
 import { EmptyState } from "@/frontend/components/admin/EmptyState";
@@ -16,7 +17,7 @@ interface AnalyticsData {
 }
 
 async function fetchAnalytics(): Promise<AnalyticsData> {
-  const res = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"}/api/admin/analytics`, {
+  const res = await fetchInternalApi("/api/admin/analytics", {
     cache: "no-store",
     headers: { "x-request-id": `req_admin_analytics_${crypto.randomUUID()}` },
   });

@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { fetchInternalApi } from "@/backend/lib/internalApiFetch";
 import { PageHeader, Card, Divider } from "@/frontend/components/ui";
 import { MetricCard } from "@/frontend/components/admin/MetricCard";
 import { ProviderStatusTable } from "@/frontend/components/admin/ProviderStatusTable";
@@ -32,7 +33,7 @@ interface OverviewData {
 }
 
 async function fetchOverview(): Promise<OverviewData> {
-  const res = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"}/api/admin/overview`, {
+  const res = await fetchInternalApi("/api/admin/overview", {
     cache: "no-store",
     headers: { "x-request-id": `req_admin_overview_${crypto.randomUUID()}` },
   });

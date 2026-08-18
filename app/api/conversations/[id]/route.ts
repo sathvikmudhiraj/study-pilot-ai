@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/backend/lib/auth";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
+import { withRequestObservability } from "@/backend/lib/observability";
 import { isSupportedLanguageCode } from "@/shared/languages";
 
 export const runtime = "nodejs";
@@ -78,7 +79,7 @@ async function requireOwnedConversation(
 // GET /api/conversations/[id]
 // ---------------------------------------------------------------------------
 
-export async function GET(_request: Request, { params }: RouteContext) {
+async function handleGet({ params }: RouteContext) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -103,7 +104,7 @@ export async function GET(_request: Request, { params }: RouteContext) {
 // Supports: rename (title), pin/unpin (pinned), context mode, active files/notes.
 // ---------------------------------------------------------------------------
 
-export async function PATCH(request: Request, { params }: RouteContext) {
+async function handlePatch(request: Request, { params }: RouteContext) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -222,7 +223,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
 // Cascades to its assistant_questions rows via the FK.
 // ---------------------------------------------------------------------------
 
-export async function DELETE(_request: Request, { params }: RouteContext) {
+async function handleDelete({ params }: RouteContext) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -250,4 +251,16 @@ export async function DELETE(_request: Request, { params }: RouteContext) {
     const message = error instanceof Error ? error.message : "Could not delete conversation.";
     return apiError(message, 500);
   }
+}
+
+export async function GET(request: Request, context: RouteContext) {
+  return withRequestObservability(request, "/api/conversations/[id]", async () => handleGet(context));
+}
+
+export async function PATCH(request: Request, context: RouteContext) {
+  return withRequestObservability(request, "/api/conversations/[id]", async () => handlePatch(request, context));
+}
+
+export async function DELETE(request: Request, context: RouteContext) {
+  return withRequestObservability(request, "/api/conversations/[id]", async () => handleDelete(context));
 }

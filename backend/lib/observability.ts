@@ -160,6 +160,27 @@ function writeLog(entry: StructuredLogEntry): void {
   }
 }
 
+function persistMonitoringEvent(event: {
+  requestId?: RequestId;
+  eventType: string;
+  route?: string;
+  method?: string;
+  status?: number;
+  durationMs?: number;
+  provider?: string;
+  model?: string;
+  retryCount?: number;
+  fallbackUsed?: boolean;
+  errorCategory?: string;
+  metadata?: Record<string, unknown>;
+}) {
+  void import("./monitoring")
+    .then(({ recordMonitoringEvent }) => recordMonitoringEvent(event))
+    .catch(() => {
+      // Durable telemetry must never affect the request lifecycle.
+    });
+}
+
 export function logDebug(message: string, context: LogContext = {}): void {
   writeLog(formatLogEntry("debug", message, context));
 }
@@ -217,16 +238,43 @@ export async function withRequestObservability<T extends Response>(
 ): Promise<T> {
   const requestId = getOrCreateRequestId(request.headers.get(REQUEST_ID_HEADER));
   const logger = createRequestLogger(requestId, route, request.method);
+  const startedAt = Date.now();
 
   return requestContext.run({ requestId, logger }, async () => {
     logger.info("request.started");
+    persistMonitoringEvent({
+      requestId,
+      eventType: "request.started",
+      route,
+      method: request.method,
+    });
     try {
       const response = await handler({ requestId, logger });
       response.headers.set(REQUEST_ID_HEADER, requestId);
+      const durationMs = Date.now() - startedAt;
       logger.withDuration({ status: response.status }).info("request.completed");
+      persistMonitoringEvent({
+        requestId,
+        eventType: "request.completed",
+        route,
+        method: request.method,
+        status: response.status,
+        durationMs,
+      });
       return response;
     } catch (error) {
-      logger.withDuration({ status: 500, errorCategory: sanitizeError(error).category }).error("request.failed");
+      const sanitizedError = sanitizeError(error);
+      const durationMs = Date.now() - startedAt;
+      logger.withDuration({ status: 500, errorCategory: sanitizedError.category }).error("request.failed");
+      persistMonitoringEvent({
+        requestId,
+        eventType: "request.failed",
+        route,
+        method: request.method,
+        status: 500,
+        durationMs,
+        errorCategory: sanitizedError.category,
+      });
       throw error;
     }
   });
@@ -261,6 +309,20 @@ export function logProviderTelemetry(event: ProviderTelemetryLogEvent): void {
   } else {
     context.logger.info("ai.provider.telemetry", fields);
   }
+  persistMonitoringEvent({
+    requestId: context.requestId,
+    eventType: "ai.provider",
+    provider: event.provider,
+    model: event.model,
+    durationMs: event.durationMs,
+    retryCount: event.retryCount,
+    fallbackUsed: event.fallbackTriggered,
+    errorCategory: event.errorKind,
+    metadata: {
+      aiEvent: event.event,
+      operation: `ai.${event.event}`,
+    },
+  });
 }
 
 export function sanitizeError(error: unknown): { message: string; category: string } {

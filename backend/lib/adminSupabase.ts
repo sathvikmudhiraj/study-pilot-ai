@@ -39,10 +39,98 @@ type AuditLogTable = {
   Relationships: [];
 };
 
+type MonitoringEventTable = {
+  Row: {
+    id: string;
+    request_id: string | null;
+    event_type: string;
+    route: string | null;
+    method: string | null;
+    status: number | null;
+    duration_ms: number | null;
+    provider: string | null;
+    model: string | null;
+    retry_count: number | null;
+    fallback_used: boolean | null;
+    error_category: string | null;
+    metadata: Record<string, unknown>;
+    created_at: string;
+  };
+  Insert: {
+    id?: string;
+    request_id?: string | null;
+    event_type: string;
+    route?: string | null;
+    method?: string | null;
+    status?: number | null;
+    duration_ms?: number | null;
+    provider?: string | null;
+    model?: string | null;
+    retry_count?: number | null;
+    fallback_used?: boolean | null;
+    error_category?: string | null;
+    metadata?: Record<string, unknown>;
+    created_at?: string;
+  };
+  Update: never;
+  Relationships: [];
+};
+
+type BackgroundJobTable = {
+  Row: {
+    id: string;
+    job_type: string;
+    status: string;
+    user_id: string | null;
+    file_id: string | null;
+    note_id: string | null;
+    idempotency_key: string | null;
+    payload: Record<string, unknown>;
+    progress: Record<string, unknown>;
+    attempt_count: number;
+    max_attempts: number;
+    locked_at: string | null;
+    locked_by: string | null;
+    next_run_at: string;
+    last_error_category: string | null;
+    last_error_message: string | null;
+    started_at: string | null;
+    completed_at: string | null;
+    created_at: string;
+    updated_at: string;
+  };
+  Insert: {
+    id?: string;
+    job_type: string;
+    status?: string;
+    user_id?: string | null;
+    file_id?: string | null;
+    note_id?: string | null;
+    idempotency_key?: string | null;
+    payload?: Record<string, unknown>;
+    progress?: Record<string, unknown>;
+    attempt_count?: number;
+    max_attempts?: number;
+    locked_at?: string | null;
+    locked_by?: string | null;
+    next_run_at?: string;
+    last_error_category?: string | null;
+    last_error_message?: string | null;
+    started_at?: string | null;
+    completed_at?: string | null;
+    created_at?: string;
+    updated_at?: string;
+  };
+  Update: Partial<BackgroundJobTable["Insert"]>;
+  Relationships: [];
+};
+
 type AdminDatabase = {
   public: {
     Tables: {
       audit_logs: AuditLogTable;
+      monitoring_events: MonitoringEventTable;
+      background_jobs: BackgroundJobTable;
       files: GenericAdminTable;
       notes: GenericAdminTable;
       ai_outputs: GenericAdminTable;

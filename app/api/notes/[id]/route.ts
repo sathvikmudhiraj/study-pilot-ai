@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { requireUser } from "@/backend/lib/auth";
 import { validateNoteBody, validateNoteId } from "@/backend/lib/noteValidation";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
+import { withRequestObservability } from "@/backend/lib/observability";
 
 export const runtime = "nodejs";
 
@@ -20,7 +21,7 @@ async function resolveNoteId(context: RouteContext) {
   return validateNoteId(params.id);
 }
 
-export async function PATCH(request: Request, context: RouteContext) {
+async function handlePatch(request: Request, context: RouteContext) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -90,7 +91,7 @@ export async function PATCH(request: Request, context: RouteContext) {
   return NextResponse.json({ note: saved.data });
 }
 
-export async function DELETE(_request: Request, context: RouteContext) {
+async function handleDelete(context: RouteContext) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -121,4 +122,12 @@ export async function DELETE(_request: Request, context: RouteContext) {
   if (deleted.error) return apiError("Could not delete the note. Please try again.", 500);
   if (!deleted.data) return apiError("Note not found or you do not have access to it.", 404);
   return NextResponse.json({ deleted: true, id: noteId.value });
+}
+
+export async function PATCH(request: Request, context: RouteContext) {
+  return withRequestObservability(request, "/api/notes/[id]", async () => handlePatch(request, context));
+}
+
+export async function DELETE(request: Request, context: RouteContext) {
+  return withRequestObservability(request, "/api/notes/[id]", async () => handleDelete(context));
 }

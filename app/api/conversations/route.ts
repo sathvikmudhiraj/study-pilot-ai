@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/backend/lib/auth";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
+import { withRequestObservability } from "@/backend/lib/observability";
 import { isSupportedLanguageCode } from "@/shared/languages";
 
 export const runtime = "nodejs";
@@ -66,7 +67,7 @@ function sanitizeTitle(value: unknown): string | null {
 // Optional ?q= for a safe title-based search.
 // ---------------------------------------------------------------------------
 
-export async function GET(request: Request) {
+async function handleGet(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -106,7 +107,7 @@ export async function GET(request: Request) {
 // Creates a new conversation for the authenticated user.
 // ---------------------------------------------------------------------------
 
-export async function POST(request: Request) {
+async function handlePost(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -185,6 +186,14 @@ export async function POST(request: Request) {
     const message = error instanceof Error ? error.message : "Could not create conversation.";
     return apiError(message, 500);
   }
+}
+
+export async function GET(request: Request) {
+  return withRequestObservability(request, "/api/conversations", async () => handleGet(request));
+}
+
+export async function POST(request: Request) {
+  return withRequestObservability(request, "/api/conversations", async () => handlePost(request));
 }
 
 // Re-export UUID validator for use by sub-routes.

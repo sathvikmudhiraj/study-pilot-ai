@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { requireUser } from "@/backend/lib/auth";
 import { validateNoteBody } from "@/backend/lib/noteValidation";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
+import { withRequestObservability } from "@/backend/lib/observability";
 
 export const runtime = "nodejs";
 
@@ -11,7 +12,7 @@ function apiError(message: string, status = 500) {
   return NextResponse.json({ error: message }, { status });
 }
 
-export async function POST(request: Request) {
+async function handlePost(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -61,4 +62,8 @@ export async function POST(request: Request) {
 
   if (saved.error || !saved.data) return apiError("Could not save the note. Please try again.", 500);
   return NextResponse.json({ note: saved.data }, { status: 201 });
+}
+
+export async function POST(request: Request) {
+  return withRequestObservability(request, "/api/notes", async () => handlePost(request));
 }

@@ -3,6 +3,7 @@ import { getAdminSupabaseConfig, hasAdminSupabaseEnv } from "@/backend/lib/admin
 import { getAIProviderRuntimeInfo } from "@/backend/lib/aiProvider";
 import { getSupabaseEnv, hasSupabaseEnv } from "@/backend/lib/supabase/env";
 import { withRequestObservability } from "@/backend/lib/observability";
+import { recordMonitoringEvent } from "@/backend/lib/monitoring";
 
 export const runtime = "nodejs";
 
@@ -108,6 +109,16 @@ export async function GET(request: Request = new Request("http://localhost/api/h
     const aiConfiguration = checkAIConfiguration();
     const checks = { database, storage, aiConfiguration };
     const ready = Object.values(checks).every((check) => check.status === "ok");
+    if (!ready) {
+      await recordMonitoringEvent({
+        eventType: "health.failure",
+        route: "/api/health/ready",
+        method: "GET",
+        status: 503,
+        errorCategory: "readiness",
+        metadata: checks,
+      });
+    }
 
     return NextResponse.json(
       { status: ready ? "ready" : "not_ready", checks },

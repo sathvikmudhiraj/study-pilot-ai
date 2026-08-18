@@ -4,6 +4,8 @@ import { getAIProviderRuntimeInfo } from "@/backend/lib/aiProvider";
 import { getAdminSupabaseConfig, hasAdminSupabaseEnv } from "@/backend/lib/adminSupabase";
 import { getSupabaseEnv, hasSupabaseEnv } from "@/backend/lib/supabase/env";
 import { withRequestObservability } from "@/backend/lib/observability";
+import { readBackgroundJobs } from "@/backend/lib/backgroundJobs";
+import { readMonitoringEvents, recordMonitoringEvent, summarizeMonitoringEvents } from "@/backend/lib/monitoring";
 
 export const runtime = "nodejs";
 
@@ -88,19 +90,10 @@ function checkAIConfiguration(): ReadinessCheck {
   return { status: "ok" };
 }
 
-function getProviderTelemetrySummary() {
-  return {
-    note: "Historical provider telemetry requires durable monitoring store (not yet implemented in Phase 2). Current in-memory telemetry is available via structured logs only.",
-    availableFields: [
-      "provider",
-      "model",
-      "durationMs",
-      "retryCount",
-      "fallbackTriggered",
-      "errorKind",
-      "requestId",
-    ],
-  };
+function incidentSeverity(status: number | null, eventType: string): "error" | "warning" | "info" {
+  if ((status ?? 0) >= 500 || eventType.includes("failed")) return "error";
+  if ((status ?? 0) >= 400 || eventType.includes("health")) return "warning";
+  return "info";
 }
 
 export async function GET(request: Request = new Request("http://localhost/api/admin/monitoring")) {
@@ -149,13 +142,38 @@ export async function GET(request: Request = new Request("http://localhost/api/a
         },
       ];
 
-      const telemetrySummary = getProviderTelemetrySummary();
+      const [events, jobs] = await Promise.all([readMonitoringEvents(80), readBackgroundJobs(10)]);
+      const telemetrySummary = summarizeMonitoringEvents(events);
+      if (!ready) {
+        await recordMonitoringEvent({
+          eventType: "health.failure",
+          route: "/api/admin/monitoring",
+          method: "GET",
+          status: 503,
+          errorCategory: "readiness",
+          metadata: checks,
+        });
+      }
+      const recentIncidents = events
+        .filter((event) => event.event_type.includes("failed") || event.event_type === "health.failure" || (event.status ?? 0) >= 400)
+        .slice(0, 10)
+        .map((event) => ({
+          id: event.id,
+          timestamp: event.created_at,
+          severity: incidentSeverity(event.status, event.event_type),
+          category: event.error_category ?? event.event_type,
+          message: `${event.event_type}${event.route ? ` on ${event.route}` : ""}`,
+          requestId: event.request_id ?? undefined,
+        }));
 
       return NextResponse.json({
         live: { status: "ok" },
         readiness: { status: ready ? "ready" : "not_ready", checks },
         providers,
         telemetry: telemetrySummary,
+        recentEvents: events.slice(0, 20),
+        recentIncidents,
+        recentJobs: jobs,
       });
     } catch (error) {
       logger.error("admin.monitoring.failed", {

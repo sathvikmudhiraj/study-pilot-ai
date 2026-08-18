@@ -8,6 +8,7 @@ import {
   isAiTimeoutError,
 } from "@/backend/lib/aiProvider";
 import { WebSearchError } from "@/backend/lib/webSearch";
+import { withRequestObservability } from "@/backend/lib/observability";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -45,7 +46,7 @@ function normalizeUnexpectedError(error: unknown) {
   return { message: "Deep research failed. Please try again.", status: 502 };
 }
 
-export async function POST(request: Request) {
+async function handlePost(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -79,4 +80,8 @@ export async function POST(request: Request) {
     const normalized = normalizeUnexpectedError(error);
     return apiError(normalized.message, normalized.status);
   }
+}
+
+export async function POST(request: Request) {
+  return withRequestObservability(request, "/api/ai/deep-research", async () => handlePost(request));
 }

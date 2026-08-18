@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { fetchInternalApi } from "@/backend/lib/internalApiFetch";
 import { PageHeader, Card, Divider } from "@/frontend/components/ui";
 import { ProviderStatusTable } from "@/frontend/components/admin/ProviderStatusTable";
 import { RecentIncidents } from "@/frontend/components/admin/RecentIncidents";
@@ -20,11 +21,37 @@ interface MonitoringData {
     fastFallbackTimeoutMs: number;
     status: "ok" | "configuration";
   }[];
-  telemetry: { note: string; availableFields: string[] };
+  telemetry: {
+    note: string;
+    totalEvents: number;
+    lastHourEvents: number;
+    errorEvents: number;
+    aiProviderEvents: number;
+    fallbackCount: number;
+  };
+  recentIncidents: {
+    id: string;
+    timestamp: string;
+    severity: "error" | "warning" | "info";
+    category: string;
+    message: string;
+    requestId?: string;
+  }[];
+  recentJobs: {
+    id: string;
+    job_type: string;
+    status: string;
+    progress: Record<string, unknown>;
+    attempt_count: number;
+    max_attempts: number;
+    next_run_at: string;
+    last_error_category: string | null;
+    created_at: string;
+  }[];
 }
 
 async function fetchMonitoring(): Promise<MonitoringData> {
-  const res = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"}/api/admin/monitoring`, {
+  const res = await fetchInternalApi("/api/admin/monitoring", {
     cache: "no-store",
     headers: { "x-request-id": `req_admin_monitoring_${crypto.randomUUID()}` },
   });
@@ -38,9 +65,9 @@ function MonitoringContent({ data }: { data: MonitoringData }) {
   return (
     <div className="space-y-8">
       <PageHeader
-        badge="Read-Only"
+        badge="Durable"
         title="Monitoring"
-        description="Live health, readiness, and AI provider configuration. Historical telemetry requires durable monitoring store (future phase)."
+        description="Live health, readiness, AI provider telemetry, recent incidents, and background job status."
       />
 
       <div className="grid gap-4 md:grid-cols-3">
@@ -105,25 +132,59 @@ function MonitoringContent({ data }: { data: MonitoringData }) {
       <Card accent padding="md">
         <div className="mb-4 flex items-center gap-2">
           <IconInfo size={20} className="text-cyan-300" />
-          <h3 className="text-lg font-semibold text-white">Telemetry Availability</h3>
+          <h3 className="text-lg font-semibold text-white">Durable Telemetry</h3>
         </div>
-        <p className="text-sm text-slate-400 mb-4">{telemetry.note}</p>
-        <div className="flex flex-wrap gap-2">
-          {telemetry.availableFields.map((field) => (
-            <span key={field} className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs font-mono text-slate-300">
-              {field}
-            </span>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          {[
+            ["Total events", telemetry.totalEvents],
+            ["Last hour", telemetry.lastHourEvents],
+            ["Errors", telemetry.errorEvents],
+            ["AI events", telemetry.aiProviderEvents],
+            ["Fallbacks", telemetry.fallbackCount],
+          ].map(([label, value]) => (
+            <div key={label} className="rounded-lg border border-white/[0.06] bg-white/[0.03] p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">{label}</p>
+              <p className="mt-2 text-2xl font-bold text-white">{value}</p>
+            </div>
           ))}
         </div>
       </Card>
 
-      <Divider label="Recent Incidents (In-Memory Only)" />
+      <Divider label="Recent Incidents" />
 
       <Card accent padding="md">
-        <p className="text-sm text-slate-400 mb-4">
-          Historical incidents require a durable monitoring store. Current in-memory telemetry is available via structured logs only.
-        </p>
-        <RecentIncidents incidents={[]} />
+        <RecentIncidents incidents={data.recentIncidents} />
+      </Card>
+
+      <Divider label="Background Jobs" />
+
+      <Card accent padding="md">
+        {data.recentJobs.length ? (
+          <div className="grid gap-3 lg:grid-cols-2">
+            {data.recentJobs.map((job) => (
+              <div key={job.id} className="rounded-lg border border-white/[0.06] bg-white/[0.03] p-4">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <p className="font-mono text-xs text-slate-300">{job.job_type}</p>
+                  <StatusBadge
+                    status={job.status === "completed" ? "ok" : job.status === "failed" ? "error" : "configuration"}
+                    customLabel={job.status}
+                  />
+                </div>
+                <p className="text-xs text-slate-500">{job.id}</p>
+                <p className="mt-3 text-sm text-slate-300">
+                  Attempt {job.attempt_count} of {job.max_attempts}
+                  {job.last_error_category ? ` · ${job.last_error_category}` : ""}
+                </p>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyState
+            title="No background jobs yet"
+            description="Queued PDF extraction and summary jobs will appear here."
+            icon={<IconActivity size={24} className="text-emerald-300" />}
+          />
+        )}
       </Card>
     </div>
   );

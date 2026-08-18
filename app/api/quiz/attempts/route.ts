@@ -4,6 +4,7 @@ import { buildQuizAnalytics, gradeQuizAttempt } from "@/backend/lib/quizAnalytic
 import { buildReviewAnswerKey, findUnknownAnswerQuestionIds, normalizeSubmittedAnswers } from "@/backend/lib/quizSecurity";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { buildLearnerProfile, buildRevisionRecommendations } from "@/backend/lib/learnerProfile";
+import { withRequestObservability } from "@/backend/lib/observability";
 
 export const runtime = "nodejs";
 
@@ -76,7 +77,7 @@ async function loadLearnerProfile(
   return buildLearnerProfile(result.data ?? []);
 }
 
-export async function GET() {
+async function handleGet() {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -91,7 +92,7 @@ export async function GET() {
   }
 }
 
-export async function POST(request: Request) {
+async function handlePost(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
@@ -194,4 +195,12 @@ export async function POST(request: Request) {
   } catch {
     return NextResponse.json({ ...gradeResponse, attempt, answer_key: answerKey, analytics: null });
   }
+}
+
+export async function GET(request: Request) {
+  return withRequestObservability(request, "/api/quiz/attempts", async () => handleGet());
+}
+
+export async function POST(request: Request) {
+  return withRequestObservability(request, "/api/quiz/attempts", async () => handlePost(request));
 }
