@@ -11,10 +11,22 @@ test.describe("authentication", () => {
   });
 
   test("shows a clear invalid-login state", async ({ page }) => {
-    await page.route("**/auth/v1/token?grant_type=password", async (route) => {
+    await page.route((url) => url.pathname.endsWith("/auth/v1/token") && url.searchParams.get("grant_type") === "password", async (route) => {
+      const corsHeaders = {
+        "access-control-allow-origin": "*",
+        "access-control-allow-headers": "authorization, x-client-info, apikey, content-type",
+        "access-control-allow-methods": "POST, OPTIONS",
+      };
+
+      if (route.request().method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: corsHeaders });
+        return;
+      }
+
       await route.fulfill({
         status: 400,
         contentType: "application/json",
+        headers: corsHeaders,
         body: JSON.stringify({
           error: "invalid_grant",
           error_description: "Invalid login credentials",
