@@ -26,7 +26,7 @@ type TextGenerationConfig = {
 
 const DEFAULT_PROVIDER_TIMEOUT_MS = 30000;
 const DEFAULT_SUMMARY_TIMEOUT_MS = 120000;
-const DEFAULT_NVIDIA_MODEL = "z-ai/glm-5.2";
+const DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b";
 const TIMEOUT_MESSAGE = "AI is taking longer than expected. Try fewer questions or switch to faster model.";
 export const SUMMARY_TIMEOUT_MESSAGE = "Summary generation is taking longer than expected. Please retry or use a faster AI model.";
 
@@ -232,6 +232,21 @@ async function parseNvidiaResponse(response: Response) {
   throw new AIProviderError("NVIDIA AI returned an empty response.", "empty", "nvidia");
 }
 
+async function sleepMs(ms: number, signal?: AbortSignal) {
+  if (signal?.aborted) return Promise.reject(new AIProviderError("AI request was cancelled.", "cancelled", "nvidia"));
+  return new Promise<void>((resolve, reject) => {
+    const finish = (callback: () => void) => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => reject(new AIProviderError("AI request was cancelled.", "cancelled", "nvidia")));
+    const timer = setTimeout(() => finish(resolve), ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+}
+
 async function askNvidia(
   prompt: string,
   generationConfig: TextGenerationConfig = {},
@@ -248,15 +263,8 @@ async function askNvidia(
   const maxTokens = generationConfig.maxOutputTokens ?? 1400;
   const timeoutMs = runtime.timeoutMs;
   const startedAt = Date.now();
-  const controller = new AbortController();
-  let timedOut = false;
-  const onExternalAbort = () => controller.abort(generationConfig.signal?.reason);
-  if (generationConfig.signal?.aborted) onExternalAbort();
-  else generationConfig.signal?.addEventListener("abort", onExternalAbort, { once: true });
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, timeoutMs);
+  const maxRetries = 3;
+  let retryCount = 0;
 
   devLog("provider started", {
     profile: runtime.profile,
@@ -266,41 +274,147 @@ async function askNvidia(
     responseMimeType: generationConfig.responseMimeType ?? "text/plain",
   });
 
-  try {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: "user", content: prompt }],
-        temperature,
-        max_tokens: maxTokens,
-      }),
-      signal: controller.signal,
-    });
+  while (true) {
+    const controller = new AbortController();
+    let timedOut = false;
+    const onExternalAbort = () => controller.abort(generationConfig.signal?.reason);
+    if (generationConfig.signal?.aborted) onExternalAbort();
+    else generationConfig.signal?.addEventListener("abort", onExternalAbort, { once: true });
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
 
-    return await parseNvidiaResponse(response);
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      if (generationConfig.signal?.aborted) {
-        throw new AIProviderError("AI request was cancelled.", "cancelled", "nvidia");
+    try {
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "user", content: prompt }],
+          temperature,
+          max_tokens: maxTokens,
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+      generationConfig.signal?.removeEventListener("abort", onExternalAbort);
+
+      if (response.ok) {
+        devLog("provider duration", {
+          profile: runtime.profile,
+          provider: "nvidia",
+          model,
+          durationMs: Date.now() - startedAt,
+          retryCount,
+        });
+        return await parseNvidiaResponse(response);
       }
-      if (!timedOut) throw new AIProviderError("NVIDIA AI request failed. Please try again.", "request", "nvidia");
-      throw new AIProviderError(runtime.timeoutMessage, "timeout", "nvidia");
+
+      const raw = await response.text();
+      const kind = classifyProviderError(response.status, raw);
+
+      if (kind === "busy") {
+        devLog("provider duration", {
+          profile: runtime.profile,
+          provider: "nvidia",
+          model,
+          durationMs: Date.now() - startedAt,
+          retryCount,
+        });
+        throw new AIProviderError("StudyPilot AI is busy right now. Please try again in a few seconds.", "busy", "nvidia", {
+          status: response.status,
+        });
+      }
+
+      if (kind === "quota") {
+        if (retryCount < maxRetries && response.status === 429) {
+          retryCount += 1;
+          const retryAfterHeader = response.headers.get("Retry-After");
+          let delayMs = 0;
+          if (retryAfterHeader) {
+            const parsed = Number(retryAfterHeader);
+            if (Number.isFinite(parsed) && parsed > 0) {
+              delayMs = Math.min(parsed * 1000, 30000);
+            }
+          }
+          if (!delayMs) {
+            const baseDelay = 1000;
+            delayMs = Math.min(baseDelay * 2 ** (retryCount - 1), 10000);
+          }
+          devLog("nvidia 429 retry scheduled", {
+            profile: runtime.profile,
+            retryCount,
+            delayMs,
+            retryAfterHeader: retryAfterHeader ?? null,
+          });
+          await sleepMs(delayMs, generationConfig.signal);
+          continue;
+        }
+
+        devLog("provider duration", {
+          profile: runtime.profile,
+          provider: "nvidia",
+          model,
+          durationMs: Date.now() - startedAt,
+          retryCount,
+        });
+        throw new AIProviderError("Free AI limit reached. Please try again later.", "quota", "nvidia", {
+          status: response.status,
+        });
+      }
+
+      if (kind === "auth") {
+        devLog("provider duration", {
+          profile: runtime.profile,
+          provider: "nvidia",
+          model,
+          durationMs: Date.now() - startedAt,
+          retryCount,
+        });
+        throw new AIProviderError("AI service authentication failed. Check your NVIDIA API key.", "auth", "nvidia", {
+          status: response.status,
+        });
+      }
+
+      devLog("provider duration", {
+        profile: runtime.profile,
+        provider: "nvidia",
+        model,
+        durationMs: Date.now() - startedAt,
+        retryCount,
+      });
+      throw new AIProviderError("NVIDIA AI request failed. Please try again.", "request", "nvidia", {
+        status: response.status,
+      });
+    } catch (error) {
+      clearTimeout(timeout);
+      generationConfig.signal?.removeEventListener("abort", onExternalAbort);
+
+      if (error instanceof AIProviderError) {
+        devLog("provider duration", {
+          profile: runtime.profile,
+          provider: "nvidia",
+          model,
+          durationMs: Date.now() - startedAt,
+          retryCount,
+        });
+        throw error;
+      }
+
+      if (error instanceof Error && error.name === "AbortError") {
+        if (generationConfig.signal?.aborted) {
+          throw new AIProviderError("AI request was cancelled.", "cancelled", "nvidia");
+        }
+        if (!timedOut) throw new AIProviderError("NVIDIA AI request failed. Please try again.", "request", "nvidia");
+        throw new AIProviderError(runtime.timeoutMessage, "timeout", "nvidia");
+      }
+      throw error;
     }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-    generationConfig.signal?.removeEventListener("abort", onExternalAbort);
-    devLog("provider duration", {
-      profile: runtime.profile,
-      provider: "nvidia",
-      model,
-      durationMs: Date.now() - startedAt,
-    });
   }
 }
 
@@ -457,7 +571,7 @@ async function generateAITextForProfile(
         durationMs: Date.now() - startedAt,
         errorKind: error instanceof AIProviderError ? error.kind : "request",
       });
-      throw error;
+      throw new AIProviderError("The AI service is temporarily unavailable. Please try again shortly.", "busy", "nvidia");
     }
   }
 
@@ -599,7 +713,7 @@ async function generateAITextForProfile(
         errorKind: fallbackError instanceof AIProviderError ? fallbackError.kind : "request",
         fallbackTriggered: true,
       });
-      throw fallbackError;
+      throw new AIProviderError("The AI service is temporarily unavailable. Please try again shortly.", "busy", "nvidia");
     }
   }
 }

@@ -18,17 +18,13 @@ export async function login(page: Page) {
   await page.getByLabel("Email").fill(e2eEnv.email);
   await page.getByLabel("Password").fill(e2eEnv.password);
   await page.locator("form").getByRole("button", { name: /^log in$/i }).click();
-  await expect(page).toHaveURL(/\/dashboard|\/auth/);
-  await expect(page.getByText(/StudyPilot AI|Dashboard|Welcome/i)).toBeVisible();
+  await expect(page, "login should create a Supabase session and redirect to the dashboard").toHaveURL(/\/dashboard/);
+  await expect(page.getByRole("heading", { name: /student dashboard|dashboard/i })).toBeVisible();
 }
 
 export async function logout(page: Page) {
-  await page.goto("/auth");
-  const signOut = page.getByRole("button", { name: /sign out/i });
-  if (await signOut.isVisible().catch(() => false)) {
-    await signOut.click();
-    await expect(page).toHaveURL(/\/$/);
-  }
+  await page.getByRole("button", { name: /sign out/i }).click();
+  await expect(page, "logout should clear the Supabase session and redirect home").toHaveURL(/\/$/);
 }
 
 export async function stubAI(page: Page) {

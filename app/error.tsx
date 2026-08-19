@@ -18,7 +18,19 @@ export default function Error({
   useEffect(() => {
     if (process.env.NODE_ENV !== "production") {
       console.error("[StudyPilot] route error", error);
+      return;
     }
+    void fetch("/api/monitoring/client-error", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        message: error?.message || "Client route error",
+        digest: error?.digest ?? null,
+        route: window.location.pathname,
+      }),
+    }).catch(() => {
+      // Client error reporting must never block recovery.
+    });
   }, [error]);
 
   return (

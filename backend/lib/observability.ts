@@ -2,6 +2,7 @@ import "server-only";
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import crypto from "node:crypto";
+import { captureExternalError } from "./externalMonitoring";
 
 export type RequestId = string & { readonly __brand: unique symbol };
 
@@ -274,6 +275,17 @@ export async function withRequestObservability<T extends Response>(
         status: 500,
         durationMs,
         errorCategory: sanitizedError.category,
+      });
+      void captureExternalError({
+        source: "server",
+        severity: "error",
+        message: sanitizedError.message,
+        category: sanitizedError.category,
+        requestId,
+        route,
+        method: request.method,
+        status: 500,
+        metadata: { durationMs },
       });
       throw error;
     }

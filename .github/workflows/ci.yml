@@ -76,6 +76,14 @@ jobs:
             echo "Authenticated scenarios were not run because one or more E2E/Supabase secrets are unavailable." >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Require authenticated E2E for main release gate
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.e2e-mode.outputs.mode != 'full'
+        run: |
+          echo "::error title=Authenticated E2E required::Pushes to main require NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, STUDYPILOT_E2E_EMAIL, and STUDYPILOT_E2E_PASSWORD secrets."
+          echo "### Release gate incomplete" >> "$GITHUB_STEP_SUMMARY"
+          echo "Authenticated E2E did not run, so this main-branch validation cannot be used for production deployment." >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
       - name: Full authenticated E2E tests
         if: steps.e2e-mode.outputs.mode == 'full'
         run: npm run test:e2e

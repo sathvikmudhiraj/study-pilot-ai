@@ -42,6 +42,7 @@ type EnqueueJobInput = {
 };
 
 const DEFAULT_STALE_LOCK_MS = 15 * 60 * 1000;
+const MAX_RETRY_DELAY_SECONDS = 300;
 
 function devLog(message: string, details?: Record<string, unknown>) {
   if (process.env.NODE_ENV === "production") return;
@@ -195,7 +196,7 @@ export async function completeBackgroundJob(job: BackgroundJobRow, progress: Rec
   requireJobsConfigured();
   const supabase = createAdminSupabaseClient();
   const now = new Date().toISOString();
-  const { error } = await supabase
+  let query = supabase
     .from("background_jobs")
     .update({
       status: "completed",
@@ -204,8 +205,15 @@ export async function completeBackgroundJob(job: BackgroundJobRow, progress: Rec
       locked_by: null,
       progress: sanitizePayload({ ...job.progress, ...progress, stage: "completed" }),
     })
-    .eq("id", job.id);
+    .eq("id", job.id)
+    .eq("status", "processing");
+  if (job.locked_by) query = query.eq("locked_by", job.locked_by);
+  const { data, error } = await query.select("id").maybeSingle();
   if (error) throw error;
+  if (!data) {
+    devLog("complete skipped because job ownership changed", { jobId: job.id, lockedBy: job.locked_by });
+    return;
+  }
 
   await recordMonitoringEvent({
     eventType: "job.completed",
@@ -214,32 +222,48 @@ export async function completeBackgroundJob(job: BackgroundJobRow, progress: Rec
   });
 }
 
+export function getBackgroundJobRetryPlan(job: Pick<BackgroundJobRow, "attempt_count" | "max_attempts">, nowMs = Date.now()) {
+  const shouldRetry = job.attempt_count < job.max_attempts;
+  const delaySeconds = Math.min(MAX_RETRY_DELAY_SECONDS, 20 * 2 ** Math.max(0, job.attempt_count - 1));
+  return {
+    shouldRetry,
+    delaySeconds,
+    nextRunAt: shouldRetry ? new Date(nowMs + delaySeconds * 1000).toISOString() : null,
+    finalStatus: shouldRetry ? "retrying" : "failed",
+  } as const;
+}
+
 export async function failBackgroundJob(job: BackgroundJobRow, error: unknown, progress: Record<string, unknown> = {}) {
   requireJobsConfigured();
   const supabase = createAdminSupabaseClient();
   const sanitized = sanitizeError(error);
-  const shouldRetry = job.attempt_count < job.max_attempts;
-  const delaySeconds = Math.min(300, 20 * 2 ** Math.max(0, job.attempt_count - 1));
-  const nextRun = new Date(Date.now() + delaySeconds * 1000).toISOString();
-  const { error: updateError } = await supabase
+  const retryPlan = getBackgroundJobRetryPlan(job);
+  let query = supabase
     .from("background_jobs")
     .update({
-      status: shouldRetry ? "retrying" : "failed",
+      status: retryPlan.finalStatus,
       locked_at: null,
       locked_by: null,
-      next_run_at: shouldRetry ? nextRun : new Date().toISOString(),
+      next_run_at: retryPlan.nextRunAt ?? new Date().toISOString(),
       last_error_category: sanitized.category,
       last_error_message: sanitized.message,
-      completed_at: shouldRetry ? null : new Date().toISOString(),
+      completed_at: retryPlan.shouldRetry ? null : new Date().toISOString(),
       progress: sanitizePayload({
         ...job.progress,
         ...progress,
-        stage: shouldRetry ? "retrying" : "failed",
-        nextRunAt: shouldRetry ? nextRun : null,
+        stage: retryPlan.finalStatus,
+        nextRunAt: retryPlan.nextRunAt,
       }),
     })
-    .eq("id", job.id);
+    .eq("id", job.id)
+    .eq("status", "processing");
+  if (job.locked_by) query = query.eq("locked_by", job.locked_by);
+  const { data, error: updateError } = await query.select("id").maybeSingle();
   if (updateError) throw updateError;
+  if (!data) {
+    devLog("failure update skipped because job ownership changed", { jobId: job.id, lockedBy: job.locked_by });
+    return;
+  }
 
   await recordMonitoringEvent({
     eventType: "job.failed",
@@ -249,7 +273,7 @@ export async function failBackgroundJob(job: BackgroundJobRow, error: unknown, p
       jobType: job.job_type,
       fileId: job.file_id,
       noteId: job.note_id,
-      retrying: shouldRetry,
+      retrying: retryPlan.shouldRetry,
     },
   });
 }

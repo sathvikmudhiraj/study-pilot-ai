@@ -1,4 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
+import { loadEnvConfig } from "@next/env";
+
+loadEnvConfig(process.cwd());
 
 const baseURL = process.env.STUDYPILOT_E2E_BASE_URL || "http://localhost:3000";
 
