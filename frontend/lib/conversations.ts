@@ -22,7 +22,7 @@ export async function listConversations(query?: string): Promise<ListResult> {
   const url = query ? `/api/conversations?q=${encodeURIComponent(query)}` : "/api/conversations";
   let res: Response;
   try {
-    res = await fetch(url, { cache: "no-store" });
+    res = await fetch(url, { cache: "no-store", credentials: "same-origin" });
   } catch {
     return { ok: false, status: 0, message: "Network error. Check your connection and try again." };
   }
@@ -51,6 +51,8 @@ export async function createConversation(payload: {
   try {
     res = await fetch("/api/conversations", {
       method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         title: payload.title,
@@ -79,7 +81,7 @@ export type GetResult =
 export async function getConversation(id: string): Promise<GetResult> {
   let res: Response;
   try {
-    res = await fetch(`/api/conversations/${encodeURIComponent(id)}`, { cache: "no-store" });
+    res = await fetch(`/api/conversations/${encodeURIComponent(id)}`, { cache: "no-store", credentials: "same-origin" });
   } catch {
     return { ok: false, status: 0, message: "Network error. Check your connection and try again." };
   }
@@ -105,6 +107,7 @@ export async function getMessages(id: string): Promise<MessagesResult> {
   try {
     res = await fetch(`/api/conversations/${encodeURIComponent(id)}/messages?limit=100&direction=asc`, {
       cache: "no-store",
+      credentials: "same-origin",
     });
   } catch {
     return { ok: false, status: 0, message: "Network error. Check your connection and try again." };
@@ -147,6 +150,8 @@ export async function patchConversation(
   try {
     res = await fetch(`/api/conversations/${encodeURIComponent(id)}`, {
       method: "PATCH",
+      credentials: "same-origin",
+      cache: "no-store",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
@@ -169,7 +174,7 @@ export type DeleteResult =
 export async function deleteConversation(id: string): Promise<DeleteResult> {
   let res: Response;
   try {
-    res = await fetch(`/api/conversations/${encodeURIComponent(id)}`, { method: "DELETE" });
+    res = await fetch(`/api/conversations/${encodeURIComponent(id)}`, { method: "DELETE", credentials: "same-origin" });
   } catch {
     return { ok: false, status: 0, message: "Network error. Check your connection and try again." };
   }

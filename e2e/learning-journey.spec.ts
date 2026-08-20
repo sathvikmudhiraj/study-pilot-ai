@@ -25,7 +25,8 @@ test.describe("complete learning journey", () => {
     const generateQuiz = page.getByRole("button", { name: /generate quiz/i }).first();
     if (await generateQuiz.isEnabled().catch(() => false)) {
       await generateQuiz.click();
-      await expect(page.getByText(/Networking Quiz|CIDR|questions/i)).toBeVisible();
+      await expect(page.getByRole("heading", { name: /networking quiz/i })).toBeVisible();
+      await expect(page.getByText(/what does CIDR notation describe/i)).toBeVisible();
     }
 
     const submit = page.getByRole("button", { name: /submit|save attempt/i }).first();
@@ -39,23 +40,23 @@ test.describe("complete learning journey", () => {
     const generatePlan = page.getByRole("button", { name: /generate plan|regenerate plan/i }).first();
     if (await generatePlan.isVisible().catch(() => false)) {
       await generatePlan.click();
-      await expect(page.getByText(/Networking Revision Plan|Subnetting|full chapter/i)).toBeVisible();
+      await expect(page.getByRole("heading", { name: /networking revision plan/i })).toBeVisible();
+      await expect(page.getByText(/revise full chapter/i)).toBeVisible();
     }
 
     await page.goto("/chat");
-    await expect(page.getByText(/AI Chat|StudyPilot|Ask/i)).toBeVisible();
+    await expect(page.getByRole("heading", { name: /what would you like to study/i })).toBeVisible();
     const composer = page.getByPlaceholder(/ask|message|question/i).first();
     if (await composer.isVisible().catch(() => false)) {
       await composer.fill("Explain subnetting");
       await page.keyboard.press("Enter");
       await expect(page.getByText(/Subnetting divides|prefix length/i)).toBeVisible();
       await page.reload();
-      await expect(page.getByText(/Subnetting divides|Explain subnetting/i)).toBeVisible();
+      await expect(page.getByRole("button", { name: /explain subnetting/i }).first()).toBeVisible();
     }
 
     await page.goto("/voice");
     await expect(page.getByRole("heading", { name: /voice tutor/i })).toBeVisible();
-    await expect(page.getByText(/browser does not support|start listening|voice assistant|microphone/i)).toBeVisible();
+    await expect(page.getByRole("button", { name: /start listening/i })).toBeVisible();
   });
 });
-

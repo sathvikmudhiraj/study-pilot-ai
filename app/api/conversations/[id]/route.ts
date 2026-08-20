@@ -20,6 +20,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const CONVERSATION_SELECT =
   "id, title, pinned, context_mode, active_file_ids, active_note_ids, language_code, created_at, updated_at";
+const LEGACY_CONVERSATION_SELECT = "id, title, created_at";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -27,6 +28,40 @@ const CONVERSATION_SELECT =
 
 function apiError(message: string, status = 500) {
   return NextResponse.json({ error: message }, { status });
+}
+
+function isMissingOptionalConversationColumn(error: unknown) {
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === "object" && error !== null && "message" in error
+      ? String((error as { message?: unknown }).message ?? "")
+      : String(error ?? "");
+  const lower = message.toLowerCase();
+  return (
+    (lower.includes("does not exist") || lower.includes("could not find")) &&
+    (
+      lower.includes("language_code") ||
+      lower.includes("pinned") ||
+      lower.includes("context_mode") ||
+      lower.includes("active_file_ids") ||
+      lower.includes("active_note_ids") ||
+      lower.includes("updated_at")
+    )
+  );
+}
+
+function withDefaultLanguage<T extends Record<string, unknown>>(row: T | null) {
+  return row
+    ? {
+        ...row,
+        pinned: row.pinned ?? false,
+        context_mode: row.context_mode ?? "general",
+        active_file_ids: row.active_file_ids ?? [],
+        active_note_ids: row.active_note_ids ?? [],
+        language_code: row.language_code ?? "en",
+        updated_at: row.updated_at ?? row.created_at,
+      }
+    : null;
 }
 
 function isValidUuid(value: string): boolean {
@@ -71,8 +106,19 @@ async function requireOwnedConversation(
     .eq("user_id", userId)
     .maybeSingle();
 
+  if (error && isMissingOptionalConversationColumn(error)) {
+    const legacyResult = await supabase
+      .from("conversations")
+      .select(LEGACY_CONVERSATION_SELECT)
+      .eq("id", conversationId)
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (legacyResult.error) throw legacyResult.error;
+    return withDefaultLanguage(legacyResult.data);
+  }
   if (error) throw error;
-  return data;
+  return withDefaultLanguage(data);
 }
 
 // ---------------------------------------------------------------------------
@@ -201,13 +247,40 @@ async function handlePatch(request: Request, { params }: RouteContext) {
       return apiError("Provide at least one field to update.", 400);
     }
 
-    const { data, error } = await supabase
+    let data: Record<string, unknown> | null = null;
+    let error: unknown = null;
+
+    const updateResult = await supabase
       .from("conversations")
       .update(updates)
       .eq("id", id)
       .eq("user_id", user.id)
       .select(CONVERSATION_SELECT)
       .single();
+    data = updateResult.data;
+    error = updateResult.error;
+
+    if (error && isMissingOptionalConversationColumn(error)) {
+      const legacyUpdates = { ...updates };
+      delete legacyUpdates.language_code;
+      delete legacyUpdates.pinned;
+      delete legacyUpdates.context_mode;
+      delete legacyUpdates.active_file_ids;
+      delete legacyUpdates.active_note_ids;
+      if (!Object.keys(legacyUpdates).length) {
+        return NextResponse.json({ conversation: existing });
+      }
+
+      const legacyResult = await supabase
+        .from("conversations")
+        .update(legacyUpdates)
+        .eq("id", id)
+        .eq("user_id", user.id)
+        .select(LEGACY_CONVERSATION_SELECT)
+        .single();
+      data = withDefaultLanguage(legacyResult.data);
+      error = legacyResult.error;
+    }
 
     if (error) throw error;
 

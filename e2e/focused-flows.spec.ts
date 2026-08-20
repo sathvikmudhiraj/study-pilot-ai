@@ -56,19 +56,25 @@ test.describe("focused E2E scenarios", () => {
     });
 
     await page.goto("/files");
-    await expect(page.getByText(/files|upload notes|no files/i)).toBeVisible();
+    await expect(page.getByRole("heading", { name: /my library/i })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /study files|no study material found/i }).first()).toBeVisible();
     expect(summarizeCalls).toBe(0);
   });
 
   test("dashboard shows real metric areas and empty states without fake values", async ({ page }) => {
     await page.goto("/dashboard");
-    await expect(page.getByText(/quiz improvement|weak topics|revision progress|study streak/i)).toBeVisible();
-    await expect(page.getByText(/recommended next study|learning insights/i)).toBeVisible();
+    await expect(page.getByRole("heading", { name: /student dashboard/i })).toBeVisible();
+    await expect(page.getByRole("link", { name: /quiz improvement/i })).toBeVisible();
+    await expect(page.getByRole("link", { name: /weak topics/i })).toBeVisible();
+    await expect(page.getByRole("link", { name: /revision progress/i })).toBeVisible();
+    await expect(page.getByRole("link", { name: /study streak/i })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /recommended next study/i })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /learning insights/i })).toBeVisible();
   });
 
   test("step-by-step mode can start from a weak-topic recommendation", async ({ page }) => {
     await page.goto("/chat");
-    await expect(page.getByText(/Learn Step by Step|Ask|StudyPilot/i)).toBeVisible();
+    await expect(page.getByRole("heading", { name: /what would you like to study/i })).toBeVisible();
     const learnButton = page.getByRole("button", { name: /learn step by step|start or continue learn/i }).first();
     if (await learnButton.isVisible().catch(() => false)) {
       await learnButton.click();
@@ -80,7 +86,7 @@ test.describe("focused E2E scenarios", () => {
     await context.clearPermissions();
     await page.goto("/voice");
     await expect(page.getByRole("heading", { name: /voice tutor/i })).toBeVisible();
-    await expect(page.getByText(/voice assistant|start listening|browser does not support|microphone/i)).toBeVisible();
+    await expect(page.getByRole("button", { name: /start listening/i })).toBeVisible();
   });
 
   test("language preference and feature selectors expose the approved languages", async ({ page }) => {

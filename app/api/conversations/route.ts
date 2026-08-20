@@ -23,6 +23,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // Columns returned for list responses (no heavy data)
 const CONVERSATION_LIST_SELECT =
   "id, title, pinned, context_mode, active_file_ids, active_note_ids, language_code, created_at, updated_at";
+const LEGACY_CONVERSATION_LIST_SELECT = "id, title, created_at";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -30,6 +31,38 @@ const CONVERSATION_LIST_SELECT =
 
 function apiError(message: string, status = 500) {
   return NextResponse.json({ error: message }, { status });
+}
+
+function isMissingOptionalConversationColumn(error: unknown) {
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === "object" && error !== null && "message" in error
+      ? String((error as { message?: unknown }).message ?? "")
+      : String(error ?? "");
+  const lower = message.toLowerCase();
+  return (
+    (lower.includes("does not exist") || lower.includes("could not find")) &&
+    (
+      lower.includes("language_code") ||
+      lower.includes("pinned") ||
+      lower.includes("context_mode") ||
+      lower.includes("active_file_ids") ||
+      lower.includes("active_note_ids") ||
+      lower.includes("updated_at")
+    )
+  );
+}
+
+function withDefaultLanguage<T extends Record<string, unknown>>(rows: T[] | null | undefined) {
+  return (rows ?? []).map((row) => ({
+    ...row,
+    pinned: row.pinned ?? false,
+    context_mode: row.context_mode ?? "general",
+    active_file_ids: row.active_file_ids ?? [],
+    active_note_ids: row.active_note_ids ?? [],
+    language_code: row.language_code ?? "en",
+    updated_at: row.updated_at ?? row.created_at,
+  }));
 }
 
 function isUuid(value: unknown): value is string {
@@ -93,6 +126,22 @@ async function handleGet(request: Request) {
     }
 
     const { data, error } = await query;
+    if (error && isMissingOptionalConversationColumn(error)) {
+      let legacyQuery = supabase
+        .from("conversations")
+        .select(LEGACY_CONVERSATION_LIST_SELECT)
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false })
+        .limit(MAX_CONVERSATIONS_PER_PAGE);
+
+      if (search) {
+        legacyQuery = legacyQuery.ilike("title", `%${search}%`);
+      }
+
+      const legacyResult = await legacyQuery;
+      if (legacyResult.error) throw legacyResult.error;
+      return NextResponse.json({ conversations: withDefaultLanguage(legacyResult.data) });
+    }
     if (error) throw error;
 
     return NextResponse.json({ conversations: data ?? [] });
@@ -165,20 +214,36 @@ async function handlePost(request: Request) {
       verifiedNoteIds = (ownedNotes ?? []).map((n) => n.id);
     }
 
+    const payload = {
+      user_id: user.id,
+      title: title ?? null,
+      pinned: false,
+      context_mode: contextMode,
+      active_file_ids: verifiedFileIds,
+      active_note_ids: verifiedNoteIds,
+      language_code: language,
+    };
+
     const { data, error } = await supabase
       .from("conversations")
-      .insert({
-        user_id: user.id,
-        title: title ?? null,
-        pinned: false,
-        context_mode: contextMode,
-        active_file_ids: verifiedFileIds,
-        active_note_ids: verifiedNoteIds,
-        language_code: language,
-      })
+      .insert(payload)
       .select(CONVERSATION_LIST_SELECT)
       .single();
 
+    if (error && isMissingOptionalConversationColumn(error)) {
+      const minimalLegacyPayload = {
+        user_id: payload.user_id,
+        title: payload.title,
+      };
+      const legacyResult = await supabase
+        .from("conversations")
+        .insert(minimalLegacyPayload)
+        .select(LEGACY_CONVERSATION_LIST_SELECT)
+        .single();
+
+      if (legacyResult.error) throw legacyResult.error;
+      return NextResponse.json({ conversation: withDefaultLanguage([legacyResult.data])[0] }, { status: 201 });
+    }
     if (error) throw error;
 
     return NextResponse.json({ conversation: data }, { status: 201 });

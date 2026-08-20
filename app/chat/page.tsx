@@ -6,6 +6,11 @@ import { supabaseSetupMessage } from "@/frontend/lib/supabase/errors";
 
 export const dynamic = "force-dynamic";
 
+function isMissingLanguageColumn(message: string) {
+  const lower = message.toLowerCase();
+  return lower.includes("language_code") && (lower.includes("does not exist") || lower.includes("could not find"));
+}
+
 export default async function ChatPage() {
   const user = await getCurrentUser();
   const supabase = await createServerSupabaseClient();
@@ -20,7 +25,7 @@ export default async function ChatPage() {
     );
   }
 
-  const [chatsResult, filesResult, notesResult] = await Promise.all([
+  const [initialChatsResult, filesResult, notesResult] = await Promise.all([
     supabase
       .from("assistant_questions")
       .select("id, question, answer, related_file_ids, related_note_ids, conversation_id, created_at")
@@ -42,6 +47,16 @@ export default async function ChatPage() {
       .order("created_at", { ascending: false })
       .limit(50),
   ]);
+
+  const chatsResult = initialChatsResult.error && isMissingLanguageColumn(initialChatsResult.error.message)
+    ? await supabase
+        .from("assistant_questions")
+        .select("id, question, answer, related_file_ids, related_note_ids, conversation_id, created_at")
+        .eq("user_id", user.id)
+        .is("conversation_id", null)
+        .order("created_at", { ascending: false })
+        .limit(30)
+    : initialChatsResult;
 
   const setupError = chatsResult.error || filesResult.error || notesResult.error;
 

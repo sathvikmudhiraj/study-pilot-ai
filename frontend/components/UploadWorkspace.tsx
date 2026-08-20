@@ -246,6 +246,8 @@ export function UploadWorkspace() {
     try {
       const response = await fetch("/api/notes", {
         method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: noteTitle.trim(),
