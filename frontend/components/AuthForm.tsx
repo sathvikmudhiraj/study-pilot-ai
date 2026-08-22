@@ -3,20 +3,26 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { createBrowserSupabaseClient } from "@/frontend/lib/supabase/browser";
-import { unlockWorkspaceAction } from "@/app/auth/actions";
 import { Field, inputClass } from "./ui";
 
 function safeReturnPath(value: string | null) {
   if (!value) return "/dashboard";
 
   const candidate = value.trim();
-  if (!candidate.startsWith("/") || candidate.startsWith("//") || candidate.includes("\\")) {
+  if (
+    !candidate.startsWith("/") ||
+    candidate.startsWith("//") ||
+    candidate.includes("\\")
+  ) {
     return "/dashboard";
   }
 
   try {
     const parsed = new URL(candidate, "https://studypilot.local");
-    if (parsed.origin !== "https://studypilot.local" || parsed.pathname === "/auth") {
+    if (
+      parsed.origin !== "https://studypilot.local" ||
+      parsed.pathname === "/auth"
+    ) {
       return "/dashboard";
     }
     return `${parsed.pathname}${parsed.search}`;
@@ -40,14 +46,19 @@ export function AuthForm({
   const searchParams = useSearchParams();
   const requestedMode = searchParams.get("mode");
 
-  const [mode, setMode] = useState<"login" | "signup">(() => (requestedMode === "signup" ? "signup" : "login"));
+  const [mode, setMode] = useState<"login" | "signup">(() =>
+    requestedMode === "signup" ? "signup" : "login",
+  );
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
-  const next = useMemo(() => safeReturnPath(searchParams.get("next")), [searchParams]);
+  const next = useMemo(
+    () => safeReturnPath(searchParams.get("next")),
+    [searchParams],
+  );
 
   function switchMode(nextMode: "login" | "signup") {
     setMode(nextMode);
@@ -66,41 +77,13 @@ export function AuthForm({
     setMessage("");
 
     if (!envReady) {
-      setError("Supabase is not configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local.");
+      setError(
+        "Supabase is not configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local.",
+      );
       return;
     }
 
     setLoading(true);
-
-    // ── "Unlock workspace" path ──────────────────────────────────────────
-    // When there is already an active session AND the visible form is the
-    // login form (mode === "login"), the user is verifying their password to
-    // unlock the existing workspace. We deliberately do NOT do client-side
-    // signInWithPassword here — that would require passing the full email to
-    // the client. Instead we only forward the entered password to a server
-    // action which resolves the email server-side from the Supabase session.
-    // The password is the only credential the client ever sends; the email is
-    // never serialized into the client bundle.
-    const isUnlockPath = isReauth && mode === "login";
-    if (isUnlockPath) {
-      try {
-        const result = await unlockWorkspaceAction(password);
-        // Always clear the password from client state regardless of outcome.
-        resetTransient();
-        if (!result.ok) {
-          setError(result.message);
-          return;
-        }
-        router.push(next);
-        router.refresh();
-      } catch (err) {
-        resetTransient();
-        setError(err instanceof Error ? err.message : "Could not verify your password. Please try again.");
-      } finally {
-        setLoading(false);
-      }
-      return;
-    }
 
     const supabase = createBrowserSupabaseClient();
 
@@ -120,9 +103,13 @@ export function AuthForm({
       if (result.error) {
         const msg = result.error.message.toLowerCase();
         if (msg.includes("email not confirmed")) {
-          setError("Email not confirmed. Please confirm your email, then log in again.");
+          setError(
+            "Email not confirmed. Please confirm your email, then log in again.",
+          );
         } else if (msg.includes("invalid login credentials")) {
-          setError("Invalid email or password. Check your details and try again.");
+          setError(
+            "Invalid email or password. Check your details and try again.",
+          );
         } else {
           setError(result.error.message);
         }
@@ -131,7 +118,9 @@ export function AuthForm({
       }
 
       if (mode === "signup" && !result.data.session) {
-        setMessage("Account created. Check your email if confirmation is enabled, then log in.");
+        setMessage(
+          "Account created. Check your email if confirmation is enabled, then log in.",
+        );
         switchMode("login");
         setName("");
         setEmail("");
@@ -143,13 +132,19 @@ export function AuthForm({
       router.refresh();
     } catch (err) {
       resetTransient();
-      setError(err instanceof Error ? err.message : "Something went wrong. Please try again.");
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Something went wrong. Please try again.",
+      );
     } finally {
       setLoading(false);
     }
   }
 
   const showActiveSessionBlock = isReauth && !!maskedEmail && mode === "signup";
+  const showAlreadySignedInBlock =
+    isReauth && !!maskedEmail && mode === "login";
 
   return (
     <div className="rounded-xl border border-white/[0.08] bg-white/[0.04] p-5 shadow-2xl shadow-black/30 backdrop-blur sm:p-6 animate-fade-in">
@@ -171,39 +166,61 @@ export function AuthForm({
       </div>
 
       <h1 className="text-xl font-bold text-white sm:text-2xl">
-        {mode === "login" ? (isReauth && maskedEmail ? "Unlock workspace" : "Welcome back") : "Create your workspace"}
+        {mode === "login"
+          ? showAlreadySignedInBlock
+            ? "You are already signed in"
+            : "Welcome back"
+          : "Create your workspace"}
       </h1>
       <p className="mt-2 text-sm text-slate-400">
         {mode === "login"
-          ? isReauth && maskedEmail
-            ? "Confirm your password to continue to your workspace."
+          ? showAlreadySignedInBlock
+            ? "Open your workspace, or sign out to use a different account."
             : "Log in with your StudyPilot AI account."
           : "Use email and password to start a private study workspace."}
       </p>
 
-      {/* Active session ── LOGIN: continue as masked account */}
-      {mode === "login" && isReauth && maskedEmail ? (
+      {/* Active session - LOGIN: already signed in */}
+      {showAlreadySignedInBlock ? (
         <div className="mt-4 rounded-lg border border-emerald-400/20 bg-emerald-400/10 p-3">
           <p className="text-sm leading-6 text-slate-300">
-            Continue as <span className="font-semibold text-emerald-200">{maskedEmail}</span>
+            Continue as{" "}
+            <span className="font-semibold text-emerald-200">
+              {maskedEmail}
+            </span>
           </p>
-          {signOutFormAction ? (
-            <form action={signOutFormAction} className="mt-2">
-              <button
-                type="submit"
-                className="h-9 w-full rounded-lg border border-white/10 bg-white/5 text-sm font-semibold text-slate-200 transition hover:bg-white/10"
-              >
-                Sign out and use another account
-              </button>
-            </form>
-          ) : null}
+          <div className="mt-3 grid gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                router.push(next);
+                router.refresh();
+              }}
+              className="h-9 w-full rounded-lg bg-emerald-400 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300"
+            >
+              Open workspace
+            </button>
+            {signOutFormAction ? (
+              <form action={signOutFormAction}>
+                <button
+                  type="submit"
+                  className="h-9 w-full rounded-lg border border-white/10 bg-white/5 text-sm font-semibold text-slate-200 transition hover:bg-white/10"
+                >
+                  Sign out and use another account
+                </button>
+              </form>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
       {/* Active session ── SIGNUP: must sign out first */}
       {showActiveSessionBlock ? (
         <div className="mt-4 rounded-lg border border-amber-400/25 bg-amber-400/[0.08] p-4 text-sm leading-6 text-amber-100 animate-fade-in">
-          <p>You are currently signed in. Sign out before creating another account.</p>
+          <p>
+            You are currently signed in. Sign out before creating another
+            account.
+          </p>
           {signOutFormAction ? (
             <form action={signOutFormAction} className="mt-3">
               <button
@@ -217,8 +234,8 @@ export function AuthForm({
         </div>
       ) : null}
 
-      {/* Hide the editable form while the sign-up active-session block is showing */}
-      {!showActiveSessionBlock ? (
+      {/* Hide the editable form while an active-session block is showing */}
+      {!showActiveSessionBlock && !showAlreadySignedInBlock ? (
         <form onSubmit={submit} className="mt-6 grid gap-4">
           {mode === "signup" ? (
             <Field label="Name">
@@ -257,8 +274,14 @@ export function AuthForm({
               type="password"
               required
               minLength={6}
-              placeholder={mode === "signup" ? "At least 6 characters" : "Enter your password"}
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
+              placeholder={
+                mode === "signup"
+                  ? "At least 6 characters"
+                  : "Enter your password"
+              }
+              autoComplete={
+                mode === "login" ? "current-password" : "new-password"
+              }
             />
           </Field>
 
@@ -284,7 +307,10 @@ export function AuthForm({
                     <span
                       key={i}
                       className="h-1.5 w-1.5 rounded-full bg-slate-950/60"
-                      style={{ animation: `dotPulse 1.4s ease-in-out infinite`, animationDelay: `${i * 0.2}s` }}
+                      style={{
+                        animation: `dotPulse 1.4s ease-in-out infinite`,
+                        animationDelay: `${i * 0.2}s`,
+                      }}
                     />
                   ))}
                 </span>

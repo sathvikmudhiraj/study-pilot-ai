@@ -74,6 +74,9 @@ export function ConversationList({
   // to filter when the query is set, but we also keep a quick substring here
   // so typing does not flicker.
   const [search, setSearch] = useState("");
+  const [dateFilter, setDateFilter] = useState<
+    "all" | "today" | "yesterday" | "week"
+  >("all");
 
   // Rename tracking: which conversation is being renamed and its draft value.
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -127,11 +130,33 @@ export function ConversationList({
     }
   }, [renamingId]);
 
-  const filtered = search.trim()
-    ? conversations.filter((c) =>
-        (c.title ?? "Untitled chat").toLowerCase().includes(search.trim().toLowerCase()),
-      )
-    : conversations;
+  const filtered = conversations.filter((c) => {
+    const titleMatches = search.trim()
+      ? (c.title ?? "Untitled chat")
+          .toLowerCase()
+          .includes(search.trim().toLowerCase())
+      : true;
+    if (!titleMatches) return false;
+    if (dateFilter === "all") return true;
+
+    const updated = new Date(c.updated_at || c.created_at);
+    if (Number.isNaN(updated.getTime())) return false;
+    const now = new Date();
+    const startToday = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+    );
+    const startYesterday = new Date(startToday);
+    startYesterday.setDate(startYesterday.getDate() - 1);
+    const startWeek = new Date(startToday);
+    startWeek.setDate(startWeek.getDate() - 7);
+
+    if (dateFilter === "today") return updated >= startToday;
+    if (dateFilter === "yesterday")
+      return updated >= startYesterday && updated < startToday;
+    return updated >= startWeek;
+  });
 
   const pinned = filtered.filter((c) => c.pinned);
   const recent = filtered.filter((c) => !c.pinned).slice(0, RECENT_LIMIT);
@@ -161,7 +186,7 @@ export function ConversationList({
     <>
       {/* Desktop compact sidebar */}
       <aside
-        className="hidden w-[272px] shrink-0 flex-col gap-3 border-r border-white/[0.06] bg-slate-950/70 p-3 lg:flex"
+        className="hidden h-full min-h-0 w-[300px] shrink-0 flex-col gap-3 overflow-hidden border-r border-white/[0.06] bg-[#070b14] p-4 lg:flex"
         aria-label="Conversations"
       >
         {panel}
@@ -169,7 +194,12 @@ export function ConversationList({
 
       {/* Mobile drawer */}
       {mobileOpen ? (
-        <div className="fixed inset-0 z-50 lg:hidden" role="dialog" aria-modal="true" aria-label="Conversations">
+        <div
+          className="fixed inset-0 z-50 lg:hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Conversations"
+        >
           <button
             type="button"
             onClick={onCloseMobile}
@@ -177,9 +207,11 @@ export function ConversationList({
             className="absolute inset-0 bg-black/60 backdrop-blur-sm"
             tabIndex={-1}
           />
-          <div className="absolute inset-y-0 left-0 flex w-[88vw] max-w-[340px] flex-col gap-3 bg-slate-950 p-3 shadow-2xl shadow-black/50 animate-fade-in">
+          <div className="absolute inset-y-0 left-0 flex w-[88vw] max-w-[340px] flex-col gap-3 overflow-hidden bg-slate-950 p-3 shadow-2xl shadow-black/50 animate-fade-in">
             <div className="flex items-center justify-between">
-              <span className="text-sm font-semibold text-white">Conversations</span>
+              <span className="text-sm font-semibold text-white">
+                Conversations
+              </span>
               <button
                 type="button"
                 onClick={onCloseMobile}
@@ -198,84 +230,128 @@ export function ConversationList({
 
   function renderPanel() {
     return (
-      <div className="flex min-h-0 flex-1 flex-col gap-3">
+      <div className="flex min-h-0 flex-1 flex-col gap-4">
         {/* New chat + search */}
         <div className="grid gap-2">
           <button
             type="button"
             onClick={onNew}
             disabled={newDisabled}
-            className="inline-flex h-10 w-full items-center gap-2 rounded-lg border border-emerald-400/25 bg-emerald-400/10 px-3 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-400/15 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070b14]"
+            className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-emerald-300/30 bg-emerald-400 px-3 text-sm font-bold text-slate-950 shadow-lg shadow-emerald-950/20 transition hover:-translate-y-px hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070b14]"
           >
             <IconPlus size={16} />
             New chat
           </button>
+          <div className="mt-2 flex items-center justify-between gap-3">
+            <h2 className="text-sm font-bold text-white">Chat History</h2>
+            <button
+              type="button"
+              onClick={onNew}
+              disabled={newDisabled}
+              className="grid h-8 w-8 place-items-center rounded-lg border border-emerald-300/20 bg-emerald-300/10 text-emerald-200 transition hover:bg-emerald-300/15 disabled:cursor-not-allowed disabled:opacity-50"
+              aria-label="Start new chat"
+            >
+              <IconEdit size={14} />
+            </button>
+          </div>
           <div className="relative">
-            <IconSearch size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
+            <IconSearch
+              size={14}
+              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500"
+            />
             <input
               type="search"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search chats"
               aria-label="Search conversations"
-              className="h-9 w-full rounded-lg border border-white/10 bg-white/[0.04] pl-8 pr-3 text-sm text-slate-100 outline-none transition focus:border-emerald-300/40 focus-visible:ring-2 focus-visible:ring-emerald-400/40 placeholder:text-slate-500"
+              className="h-10 w-full rounded-lg border border-white/10 bg-white/[0.04] pl-8 pr-3 text-sm text-slate-100 outline-none transition focus:border-emerald-300/40 focus-visible:ring-2 focus-visible:ring-emerald-400/40 placeholder:text-slate-500"
             />
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {[
+              ["all", "All"],
+              ["today", "Today"],
+              ["yesterday", "Yesterday"],
+              ["week", "Previous 7 Days"],
+            ].map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setDateFilter(value as typeof dateFilter)}
+                className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
+                  dateFilter === value
+                    ? "border-emerald-300/35 bg-emerald-400 text-slate-950"
+                    : "border-white/10 bg-white/[0.035] text-slate-400 hover:bg-white/[0.06] hover:text-slate-200"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
         </div>
 
         {/* Body: loading / error / empty / lists */}
-        <div className="min-h-0 flex-1 overflow-y-auto pr-0.5">
-          {loading ? (
-            <LoadingState />
-          ) : error ? (
-            <ErrorState message={error} />
-          ) : filtered.length === 0 && !hasLegacy && !search.trim() ? (
-            <EmptyState onNew={onNew} />
-          ) : filtered.length === 0 && search.trim() ? (
-            <div className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-6 text-center">
-              <p className="text-sm font-medium text-slate-200">No matches</p>
-              <p className="mt-1 text-xs leading-5 text-slate-500">Try a shorter title or start a new chat.</p>
-            </div>
-          ) : (
-            <div className="grid gap-4">
-              {pinned.length ? (
-                <section>
-                  <h3 className="mb-1.5 px-2 text-[11px] font-semibold uppercase tracking-wide text-amber-200/80">Pinned</h3>
-                  <ul className="grid gap-0.5">
-                    {pinned.map((c) => row(c))}
-                  </ul>
-                </section>
-              ) : null}
-              {recent.length ? (
-                <section>
-                  <h3 className="mb-1.5 px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Recent</h3>
-                  <ul className="grid gap-0.5">
-                    {recent.map((c) => row(c))}
-                  </ul>
-                </section>
-              ) : null}
-              {hasLegacy ? (
-                <section>
-                  <h3 className="mb-1.5 px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Previous chats</h3>
-                  <button
-                    type="button"
-                    onClick={onOpenLegacy}
-                    className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/40 ${
-                      legacyActive
-                        ? "border-emerald-300/30 bg-emerald-400/[0.12] text-emerald-100 shadow-inner shadow-emerald-950/20"
-                        : "border-transparent text-slate-300 hover:border-white/10 hover:bg-white/[0.06]"
-                    }`}
-                  >
-                    <IconChat size={14} className="shrink-0 text-slate-400" />
-                    <span className="min-w-0 flex-1 truncate">Previous Study Chat</span>
-                    <span className="shrink-0 rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold text-slate-400">
-                      Read-only
-                    </span>
-                  </button>
-                </section>
-              ) : null}
-            </div>
-          )}
+        <div className="relative min-h-0 flex-1">
+          <div className="chat-history-scroll h-full overflow-y-auto pr-3">
+            {loading ? (
+              <LoadingState />
+            ) : error ? (
+              <ErrorState message={error} />
+            ) : filtered.length === 0 && !hasLegacy && !search.trim() ? (
+              <EmptyState onNew={onNew} />
+            ) : filtered.length === 0 && search.trim() ? (
+              <div className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-6 text-center">
+                <p className="text-sm font-medium text-slate-200">No matches</p>
+                <p className="mt-1 text-xs leading-5 text-slate-500">
+                  Try a shorter title or start a new chat.
+                </p>
+              </div>
+            ) : (
+              <div className="grid gap-4 py-1.5">
+                {pinned.length ? (
+                  <section>
+                    <h3 className="mb-2.5 px-2 text-[11px] font-semibold uppercase tracking-wide text-amber-200/80">
+                      Pinned
+                    </h3>
+                    <ul className="grid gap-1">{pinned.map((c) => row(c))}</ul>
+                  </section>
+                ) : null}
+                {recent.length ? (
+                  <section>
+                    <h3 className="mb-2.5 px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                      Recent
+                    </h3>
+                    <ul className="grid gap-1">{recent.map((c) => row(c))}</ul>
+                  </section>
+                ) : null}
+                {hasLegacy ? (
+                  <section>
+                    <h3 className="mb-2.5 px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                      Previous chats
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={onOpenLegacy}
+                      className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/40 ${
+                        legacyActive
+                          ? "border-emerald-300/30 bg-emerald-400/[0.12] text-emerald-100 shadow-inner shadow-emerald-950/20"
+                          : "border-transparent text-slate-300 hover:border-white/10 hover:bg-white/[0.06]"
+                      }`}
+                    >
+                      <IconChat size={14} className="shrink-0 text-slate-400" />
+                      <span className="min-w-0 flex-1 truncate">
+                        Previous Study Chat
+                      </span>
+                      <span className="shrink-0 rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold text-slate-400">
+                        Read-only
+                      </span>
+                    </button>
+                  </section>
+                ) : null}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -323,7 +399,12 @@ export function ConversationList({
                 : "border-transparent hover:border-white/10 hover:bg-white/[0.06]"
             }`}
           >
-            {isActive ? <span className="absolute left-0 top-2 bottom-2 w-0.5 rounded-full bg-emerald-300" aria-hidden="true" /> : null}
+            {isActive ? (
+              <span
+                className="absolute left-0 top-2 bottom-2 w-0.5 rounded-full bg-emerald-300"
+                aria-hidden="true"
+              />
+            ) : null}
             <button
               type="button"
               onClick={() => onSelect(c.id)}
@@ -331,9 +412,15 @@ export function ConversationList({
               aria-current={isActive ? "true" : undefined}
               title={title}
             >
-              {c.pinned ? <IconPin size={12} className="shrink-0 text-amber-200" /> : <IconChat size={14} className="shrink-0 text-slate-400" />}
+              {c.pinned ? (
+                <IconPin size={12} className="shrink-0 text-amber-200" />
+              ) : (
+                <IconChat size={14} className="shrink-0 text-slate-400" />
+              )}
               <span className="min-w-0 flex-1">
-                <span className={`block truncate text-sm font-medium ${isActive ? "text-emerald-100" : "text-slate-300"}`}>
+                <span
+                  className={`block truncate text-sm font-medium ${isActive ? "text-emerald-100" : "text-slate-300"}`}
+                >
                   {title}
                 </span>
                 {timestamp ? (
@@ -417,7 +504,9 @@ export function ConversationList({
             className="absolute left-0 right-0 top-9 z-30 rounded-xl border border-red-300/30 bg-slate-900 p-3 text-sm shadow-2xl shadow-black/50"
           >
             <p className="text-slate-200">Delete this conversation?</p>
-            <p className="mt-1 text-xs text-slate-400">This cannot be undone.</p>
+            <p className="mt-1 text-xs text-slate-400">
+              This cannot be undone.
+            </p>
             <div className="mt-2 flex gap-2">
               <button
                 type="button"
@@ -448,7 +537,10 @@ function LoadingState() {
   return (
     <div className="flex flex-col gap-1.5 p-2" aria-live="polite">
       {[0, 1, 2, 3, 4].map((i) => (
-        <div key={i} className="h-9 rounded-lg bg-white/[0.04] animate-shimmer" />
+        <div
+          key={i}
+          className="h-9 rounded-lg bg-white/[0.04] animate-shimmer"
+        />
       ))}
     </div>
   );
@@ -468,8 +560,12 @@ function EmptyState({ onNew }: { onNew: () => void }) {
       <div className="mx-auto grid h-9 w-9 place-items-center rounded-lg border border-emerald-300/20 bg-emerald-300/10 text-emerald-200">
         <IconChat size={16} />
       </div>
-      <p className="text-sm font-semibold text-slate-200">No conversations yet</p>
-      <p className="text-xs leading-5 text-slate-500">Ask a study question and it will stay here for later.</p>
+      <p className="text-sm font-semibold text-slate-200">
+        No conversations yet
+      </p>
+      <p className="text-xs leading-5 text-slate-500">
+        Ask a study question and it will stay here for later.
+      </p>
       <button
         type="button"
         onClick={onNew}

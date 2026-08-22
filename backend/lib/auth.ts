@@ -19,6 +19,44 @@ function normalizeTrustedRole(role: unknown): Role {
   return role === "admin" ? "admin" : "student";
 }
 
+function cleanDisplayName(value: unknown) {
+  if (typeof value !== "string") return "";
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function isTestDisplayName(value: string) {
+  return ["e2e student", "test student"].includes(value.toLowerCase());
+}
+
+function emailUsername(email: string | undefined) {
+  const username = email?.split("@")[0]?.trim();
+  return username || "";
+}
+
+export function resolveDisplayName({
+  profile,
+  metadata,
+  email,
+}: {
+  profile?: Record<string, unknown> | null;
+  metadata?: Record<string, unknown> | null;
+  email?: string;
+}) {
+  const candidates = [
+    cleanDisplayName(profile?.full_name),
+    cleanDisplayName(profile?.name),
+    cleanDisplayName(metadata?.full_name),
+    cleanDisplayName(metadata?.name),
+    emailUsername(email),
+    "Student",
+  ];
+
+  return (
+    candidates.find((candidate) => candidate && !isTestDisplayName(candidate)) ??
+    "Student"
+  );
+}
+
 export async function getCurrentUser(): Promise<CurrentUser | null> {
   const supabase = await createServerSupabaseClient();
   if (!supabase) return null;
@@ -29,13 +67,14 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
 
   if (!user) return null;
   const trustedRole = normalizeTrustedRole(user.app_metadata?.role);
+  const metadata = user.user_metadata as Record<string, unknown> | null;
 
   return {
     id: user.id,
-    name: user.user_metadata?.name ?? user.email?.split("@")[0] ?? "Student",
+    name: resolveDisplayName({ metadata, email: user.email }),
     email: user.email ?? "",
     role: trustedRole,
-    preferredLanguage: normalizeLanguageCode(user.user_metadata?.preferred_language),
+    preferredLanguage: normalizeLanguageCode(metadata?.preferred_language),
   };
 }
 

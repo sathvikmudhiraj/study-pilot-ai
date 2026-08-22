@@ -1,6 +1,13 @@
 ﻿"use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createBrowserSupabaseClient } from "@/frontend/lib/supabase/browser";
@@ -69,7 +76,10 @@ import {
 import { ConversationList } from "./ConversationList";
 import { ConversationHeader } from "./ConversationHeader";
 import { LanguageSelector } from "./LanguageSelector";
-import { languageDetails, type SupportedLanguageCode } from "@/shared/languages";
+import {
+  languageDetails,
+  type SupportedLanguageCode,
+} from "@/shared/languages";
 import {
   LEARN_STEP_BY_STEP_MODE,
   buildLearningControlQuestion,
@@ -134,7 +144,8 @@ type Attachment = {
   type: "file" | "note";
 };
 
-type RequestMode = "study" | "web_search" | "deep_research" | LearnStepByStepMode;
+type RequestMode =
+  "study" | "web_search" | "deep_research" | LearnStepByStepMode;
 type UserMessageMode = RequestMode | "diagram";
 type LoadingMode = RequestMode | "diagram";
 
@@ -220,12 +231,34 @@ type UiMessage =
     };
 
 const bucketName = "study-files";
-const allowedExtensions = [".pdf", ".pptx", ".docx", ".txt", ".md", ".jpg", ".jpeg", ".png", ".webp", ".zip"];
-const blockedExtensions = [".exe", ".bat", ".cmd", ".sh", ".js", ".ts", ".msi", ".dll"];
+const allowedExtensions = [
+  ".pdf",
+  ".pptx",
+  ".docx",
+  ".txt",
+  ".md",
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".webp",
+  ".zip",
+];
+const blockedExtensions = [
+  ".exe",
+  ".bat",
+  ".cmd",
+  ".sh",
+  ".js",
+  ".ts",
+  ".msi",
+  ".dll",
+];
 const extensionMimeTypes: Record<string, string> = {
   ".pdf": "application/pdf",
-  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".pptx":
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".docx":
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   ".txt": "text/plain",
   ".md": "text/markdown",
   ".jpg": "image/jpeg",
@@ -236,8 +269,12 @@ const extensionMimeTypes: Record<string, string> = {
 };
 const compatibleMimeTypes: Record<string, string[]> = {
   ".pdf": ["application/pdf"],
-  ".pptx": ["application/vnd.openxmlformats-officedocument.presentationml.presentation"],
-  ".docx": ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+  ".pptx": [
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ],
+  ".docx": [
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ],
   ".txt": ["text/plain"],
   ".md": ["text/markdown", "text/plain", "text/x-markdown"],
   ".jpg": ["image/jpeg", "image/pjpeg"],
@@ -268,7 +305,15 @@ const acceptTypes = [
   "application/zip",
 ].join(",");
 
-const imageAcceptTypes = [".jpg", ".jpeg", ".png", ".webp", "image/jpeg", "image/png", "image/webp"].join(",");
+const imageAcceptTypes = [
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".webp",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+].join(",");
 
 const researchProgressCues = [
   "Planning research",
@@ -306,17 +351,27 @@ function storageTimestamp(): number {
 
 function inferMimeType(name: string, mimeType: string) {
   const ext = extensionOf(name);
-  return extensionMimeTypes[ext] ?? (normalizeMimeType(mimeType) || "application/octet-stream");
+  return (
+    extensionMimeTypes[ext] ??
+    (normalizeMimeType(mimeType) || "application/octet-stream")
+  );
 }
 
 function detectContentType(name: string, mimeType: string) {
   const ext = extensionOf(name);
   const normalizedMimeType = normalizeMimeType(mimeType);
   if (ext === ".pdf" || normalizedMimeType === "application/pdf") return "pdf";
-  if (ext === ".pptx" || normalizedMimeType.includes("presentationml")) return "pptx";
-  if (ext === ".docx" || normalizedMimeType.includes("wordprocessingml")) return "docx";
-  if (ext === ".txt" || ext === ".md" || normalizedMimeType.startsWith("text/")) return "text";
-  if ([".jpg", ".jpeg", ".png", ".webp"].includes(ext) || normalizedMimeType.startsWith("image/")) return "image";
+  if (ext === ".pptx" || normalizedMimeType.includes("presentationml"))
+    return "pptx";
+  if (ext === ".docx" || normalizedMimeType.includes("wordprocessingml"))
+    return "docx";
+  if (ext === ".txt" || ext === ".md" || normalizedMimeType.startsWith("text/"))
+    return "text";
+  if (
+    [".jpg", ".jpeg", ".png", ".webp"].includes(ext) ||
+    normalizedMimeType.startsWith("image/")
+  )
+    return "image";
   if (ext === ".zip" || normalizedMimeType.includes("zip")) return "zip";
   return "unknown";
 }
@@ -325,7 +380,8 @@ function validateStudyFile(file: File, imageOnly = false) {
   const ext = extensionOf(file.name);
   const normalizedMimeType = normalizeMimeType(file.type);
   if (blockedExtensions.includes(ext)) return "Unsupported file type.";
-  if (imageOnly && ![".jpg", ".jpeg", ".png", ".webp"].includes(ext)) return "Choose a JPG, PNG, or WebP image.";
+  if (imageOnly && ![".jpg", ".jpeg", ".png", ".webp"].includes(ext))
+    return "Choose a JPG, PNG, or WebP image.";
   if (!allowedExtensions.includes(ext)) return "Unsupported file type.";
   if (
     normalizedMimeType &&
@@ -339,20 +395,34 @@ function validateStudyFile(file: File, imageOnly = false) {
 
 function friendlyUploadError(message: string) {
   const lower = message.toLowerCase();
-  if (lower.includes("bucket") || lower.includes("not found")) return "Storage bucket missing. Create the study-files bucket and run storage policies.";
-  if (isMissingSupabaseSchema(message)) return "Supabase tables are missing. Run supabase/schema.sql, then try again.";
-  if (lower.includes("payload") || lower.includes("too large") || lower.includes("exceeded")) return "Upload failed because this file exceeds a browser or Supabase project limit.";
-  if (lower.includes("row-level security") || lower.includes("policy")) return "Upload failed because storage or database policies are not configured for this user.";
+  if (lower.includes("bucket") || lower.includes("not found"))
+    return "Storage bucket missing. Create the study-files bucket and run storage policies.";
+  if (isMissingSupabaseSchema(message))
+    return "Supabase tables are missing. Run supabase/schema.sql, then try again.";
+  if (
+    lower.includes("payload") ||
+    lower.includes("too large") ||
+    lower.includes("exceeded")
+  )
+    return "Upload failed because this file exceeds a browser or Supabase project limit.";
+  if (lower.includes("row-level security") || lower.includes("policy"))
+    return "Upload failed because storage or database policies are not configured for this user.";
   return message || "Upload failed. Please try again.";
 }
 
 function isMissingColumnError(message: string) {
   const lower = message.toLowerCase();
-  return lower.includes("column") || lower.includes("schema cache") || lower.includes("could not find");
+  return (
+    lower.includes("column") ||
+    lower.includes("schema cache") ||
+    lower.includes("could not find")
+  );
 }
 
 function list(value: unknown) {
-  return Array.isArray(value) ? value.map((item) => String(item ?? "").trim()).filter(Boolean) : [];
+  return Array.isArray(value)
+    ? value.map((item) => String(item ?? "").trim()).filter(Boolean)
+    : [];
 }
 
 function textValue(record: Record<string, unknown>, ...keys: string[]) {
@@ -378,7 +448,8 @@ function sourceChipsValue(record: Record<string, unknown>, ...keys: string[]) {
 
     return value
       .map((item) => {
-        if (typeof item === "string") return { label: item, type: "Saved material" };
+        if (typeof item === "string")
+          return { label: item, type: "Saved material" };
         if (!item || typeof item !== "object") return null;
         const source = item as Record<string, unknown>;
         const label = textValue(source, "label", "name", "title");
@@ -397,34 +468,124 @@ function sourceChipsValue(record: Record<string, unknown>, ...keys: string[]) {
   return [];
 }
 
-function normalizeAnswer(value: unknown): Answer {
+function parseNestedAnswerJson(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    return JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeAnswer(value: unknown, depth = 0): Answer {
   if (!value || typeof value !== "object") return {};
   const record = value as Record<string, unknown>;
+  if (depth === 0) {
+    const nestedAnswer = textValue(
+      record,
+      "answer",
+      "short_answer",
+      "shortAnswer",
+    );
+    const parsed = nestedAnswer ? parseNestedAnswerJson(nestedAnswer) : null;
+    if (parsed) return normalizeAnswer(parsed, 1);
+  }
   return {
-    short_answer: textValue(record, "short_answer", "shortAnswer", "short answer", "answer"),
-    simple_explanation: textValue(record, "simple_explanation", "simpleExplanation", "simple explanation", "explanation"),
-    step_by_step: arrayValue(record, "step_by_step", "stepByStep", "steps", "step by step"),
+    short_answer: textValue(
+      record,
+      "short_answer",
+      "shortAnswer",
+      "short answer",
+      "answer",
+    ),
+    simple_explanation: textValue(
+      record,
+      "simple_explanation",
+      "simpleExplanation",
+      "simple explanation",
+      "explanation",
+    ),
+    step_by_step: arrayValue(
+      record,
+      "step_by_step",
+      "stepByStep",
+      "steps",
+      "step by step",
+    ),
     example: textValue(record, "example"),
-    memory_line: textValue(record, "memory_line", "memoryLine", "memory line", "mnemonic"),
-    common_mistake: textValue(record, "common_mistake", "commonMistake", "common mistake"),
-    exam_viva_answer: textValue(record, "exam_viva_answer", "examVivaAnswer", "exam_answer", "examAnswer", "viva_answer", "vivaAnswer"),
-    practice_question: textValue(record, "practice_question", "practiceQuestion", "practice question"),
-    related_files_notes: arrayValue(record, "related_files_notes", "relatedFilesNotes", "related", "sources"),
+    memory_line: textValue(
+      record,
+      "memory_line",
+      "memoryLine",
+      "memory line",
+      "mnemonic",
+    ),
+    common_mistake: textValue(
+      record,
+      "common_mistake",
+      "commonMistake",
+      "common mistake",
+    ),
+    exam_viva_answer: textValue(
+      record,
+      "exam_viva_answer",
+      "examVivaAnswer",
+      "exam_answer",
+      "examAnswer",
+      "viva_answer",
+      "vivaAnswer",
+    ),
+    practice_question: textValue(
+      record,
+      "practice_question",
+      "practiceQuestion",
+      "practice question",
+    ),
+    related_files_notes: arrayValue(
+      record,
+      "related_files_notes",
+      "relatedFilesNotes",
+      "related",
+      "sources",
+    ),
     next_step: textValue(record, "next_step", "nextStep", "next step"),
-    learning_step: normalizeLearningStepMeta(record.learning_step ?? record.learningStep),
-    response_mode: textValue(record, "response_mode", "responseMode") as Answer["response_mode"],
+    learning_step: normalizeLearningStepMeta(
+      record.learning_step ?? record.learningStep,
+    ),
+    response_mode: textValue(
+      record,
+      "response_mode",
+      "responseMode",
+    ) as Answer["response_mode"],
     fallback_notice: textValue(record, "fallback_notice", "fallbackNotice"),
-    source_chips: sourceChipsValue(record, "source_chips", "sourceChips", "answer_sources", "answerSources"),
-    source_citations: normalizeSourceCitations(record.source_citations ?? record.sourceCitations),
+    source_chips: sourceChipsValue(
+      record,
+      "source_chips",
+      "sourceChips",
+      "answer_sources",
+      "answerSources",
+    ),
+    source_citations: normalizeSourceCitations(
+      record.source_citations ?? record.sourceCitations,
+    ),
   };
 }
 
 function cleanErrorMessage(message: string): string {
   const lower = message.toLowerCase();
-  if (lower.includes("failed to fetch") || lower.includes("load failed") || lower.includes("networkerror")) {
+  if (
+    lower.includes("failed to fetch") ||
+    lower.includes("load failed") ||
+    lower.includes("networkerror")
+  ) {
     return "Network error. Check your connection and try again.";
   }
-  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("aborted")) {
+  if (
+    lower.includes("timeout") ||
+    lower.includes("timed out") ||
+    lower.includes("aborted")
+  ) {
     return "The request took too long. Retry, or edit the question to make it more focused.";
   }
   if (lower.includes("rate limit") || lower.includes("quota")) {
@@ -436,7 +597,10 @@ function cleanErrorMessage(message: string): string {
 function formatTime(iso?: string): string {
   if (!iso) return "";
   try {
-    return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return new Date(iso).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   } catch {
     return "";
   }
@@ -447,7 +611,11 @@ const emptySubscribe = () => () => {};
 const getClientSnapshot = () => true;
 const getServerSnapshot = () => false;
 function useIsClient() {
-  return useSyncExternalStore(emptySubscribe, getClientSnapshot, getServerSnapshot);
+  return useSyncExternalStore(
+    emptySubscribe,
+    getClientSnapshot,
+    getServerSnapshot,
+  );
 }
 
 function LearningStepControls({
@@ -479,8 +647,12 @@ function LearningStepControls({
             Step {meta.current_step} of {meta.total_steps}: {meta.step_title}
           </p>
           {meta.feedback ? (
-            <p className={`mt-0.5 text-[11px] ${meta.feedback === "correct" ? "text-emerald-200/80" : "text-amber-200/85"}`}>
-              {meta.feedback === "correct" ? "Answer checked: correct." : "Answer checked: needs another pass."}
+            <p
+              className={`mt-0.5 text-[11px] ${meta.feedback === "correct" ? "text-emerald-200/80" : "text-amber-200/85"}`}
+            >
+              {meta.feedback === "correct"
+                ? "Answer checked: correct."
+                : "Answer checked: needs another pass."}
             </p>
           ) : null}
         </div>
@@ -490,8 +662,14 @@ function LearningStepControls({
           </span>
         ) : null}
       </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-white/10" aria-label={`Learning progress ${percent}%`}>
-        <div className="h-full rounded-full bg-emerald-300 transition-[width] duration-300" style={{ width: `${percent}%` }} />
+      <div
+        className="h-1.5 overflow-hidden rounded-full bg-white/10"
+        aria-label={`Learning progress ${percent}%`}
+      >
+        <div
+          className="h-full rounded-full bg-emerald-300 transition-[width] duration-300"
+          style={{ width: `${percent}%` }}
+        />
       </div>
       {!ended ? (
         <div className="mt-3 flex flex-wrap gap-1.5">
@@ -533,10 +711,13 @@ export function StudyChat({
   // List state.
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [loadingConversations, setLoadingConversations] = useState(true);
-  const [conversationsError, setConversationsError] = useState<string | null>(null);
+  const [conversationsError, setConversationsError] = useState<string | null>(
+    null,
+  );
   // Active conversation state.
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [activeConversation, setActiveConversation] = useState<Conversation | null>(null);
+  const [activeConversation, setActiveConversation] =
+    useState<Conversation | null>(null);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [messagesError, setMessagesError] = useState<string | null>(null);
   // Read-only legacy assistant_questions view (conversation_id IS NULL).
@@ -559,7 +740,8 @@ export function StudyChat({
 
   const noteNamesById = useMemo(() => {
     const map = new Map<string, string>();
-    for (const note of notes) map.set(note.id, note.title ?? note.topic ?? "Manual note");
+    for (const note of notes)
+      map.set(note.id, note.title ?? note.topic ?? "Manual note");
     return map;
   }, [notes]);
 
@@ -571,15 +753,23 @@ export function StudyChat({
       setConversations(result.conversations);
     } else {
       // 401 is "session expired"; surface a clean message.
-      setConversationsError(result.status === 401 ? "Please sign in again to load your conversations." : result.message);
+      setConversationsError(
+        result.status === 401
+          ? "Please sign in again to load your conversations."
+          : result.message,
+      );
     }
     setLoadingConversations(false);
     return result;
   }, []);
 
   const syncActiveConversationInList = useCallback((updated: Conversation) => {
-    setConversations((current) => current.map((c) => (c.id === updated.id ? updated : c)));
-    setActiveConversation((current) => (current && current.id === updated.id ? updated : current));
+    setConversations((current) =>
+      current.map((c) => (c.id === updated.id ? updated : c)),
+    );
+    setActiveConversation((current) =>
+      current && current.id === updated.id ? updated : current,
+    );
   }, []);
 
   // Load conversations on mount.
@@ -625,11 +815,21 @@ export function StudyChat({
   // without an explicit send (requirement: "changing context must PATCH the
   // current conversation"). No-op when no active conversation or in legacy
   // read-only view.
-  function patchActiveContextFromState(currentAttachments: Attachment[], reqMode: RequestMode) {
+  function patchActiveContextFromState(
+    currentAttachments: Attachment[],
+    reqMode: RequestMode,
+  ) {
     if (!activeId || legacyActive) return;
-    const fileIds = currentAttachments.filter((a) => a.type === "file").map((a) => a.id);
-    const noteIds = currentAttachments.filter((a) => a.type === "note").map((a) => a.id);
-    const mode = computeContextModeForSend({ requestMode: reqMode, attachments: currentAttachments });
+    const fileIds = currentAttachments
+      .filter((a) => a.type === "file")
+      .map((a) => a.id);
+    const noteIds = currentAttachments
+      .filter((a) => a.type === "note")
+      .map((a) => a.id);
+    const mode = computeContextModeForSend({
+      requestMode: reqMode,
+      attachments: currentAttachments,
+    });
     void persistContext(activeId, {
       contextMode: mode,
       activeFileIds: fileIds,
@@ -749,17 +949,26 @@ export function StudyChat({
     setActiveFileIdsState(conversation.active_file_ids ?? []);
     setActiveNoteIdsState(conversation.active_note_ids ?? []);
     setLanguage(conversation.language_code ?? preferredLanguage);
-    if (titledConversationIdsRef.current.has(conversation.id) || conversation.title) {
+    if (
+      titledConversationIdsRef.current.has(conversation.id) ||
+      conversation.title
+    ) {
       titledConversationIdsRef.current.add(conversation.id);
     }
 
     // Restoring attachments from active_*_ids keeps the composer meaningful
     // without auto-re-POSTing any context.
-    const restoredAttachments = restoredAttachmentsFromConversation(conversation, fileNamesById, noteNamesById);
+    const restoredAttachments = restoredAttachmentsFromConversation(
+      conversation,
+      fileNamesById,
+      noteNamesById,
+    );
     setAttachments(restoredAttachments);
 
     // Hydrate messages chronologically (API returns ASC).
-    loadedAssistantIdsRef.current = assistantIdsFromRows(messagesResult.messages);
+    loadedAssistantIdsRef.current = assistantIdsFromRows(
+      messagesResult.messages,
+    );
     setMessages(messagesResult.messages.flatMap((m) => recordToUiMessages(m)));
     setLoadingMessages(false);
     setShowScrollDown(false);
@@ -767,7 +976,7 @@ export function StudyChat({
     markNearBottom();
     window.requestAnimationFrame(() => {
       if (currentConversationVersion() !== conversationVersion) return;
-      window.scrollTo({ top: document.documentElement.scrollHeight });
+      scrollMessagesToBottom();
     });
 
     window.setTimeout(() => textareaRef.current?.focus(), 0);
@@ -776,7 +985,18 @@ export function StudyChat({
   // Convert a fetched ConversationMessage row to the local UiMessage pair.
   // Accepts either a typed ChatRecord (used by legacy) or a generic shape so
   // fresh API rows (answer: unknown) hydrate without an extra cast.
-  function recordToUiMessages(chat: ChatRecord | { id: string; question: string; answer: unknown; related_file_ids: string[] | null; related_note_ids: string[] | null; created_at: string }): UiMessage[] {
+  function recordToUiMessages(
+    chat:
+      | ChatRecord
+      | {
+          id: string;
+          question: string;
+          answer: unknown;
+          related_file_ids: string[] | null;
+          related_note_ids: string[] | null;
+          created_at: string;
+        },
+  ): UiMessage[] {
     return [
       {
         id: `${chat.id}-user`,
@@ -821,7 +1041,9 @@ export function StudyChat({
     question: string;
     attachments: Attachment[];
     requestMode: RequestMode;
-  }): Promise<{ ok: true; conversation: Conversation } | { ok: false; message: string }> {
+  }): Promise<
+    { ok: true; conversation: Conversation } | { ok: false; message: string }
+  > {
     // If a conversation is already active (or legacy view is open) there is
     // nothing to create, so reuse it. Legacy view is read-only so it never
     // reaches this path because the composer is disabled there; the guard is
@@ -831,8 +1053,12 @@ export function StudyChat({
       if (existing) return { ok: true, conversation: existing };
     }
 
-    const fileIds = opts.attachments.filter((a) => a.type === "file").map((a) => a.id);
-    const noteIds = opts.attachments.filter((a) => a.type === "note").map((a) => a.id);
+    const fileIds = opts.attachments
+      .filter((a) => a.type === "file")
+      .map((a) => a.id);
+    const noteIds = opts.attachments
+      .filter((a) => a.type === "note")
+      .map((a) => a.id);
     const mode = computeContextModeForSend({
       requestMode: opts.requestMode,
       attachments: opts.attachments,
@@ -849,8 +1075,13 @@ export function StudyChat({
     bumpConversationVersion();
     suppressLatestRestoreRef.current = true;
     handledRequestedConversationIdRef.current = result.conversation.id;
-    router.replace(`/chat?conversationId=${encodeURIComponent(result.conversation.id)}`, { scroll: false });
-    setConversations((current) => upsertConversationFirst(current, result.conversation));
+    router.replace(
+      `/chat?conversationId=${encodeURIComponent(result.conversation.id)}`,
+      { scroll: false },
+    );
+    setConversations((current) =>
+      upsertConversationFirst(current, result.conversation),
+    );
     setActiveId(result.conversation.id);
     setActiveConversation(result.conversation);
     setLegacyActive(false);
@@ -872,7 +1103,9 @@ export function StudyChat({
 
   async function togglePinConversation(id: string, pinned: boolean) {
     // Optimistic update.
-    setConversations((current) => current.map((c) => (c.id === id ? { ...c, pinned } : c)));
+    setConversations((current) =>
+      current.map((c) => (c.id === id ? { ...c, pinned } : c)),
+    );
     const result = await patchConversation(id, { pinned });
     if (result.ok) {
       syncActiveConversationInList(result.conversation);
@@ -929,7 +1162,10 @@ export function StudyChat({
     bumpConversationVersion();
     loadedAssistantIdsRef.current = new Set();
     setMessages(
-      legacyChats.slice().reverse().flatMap((chat) => recordToUiMessages(chat)),
+      legacyChats
+        .slice()
+        .reverse()
+        .flatMap((chat) => recordToUiMessages(chat)),
     );
     setQuestion("");
     setAttachments([]);
@@ -940,20 +1176,22 @@ export function StudyChat({
     setMobileDrawerOpen(false);
     markNearBottom();
     setShowScrollDown(false);
-    window.requestAnimationFrame(() =>
-      window.scrollTo({ top: document.documentElement.scrollHeight }),
-    );
+    window.requestAnimationFrame(() => scrollMessagesToBottom());
   }
 
   /* Conversation-derived UI labels (header context) */
-  const [contextModeState, setContextModeState] = useState<ContextMode>("general");
+  const [contextModeState, setContextModeState] =
+    useState<ContextMode>("general");
   const [activeFileIdsState, setActiveFileIdsState] = useState<string[]>([]);
   const [activeNoteIdsState, setActiveNoteIdsState] = useState<string[]>([]);
   const activeContextFileNames = useMemo(
-    () => [
-      ...activeFileIdsState.map((id) => fileNamesById.get(id) ?? "File"),
-      ...activeNoteIdsState.map((id) => noteNamesById.get(id) ?? "Manual note"),
-    ].slice(0, 4),
+    () =>
+      [
+        ...activeFileIdsState.map((id) => fileNamesById.get(id) ?? "File"),
+        ...activeNoteIdsState.map(
+          (id) => noteNamesById.get(id) ?? "Manual note",
+        ),
+      ].slice(0, 4),
     [activeFileIdsState, fileNamesById, activeNoteIdsState, noteNamesById],
   );
 
@@ -973,11 +1211,19 @@ export function StudyChat({
       // Heuristic: image attachments are not typed distinctly in `Attachment`,
       // so classify via the file's mime_type in our `files` lookup.
       const file = files.find((f) => f.id === a.id);
-      return !!file && (file.file_type === "image" || (file.mime_type ?? "").startsWith("image/"));
+      return (
+        !!file &&
+        (file.file_type === "image" ||
+          (file.mime_type ?? "").startsWith("image/"))
+      );
     });
     if (hasImage) return "image";
-    const fileIds = opts.attachments.filter((a) => a.type === "file").map((a) => a.id);
-    const noteIds = opts.attachments.filter((a) => a.type === "note").map((a) => a.id);
+    const fileIds = opts.attachments
+      .filter((a) => a.type === "file")
+      .map((a) => a.id);
+    const noteIds = opts.attachments
+      .filter((a) => a.type === "note")
+      .map((a) => a.id);
     return fileIds.length > 0 || noteIds.length > 0 ? "file" : "general";
   }
 
@@ -991,10 +1237,12 @@ export function StudyChat({
   const [uploadProgress, setUploadProgress] = useState("");
   const [error, setError] = useState("");
   const [pendingRetry, setPendingRetry] = useState<RetryPayload | null>(null);
-  const [pendingDiagramRetry, setPendingDiagramRetry] = useState<DiagramRetryPayload | null>(null);
+  const [pendingDiagramRetry, setPendingDiagramRetry] =
+    useState<DiagramRetryPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [requestMode, setRequestMode] = useState<RequestMode>("study");
-  const [language, setLanguage] = useState<SupportedLanguageCode>(preferredLanguage);
+  const [language, setLanguage] =
+    useState<SupportedLanguageCode>(preferredLanguage);
   const [loadingMode, setLoadingMode] = useState<LoadingMode | null>(null);
   const [researchProgressIndex, setResearchProgressIndex] = useState(0);
   const [speakingId, setSpeakingId] = useState("");
@@ -1006,6 +1254,7 @@ export function StudyChat({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const messagesScrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const diagramRequestInFlightRef = useRef("");
   const conversationVersionRef = useRef(0);
@@ -1049,15 +1298,35 @@ export function StudyChat({
   function isNearBottom(): boolean {
     return isNearBottomRef.current;
   }
+  function scrollMessagesToBottom(behavior: ScrollBehavior = "auto") {
+    const scroller = messagesScrollRef.current;
+    if (!scroller) return;
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior });
+  }
+  function resetMessagesScroll() {
+    const scroller = messagesScrollRef.current;
+    if (!scroller) return;
+    scroller.scrollTo({ top: 0 });
+  }
 
   const recentFile = files[0];
-  const selectedIds = useMemo(() => new Set(attachments.map((attachment) => `${attachment.type}:${attachment.id}`)), [attachments]);
+  const selectedIds = useMemo(
+    () =>
+      new Set(
+        attachments.map((attachment) => `${attachment.type}:${attachment.id}`),
+      ),
+    [attachments],
+  );
   const diagramSources = useMemo<DiagramSourceOption[]>(() => {
     const sources: DiagramSourceOption[] = [];
 
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       const message = messages[index];
-      if (message.role === "assistant" && message.mode === "study" && message.answerId) {
+      if (
+        message.role === "assistant" &&
+        message.mode === "study" &&
+        message.answerId
+      ) {
         sources.push({
           id: `answer:${message.answerId}`,
           label: "Current AI answer",
@@ -1098,17 +1367,21 @@ export function StudyChat({
       const message = messages[index];
       if (message.role !== "assistant") continue;
       if (message.mode === "web_search") {
-        const sourceText = boundDiagramSourceText([
-          `Query: ${message.webAnswer.query}`,
-          `Answer: ${message.webAnswer.concise_answer}`,
-          ...message.webAnswer.web_citations.map((citation) =>
-            `Source ${citation.locator_start}: ${citation.source_name}; ${citation.snippet ?? ""}`,
-          ),
-        ].join("\n"));
+        const sourceText = boundDiagramSourceText(
+          [
+            `Query: ${message.webAnswer.query}`,
+            `Answer: ${message.webAnswer.concise_answer}`,
+            ...message.webAnswer.web_citations.map(
+              (citation) =>
+                `Source ${citation.locator_start}: ${citation.source_name}; ${citation.snippet ?? ""}`,
+            ),
+          ].join("\n"),
+        );
         sources.push({
           id: `web:${message.id}`,
           label: "Latest web-search answer",
-          detail: "Use the latest grounded web answer and its returned source snippets.",
+          detail:
+            "Use the latest grounded web answer and its returned source snippets.",
           sourceType: "web_search",
           sourceText,
         });
@@ -1124,7 +1397,9 @@ export function StudyChat({
           label: "Latest deep-research report",
           detail: "Use the latest bounded research report.",
           sourceType: "deep_research",
-          sourceText: boundDiagramSourceText(deepResearchToText(message.researchReport)),
+          sourceText: boundDiagramSourceText(
+            deepResearchToText(message.researchReport),
+          ),
         });
         break;
       }
@@ -1151,21 +1426,26 @@ export function StudyChat({
 
   // Scroll management
   useEffect(() => {
+    const scroller = messagesScrollRef.current;
+    if (!scroller) return;
+
     function handleScroll() {
-      const distance = document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
+      if (!scroller) return;
+      const distance =
+        scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
       const near = distance < 140;
       setNearBottom(near);
       setShowScrollDown(!near && messages.length > 0);
     }
-    window.addEventListener("scroll", handleScroll, { passive: true });
+    scroller.addEventListener("scroll", handleScroll, { passive: true });
     handleScroll();
-    return () => window.removeEventListener("scroll", handleScroll);
+    return () => scroller.removeEventListener("scroll", handleScroll);
   }, [messages.length]);
 
   // Auto-scroll on new messages when near bottom
   useEffect(() => {
     if (isNearBottom() && messages.length > 0) {
-      window.scrollTo({ top: document.documentElement.scrollHeight });
+      window.requestAnimationFrame(() => scrollMessagesToBottom());
     }
   }, [messages, loading]);
 
@@ -1175,8 +1455,10 @@ export function StudyChat({
     function handleOutsideClick(e: MouseEvent) {
       const target = e.target as Node;
       if (
-        menuRef.current && !menuRef.current.contains(target) &&
-        menuButtonRef.current && !menuButtonRef.current.contains(target)
+        menuRef.current &&
+        !menuRef.current.contains(target) &&
+        menuButtonRef.current &&
+        !menuButtonRef.current.contains(target)
       ) {
         setMenuOpen(false);
       }
@@ -1222,16 +1504,32 @@ export function StudyChat({
     if (!latest) return;
 
     handledRequestedConversationIdRef.current = latest.id;
-    router.replace(`/chat?conversationId=${encodeURIComponent(latest.id)}`, { scroll: false });
+    router.replace(`/chat?conversationId=${encodeURIComponent(latest.id)}`, {
+      scroll: false,
+    });
     void Promise.resolve().then(() => {
       void openConversation(latest.id);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeId, conversations, legacyActive, loadingConversations, requestedConversationId, router]);
+  }, [
+    activeId,
+    conversations,
+    legacyActive,
+    loadingConversations,
+    requestedConversationId,
+    router,
+  ]);
 
   useEffect(() => {
     const requested = requestedConversationId;
-    if (!requested || !shouldOpenRequestedConversation(requested, handledRequestedConversationIdRef.current)) return;
+    if (
+      !requested ||
+      !shouldOpenRequestedConversation(
+        requested,
+        handledRequestedConversationIdRef.current,
+      )
+    )
+      return;
     handledRequestedConversationIdRef.current = requested;
     suppressLatestRestoreRef.current = true;
     void Promise.resolve().then(() => {
@@ -1254,7 +1552,10 @@ export function StudyChat({
 
   function addAttachment(next: Attachment) {
     setAttachments((current) => {
-      if (current.some((item) => item.id === next.id && item.type === next.type)) return current;
+      if (
+        current.some((item) => item.id === next.id && item.type === next.type)
+      )
+        return current;
       const updated = [...current, next];
       patchActiveContextFromState(updated, requestMode);
       return updated;
@@ -1263,7 +1564,9 @@ export function StudyChat({
 
   function removeAttachment(attachment: Attachment) {
     setAttachments((current) => {
-      const updated = current.filter((item) => !(item.id === attachment.id && item.type === attachment.type));
+      const updated = current.filter(
+        (item) => !(item.id === attachment.id && item.type === attachment.type),
+      );
       patchActiveContextFromState(updated, requestMode);
       return updated;
     });
@@ -1351,24 +1654,38 @@ export function StudyChat({
     replaceMessageId?: string,
   ) {
     if (loading) return;
-    const requestKey = JSON.stringify({ request, sourceLabel, replaceMessageId: replaceMessageId ?? null });
+    const requestKey = JSON.stringify({
+      request,
+      sourceLabel,
+      replaceMessageId: replaceMessageId ?? null,
+    });
     if (diagramRequestInFlightRef.current === requestKey) return;
     diagramRequestInFlightRef.current = requestKey;
     const conversationVersion = conversationVersionRef.current;
     const diagramLabel = request.diagramType.replaceAll("_", " ");
     const userQuestion = `Generate a ${diagramLabel} from ${sourceLabel}`;
-    const sourceFile = request.fileId ? files.find((file) => file.id === request.fileId) : undefined;
+    const sourceFile = request.fileId
+      ? files.find((file) => file.id === request.fileId)
+      : undefined;
 
     // Ensure a conversation shell exists for a brand-new chat that begins with
     // a diagram. The diagram endpoint itself does not persist messages, but
     // creating the shell keeps the chat list consistent with context_mode.
     let sendConversationId: string | null = activeId;
     const diagramAttachments: Attachment[] = sourceFile
-      ? [{ id: sourceFile.id, label: sourceFile.file_name, type: "file" as const }]
+      ? [
+          {
+            id: sourceFile.id,
+            label: sourceFile.file_name,
+            type: "file" as const,
+          },
+        ]
       : [];
     if (!activeId || legacyActive) {
       if (legacyActive) {
-        setError("This is a read-only previous chat. Start a new chat to generate a diagram.");
+        setError(
+          "This is a read-only previous chat. Start a new chat to generate a diagram.",
+        );
         diagramRequestInFlightRef.current = "";
         return;
       }
@@ -1410,10 +1727,13 @@ export function StudyChat({
     const controller = new AbortController();
     setAbortController(controller);
     try {
-      const diagram = await runDiagramGeneration(request, { signal: controller.signal });
+      const diagram = await runDiagramGeneration(request, {
+        signal: controller.signal,
+      });
       if (currentConversationVersion() !== conversationVersion) return;
 
-      const assistantMessageId = replaceMessageId ?? nextMessageId("diagram-assistant");
+      const assistantMessageId =
+        replaceMessageId ?? nextMessageId("diagram-assistant");
       const assistantMessage: UiMessage = {
         id: assistantMessageId,
         role: "assistant",
@@ -1424,19 +1744,29 @@ export function StudyChat({
         createdAt: diagram.generated_at,
       };
       setMessages((current) => {
-        if (replaceMessageId) return current.map((message) => message.id === replaceMessageId ? assistantMessage : message);
+        if (replaceMessageId)
+          return current.map((message) =>
+            message.id === replaceMessageId ? assistantMessage : message,
+          );
         if (current.some((m) => m.id === assistantMessageId)) return current;
         return [...current, assistantMessage];
       });
       setPendingDiagramRetry(null);
 
       void maybeAutoTitleConversation(sendConversationId, userQuestion);
-      void touchConversationUpdatedAt(sendConversationId, activeConversation?.title ?? null);
+      void touchConversationUpdatedAt(
+        sendConversationId,
+        activeConversation?.title ?? null,
+      );
     } catch (err) {
       if (currentConversationVersion() !== conversationVersion) return;
       if (err instanceof Error && err.name === "AbortError") return;
       setPendingDiagramRetry({ request, sourceLabel, replaceMessageId });
-      setError(cleanErrorMessage(err instanceof Error ? err.message : "Diagram generation failed."));
+      setError(
+        cleanErrorMessage(
+          err instanceof Error ? err.message : "Diagram generation failed.",
+        ),
+      );
     } finally {
       if (abortRef.current === controller) {
         setLoading(false);
@@ -1449,7 +1779,10 @@ export function StudyChat({
     }
   }
 
-  async function uploadFiles(selectedFiles: FileList | null, imageOnly = false) {
+  async function uploadFiles(
+    selectedFiles: FileList | null,
+    imageOnly = false,
+  ) {
     if (!selectedFiles?.length) return;
     setError("");
     setMenuOpen(false);
@@ -1473,10 +1806,12 @@ export function StudyChat({
         const safeMimeType = inferMimeType(file.name, file.type);
         const safeContentType = detectContentType(file.name, safeMimeType);
         const storagePath = `${user.id}/${storageTimestamp()}-${cleanStorageName(file.name)}`;
-        const upload = await supabase.storage.from(bucketName).upload(storagePath, file, {
-          contentType: safeMimeType,
-          upsert: false,
-        });
+        const upload = await supabase.storage
+          .from(bucketName)
+          .upload(storagePath, file, {
+            contentType: safeMimeType,
+            upsert: false,
+          });
 
         if (upload.error) throw upload.error;
 
@@ -1507,15 +1842,27 @@ export function StudyChat({
           chunks_count: 0,
         };
 
-        let insert = await supabase.from("files").insert(fullPayload).select("id, file_name").single();
+        let insert = await supabase
+          .from("files")
+          .insert(fullPayload)
+          .select("id, file_name")
+          .single();
 
         if (insert.error && isMissingColumnError(insert.error.message)) {
-          insert = await supabase.from("files").insert(legacyPayload).select("id, file_name").single();
+          insert = await supabase
+            .from("files")
+            .insert(legacyPayload)
+            .select("id, file_name")
+            .single();
         }
 
         if (insert.error) throw insert.error;
         if (insert.data) {
-          addAttachment({ id: insert.data.id, label: insert.data.file_name, type: "file" });
+          addAttachment({
+            id: insert.data.id,
+            label: insert.data.file_name,
+            type: "file",
+          });
         }
       }
 
@@ -1523,7 +1870,11 @@ export function StudyChat({
       window.setTimeout(() => setUploadProgress(""), 1800);
     } catch (err) {
       setUploadProgress("");
-      setError(friendlyUploadError(err instanceof Error ? err.message : "Upload failed."));
+      setError(
+        friendlyUploadError(
+          err instanceof Error ? err.message : "Upload failed.",
+        ),
+      );
     } finally {
       if (fileInputRef.current) fileInputRef.current.value = "";
       if (imageInputRef.current) imageInputRef.current.value = "";
@@ -1544,7 +1895,9 @@ export function StudyChat({
     let sendConversationId: string | null = activeId;
     if (!activeId || legacyActive) {
       if (legacyActive) {
-        setError("This is a read-only previous chat. Start a new chat to ask a question.");
+        setError(
+          "This is a read-only previous chat. Start a new chat to ask a question.",
+        );
         return;
       }
       const ensured = await ensureConversationForSend({
@@ -1586,7 +1939,9 @@ export function StudyChat({
     setAbortController(controller);
 
     try {
-      const webAnswer = await runWebSearch(trimmed, { signal: controller.signal });
+      const webAnswer = await runWebSearch(trimmed, {
+        signal: controller.signal,
+      });
       if (currentConversationVersion() !== conversationVersion) return;
       const assistantMessageId = nextMessageId("web-assistant");
       setMessages((current) => {
@@ -1604,13 +1959,24 @@ export function StudyChat({
       });
 
       void maybeAutoTitleConversation(sendConversationId, trimmed);
-      void touchConversationUpdatedAt(sendConversationId, activeConversation?.title ?? null);
+      void touchConversationUpdatedAt(
+        sendConversationId,
+        activeConversation?.title ?? null,
+      );
     } catch (err) {
       if (currentConversationVersion() !== conversationVersion) return;
       setQuestion(trimmed);
       if (err instanceof Error && err.name === "AbortError") return;
-      setPendingRetry({ question: trimmed, attachments: [], mode: "web_search" });
-      setError(cleanErrorMessage(err instanceof Error ? err.message : "Web search failed."));
+      setPendingRetry({
+        question: trimmed,
+        attachments: [],
+        mode: "web_search",
+      });
+      setError(
+        cleanErrorMessage(
+          err instanceof Error ? err.message : "Web search failed.",
+        ),
+      );
     } finally {
       if (abortRef.current === controller) {
         setLoading(false);
@@ -1630,7 +1996,9 @@ export function StudyChat({
     let sendConversationId: string | null = activeId;
     if (!activeId || legacyActive) {
       if (legacyActive) {
-        setError("This is a read-only previous chat. Start a new chat to ask a question.");
+        setError(
+          "This is a read-only previous chat. Start a new chat to ask a question.",
+        );
         return;
       }
       const ensured = await ensureConversationForSend({
@@ -1673,7 +2041,9 @@ export function StudyChat({
     setAbortController(controller);
 
     try {
-      const researchReport = await runDeepResearch(trimmed, { signal: controller.signal });
+      const researchReport = await runDeepResearch(trimmed, {
+        signal: controller.signal,
+      });
       if (currentConversationVersion() !== conversationVersion) return;
       const assistantMessageId = nextMessageId("research-assistant");
       setMessages((current) => {
@@ -1691,13 +2061,24 @@ export function StudyChat({
       });
 
       void maybeAutoTitleConversation(sendConversationId, trimmed);
-      void touchConversationUpdatedAt(sendConversationId, activeConversation?.title ?? null);
+      void touchConversationUpdatedAt(
+        sendConversationId,
+        activeConversation?.title ?? null,
+      );
     } catch (err) {
       if (currentConversationVersion() !== conversationVersion) return;
       setQuestion(trimmed);
       if (err instanceof Error && err.name === "AbortError") return;
-      setPendingRetry({ question: trimmed, attachments: [], mode: "deep_research" });
-      setError(cleanErrorMessage(err instanceof Error ? err.message : "Deep research failed."));
+      setPendingRetry({
+        question: trimmed,
+        attachments: [],
+        mode: "deep_research",
+      });
+      setError(
+        cleanErrorMessage(
+          err instanceof Error ? err.message : "Deep research failed.",
+        ),
+      );
     } finally {
       if (abortRef.current === controller) {
         setLoading(false);
@@ -1730,7 +2111,9 @@ export function StudyChat({
     let sendConversationId: string | null = activeId;
     if (legacyActive) {
       // Legacy view is read-only; reject sending instead of auto-creating.
-      setError("This is a read-only previous chat. Start a new chat to ask a question.");
+      setError(
+        "This is a read-only previous chat. Start a new chat to ask a question.",
+      );
       return;
     }
     if (!sendConversationId) {
@@ -1779,8 +2162,12 @@ export function StudyChat({
         body: JSON.stringify({
           question: trimmed,
           mode,
-          fileIds: currentAttachments.filter((attachment) => attachment.type === "file").map((attachment) => attachment.id),
-          noteIds: currentAttachments.filter((attachment) => attachment.type === "note").map((attachment) => attachment.id),
+          fileIds: currentAttachments
+            .filter((attachment) => attachment.type === "file")
+            .map((attachment) => attachment.id),
+          noteIds: currentAttachments
+            .filter((attachment) => attachment.type === "note")
+            .map((attachment) => attachment.id),
           language,
           ...(sendConversationId ? { conversationId: sendConversationId } : {}),
         }),
@@ -1789,7 +2176,10 @@ export function StudyChat({
       const data = await response.json();
 
       if (!response.ok) {
-        const errorMessage = typeof data.error === "string" && data.error ? data.error : "AI request failed.";
+        const errorMessage =
+          typeof data.error === "string" && data.error
+            ? data.error
+            : "AI request failed.";
         throw new Error(errorMessage);
       }
 
@@ -1819,7 +2209,10 @@ export function StudyChat({
               mode: "study",
               answer,
               answerId: data.chat.id,
-              retry: answer.response_mode === "offline_fallback" ? { question: trimmed, attachments: currentAttachments, mode } : undefined,
+              retry:
+                answer.response_mode === "offline_fallback"
+                  ? { question: trimmed, attachments: currentAttachments, mode }
+                  : undefined,
               createdAt: data.chat.created_at,
             },
           ];
@@ -1832,7 +2225,10 @@ export function StudyChat({
       void maybeAutoTitleConversation(sendConversationId, trimmed);
 
       // Bump updated_at so this conversation floats to the top of the list.
-      void touchConversationUpdatedAt(sendConversationId, activeConversation?.title ?? null);
+      void touchConversationUpdatedAt(
+        sendConversationId,
+        activeConversation?.title ?? null,
+      );
     } catch (err) {
       if (currentConversationVersion() !== conversationVersion) return;
       // User stopped generation; no error, keep the user bubble.
@@ -1841,8 +2237,16 @@ export function StudyChat({
       }
       setQuestion(trimmed);
       setAttachments(currentAttachments);
-      setPendingRetry({ question: trimmed, attachments: currentAttachments, mode });
-      setError(cleanErrorMessage(err instanceof Error ? err.message : "AI request failed."));
+      setPendingRetry({
+        question: trimmed,
+        attachments: currentAttachments,
+        mode,
+      });
+      setError(
+        cleanErrorMessage(
+          err instanceof Error ? err.message : "AI request failed.",
+        ),
+      );
     } finally {
       if (abortRef.current === controller) {
         setLoading(false);
@@ -1953,7 +2357,7 @@ export function StudyChat({
     setLegacyActive(false);
     setMessagesError(null);
     setMobileDrawerOpen(false);
-    window.scrollTo({ top: 0 });
+    resetMessagesScroll();
     window.setTimeout(() => textareaRef.current?.focus(), 0);
   }
 
@@ -1962,10 +2366,13 @@ export function StudyChat({
       SpeechRecognition?: SpeechRecognitionConstructor;
       webkitSpeechRecognition?: SpeechRecognitionConstructor;
     };
-    const SpeechRecognition = speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
+    const SpeechRecognition =
+      speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-      setError("Voice question is not supported in this browser. You can type your question instead.");
+      setError(
+        "Voice question is not supported in this browser. You can type your question instead.",
+      );
       return;
     }
 
@@ -1977,9 +2384,14 @@ export function StudyChat({
     recognition.maxAlternatives = 1;
     recognition.onresult = (event) => {
       const transcript = event.results[0]?.[0]?.transcript ?? "";
-      setQuestion((current) => `${current}${current ? " " : ""}${transcript}`.trim());
+      setQuestion((current) =>
+        `${current}${current ? " " : ""}${transcript}`.trim(),
+      );
     };
-    recognition.onerror = () => setError("Could not hear the voice question. Please try again or type it.");
+    recognition.onerror = () =>
+      setError(
+        "Could not hear the voice question. Please try again or type it.",
+      );
     recognition.start();
   }
 
@@ -2001,10 +2413,13 @@ export function StudyChat({
   }
 
   function scrollToBottom() {
-    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "smooth" });
+    scrollMessagesToBottom("smooth");
   }
 
-  function sendLearningControl(control: LearningControl, meta: LearningStepMeta) {
+  function sendLearningControl(
+    control: LearningControl,
+    meta: LearningStepMeta,
+  ) {
     if (loading) return;
     void meta;
     void sendMessage(buildLearningControlQuestion(control), {
@@ -2023,9 +2438,22 @@ export function StudyChat({
   const canSubmit = Boolean(question.trim()) && !composerDisabled && !loading;
 
   return (
-    <div className="relative flex min-h-[calc(100svh-118px)] min-w-0 pb-44 sm:pb-40">
-      <input ref={fileInputRef} type="file" accept={acceptTypes} multiple className="hidden" onChange={(event) => uploadFiles(event.target.files)} />
-      <input ref={imageInputRef} type="file" accept={imageAcceptTypes} className="hidden" onChange={(event) => uploadFiles(event.target.files, true)} />
+    <div className="relative flex h-[calc(100dvh-10rem)] min-h-0 min-w-0 overflow-hidden rounded-2xl border border-white/[0.05] bg-[#070b14] shadow-2xl shadow-black/20 sm:h-[calc(100dvh-8.5rem)] lg:h-[calc(100dvh-8rem)]">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept={acceptTypes}
+        multiple
+        className="hidden"
+        onChange={(event) => uploadFiles(event.target.files)}
+      />
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept={imageAcceptTypes}
+        className="hidden"
+        onChange={(event) => uploadFiles(event.target.files, true)}
+      />
 
       {/* Conversation panel (desktop sidebar + mobile drawer) */}
       <ConversationList
@@ -2039,7 +2467,9 @@ export function StudyChat({
         onSelect={(id) => {
           suppressLatestRestoreRef.current = true;
           handledRequestedConversationIdRef.current = id;
-          router.replace(`/chat?conversationId=${encodeURIComponent(id)}`, { scroll: false });
+          router.replace(`/chat?conversationId=${encodeURIComponent(id)}`, {
+            scroll: false,
+          });
           void openConversation(id);
         }}
         onNew={startNewChat}
@@ -2052,13 +2482,13 @@ export function StudyChat({
       />
 
       {/* Chat column */}
-      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden px-4 pt-4 sm:px-6 xl:px-9">
         {/* Conversation header */}
         <ConversationHeader
           // Remount the header whenever the active conversation changes so its
           // inline-rename state resets without an effect (cleaner than calling
           // setState synchronously inside an effect).
-          key={legacyActive ? "__legacy__" : activeId ?? "__new__"}
+          key={legacyActive ? "__legacy__" : (activeId ?? "__new__")}
           activeId={activeId}
           title={activeConversation?.title ?? null}
           contextMode={legacyActive ? null : contextModeState}
@@ -2072,10 +2502,10 @@ export function StudyChat({
         />
 
         {activeId && !legacyActive ? (
-          <div className="mb-3 flex justify-end">
+          <div className="mb-4 flex justify-end">
             <Link
               href={`/voice?conversationId=${encodeURIComponent(activeId)}`}
-              className="inline-flex h-8 items-center gap-2 rounded-md border border-emerald-300/25 bg-emerald-300/10 px-3 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-300/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/40"
+              className="inline-flex h-9 items-center gap-2 rounded-lg border border-emerald-300/25 bg-emerald-300/10 px-3 text-xs font-semibold text-emerald-100 shadow-lg shadow-emerald-950/10 transition hover:border-emerald-300/40 hover:bg-emerald-300/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/40"
             >
               <IconVolume size={14} />
               Continue in Voice Tutor
@@ -2100,715 +2530,1010 @@ export function StudyChat({
           </div>
         ) : null}
 
-        {/* Messages or empty state */}
-        {!messages.length ? (
-        <ChatEmptyState onPick={(suggestion) => setQuestion(suggestion)} />
-      ) : (
-        <div className="mx-auto w-full max-w-3xl space-y-5 px-0.5">
-          {messages.map((message) => {
-            // Render via an explicit if/else chain so TypeScript's control-flow
-            // analysis narrows the UiMessage discriminated union by `role` and
-            // `mode` for each branch (the long ternary chain defeats narrowing
-            // under Turbopack's per-file type check). Purely structural; the
-            // JSX body, keys, and behavior are byte-identical to the previous
-            // inline ternary form.
-            if (message.role === "user") {
-              return (
-                <div key={message.id} className="flex animate-fade-in-up justify-end">
-                  <div className="max-w-[85%] min-w-0">
-                    <div className="rounded-2xl rounded-br-md bg-emerald-400 px-4 py-2.5 text-slate-950 shadow-lg shadow-emerald-950/20">
-                      <p className="whitespace-pre-wrap break-words text-sm font-medium leading-6">{message.question}</p>
-                    </div>
-                    {message.attachments.length ? (
-                      <div className="mt-1.5 flex flex-wrap justify-end gap-1.5">
-                        {message.attachments.map((attachment) => (
+        <div
+          ref={messagesScrollRef}
+          className="study-chat-scroll min-h-0 flex-1 overflow-y-auto overflow-x-hidden pr-2"
+        >
+          {/* Messages or empty state */}
+          {!messages.length ? (
+            <ChatEmptyState onPick={(suggestion) => setQuestion(suggestion)} />
+          ) : (
+            <div className="mx-auto w-full max-w-5xl space-y-5 px-0.5 pb-6">
+            {messages.map((message) => {
+              // Render via an explicit if/else chain so TypeScript's control-flow
+              // analysis narrows the UiMessage discriminated union by `role` and
+              // `mode` for each branch (the long ternary chain defeats narrowing
+              // under Turbopack's per-file type check). Purely structural; the
+              // JSX body, keys, and behavior are byte-identical to the previous
+              // inline ternary form.
+              if (message.role === "user") {
+                return (
+                  <div
+                    key={message.id}
+                    className="flex animate-fade-in-up justify-end"
+                  >
+                    <div className="max-w-[85%] min-w-0">
+                      <div className="rounded-2xl rounded-br-md bg-emerald-400 px-4 py-2.5 text-slate-950 shadow-lg shadow-emerald-950/20">
+                        <p className="whitespace-pre-wrap break-words text-sm font-medium leading-6">
+                          {message.question}
+                        </p>
+                      </div>
+                      {message.attachments.length ? (
+                        <div className="mt-1.5 flex flex-wrap justify-end gap-1.5">
+                          {message.attachments.map((attachment) => (
+                            <span
+                              key={`${attachment.type}:${attachment.id}`}
+                              className="max-w-full truncate break-words rounded-md bg-slate-950/10 px-2 py-0.5 text-xs font-medium"
+                              title={attachment.label}
+                            >
+                              {attachment.label}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                      {message.mode === "web_search" ||
+                      message.mode === "deep_research" ||
+                      message.mode === "diagram" ||
+                      message.mode === LEARN_STEP_BY_STEP_MODE ? (
+                        <div className="mt-1.5 flex justify-end">
                           <span
-                            key={`${attachment.type}:${attachment.id}`}
-                            className="max-w-full truncate break-words rounded-md bg-slate-950/10 px-2 py-0.5 text-xs font-medium"
-                            title={attachment.label}
+                            className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${
+                              message.mode === "deep_research"
+                                ? "border-sky-300/20 bg-sky-300/[0.08] text-sky-200"
+                                : message.mode === "diagram"
+                                  ? "border-pink-300/20 bg-pink-300/[0.08] text-pink-200"
+                                  : message.mode === LEARN_STEP_BY_STEP_MODE
+                                    ? "border-emerald-300/20 bg-emerald-300/[0.08] text-emerald-200"
+                                    : "border-violet-300/20 bg-violet-300/[0.08] text-violet-200"
+                            }`}
                           >
-                            {attachment.label}
+                            {message.mode === "diagram" ? (
+                              <IconImage size={11} />
+                            ) : message.mode === LEARN_STEP_BY_STEP_MODE ? (
+                              <IconFileText size={11} />
+                            ) : (
+                              <IconSearch size={11} />
+                            )}
+                            {message.mode === "deep_research"
+                              ? "Deep research"
+                              : message.mode === "diagram"
+                                ? "Diagram"
+                                : message.mode === LEARN_STEP_BY_STEP_MODE
+                                  ? "Learn Step by Step"
+                                  : "Web search"}
                           </span>
-                        ))}
-                      </div>
-                    ) : null}
-                    {message.mode === "web_search" || message.mode === "deep_research" || message.mode === "diagram" || message.mode === LEARN_STEP_BY_STEP_MODE ? (
-                      <div className="mt-1.5 flex justify-end">
-                        <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${
-                          message.mode === "deep_research"
-                            ? "border-sky-300/20 bg-sky-300/[0.08] text-sky-200"
-                            : message.mode === "diagram"
-                              ? "border-pink-300/20 bg-pink-300/[0.08] text-pink-200"
-                              : message.mode === LEARN_STEP_BY_STEP_MODE
-                                ? "border-emerald-300/20 bg-emerald-300/[0.08] text-emerald-200"
-                                : "border-violet-300/20 bg-violet-300/[0.08] text-violet-200"
-                        }`}>
-                          {message.mode === "diagram" ? <IconImage size={11} /> : message.mode === LEARN_STEP_BY_STEP_MODE ? <IconFileText size={11} /> : <IconSearch size={11} />}
-                          {message.mode === "deep_research"
-                            ? "Deep research"
-                            : message.mode === "diagram"
-                              ? "Diagram"
-                              : message.mode === LEARN_STEP_BY_STEP_MODE
-                                ? "Learn Step by Step"
-                                : "Web search"}
-                        </span>
-                      </div>
-                    ) : null}
-                    {mounted && message.createdAt ? (
-                      <p className="mt-1 text-right text-[11px] text-slate-500">{formatTime(message.createdAt)}</p>
-                    ) : null}
+                        </div>
+                      ) : null}
+                      {mounted && message.createdAt ? (
+                        <p className="mt-1 text-right text-[11px] text-slate-500">
+                          {formatTime(message.createdAt)}
+                        </p>
+                      ) : null}
+                    </div>
                   </div>
-                </div>
-              );
-            }
+                );
+              }
 
-            if (message.mode === "web_search") {
+              if (message.mode === "web_search") {
+                return (
+                  <div
+                    key={message.id}
+                    className="flex animate-fade-in-up gap-3"
+                  >
+                    <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-violet-300/25 bg-violet-300/10 text-violet-200">
+                      <IconSearch size={15} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-1 flex items-baseline gap-2">
+                        <span className="text-xs font-semibold text-violet-200">
+                          StudyPilot Web
+                        </span>
+                        {mounted && message.createdAt ? (
+                          <span className="text-[11px] text-slate-500">
+                            {formatTime(message.createdAt)}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="rounded-xl border border-violet-300/15 bg-violet-300/[0.035] px-4 py-3">
+                        <p className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-200">
+                          {message.webAnswer.concise_answer}
+                        </p>
+                        <div className="mt-4">
+                          <WebCitationList
+                            citations={message.webAnswer.web_citations}
+                          />
+                        </div>
+                      </div>
+                      <MessageActions
+                        answer={{
+                          short_answer: message.webAnswer.concise_answer,
+                        }}
+                        speaking={speakingId === message.id}
+                        onCopy={answerToText}
+                        onRegenerate={() => regenerate(message.id)}
+                        onReadAloud={() =>
+                          readAloud(message.id, {
+                            short_answer: message.webAnswer.concise_answer,
+                          })
+                        }
+                        onStopSpeaking={stopSpeaking}
+                        regenerating={loading}
+                      />
+                    </div>
+                  </div>
+                );
+              }
+
+              if (message.mode === "deep_research") {
+                return (
+                  <div
+                    key={message.id}
+                    className="flex animate-fade-in-up gap-3"
+                  >
+                    <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-sky-300/25 bg-sky-300/10 text-sky-200">
+                      <IconSearch size={15} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-1 flex items-baseline gap-2">
+                        <span className="text-xs font-semibold text-sky-200">
+                          StudyPilot Research
+                        </span>
+                        {mounted && message.createdAt ? (
+                          <span className="text-[11px] text-slate-500">
+                            {formatTime(message.createdAt)}
+                          </span>
+                        ) : null}
+                      </div>
+                      <DeepResearchReportView report={message.researchReport} />
+                      <MessageActions
+                        answer={{
+                          short_answer:
+                            message.researchReport.executive_summary,
+                        }}
+                        speaking={speakingId === message.id}
+                        onCopy={() =>
+                          deepResearchToText(message.researchReport)
+                        }
+                        onRegenerate={() => regenerate(message.id)}
+                        onReadAloud={() =>
+                          readAloud(message.id, {
+                            short_answer: deepResearchToText(
+                              message.researchReport,
+                            ),
+                          })
+                        }
+                        onStopSpeaking={stopSpeaking}
+                        regenerating={loading}
+                      />
+                    </div>
+                  </div>
+                );
+              }
+
+              if (message.mode === "diagram") {
+                return (
+                  <div
+                    key={message.id}
+                    className="flex animate-fade-in-up gap-3"
+                  >
+                    <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-pink-300/25 bg-pink-300/10 text-pink-200">
+                      <IconImage size={15} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-1 flex flex-wrap items-baseline gap-2">
+                        <span className="text-xs font-semibold text-pink-200">
+                          StudyPilot Visuals
+                        </span>
+                        <span className="break-words text-[11px] text-slate-500">
+                          Source: {message.sourceLabel}
+                        </span>
+                        {mounted && message.createdAt ? (
+                          <span className="text-[11px] text-slate-500">
+                            {formatTime(message.createdAt)}
+                          </span>
+                        ) : null}
+                      </div>
+                      <DiagramPreview
+                        diagram={message.diagram}
+                        onRegenerate={() =>
+                          void generateDiagram(
+                            message.diagramRequest,
+                            message.sourceLabel,
+                            message.id,
+                          )
+                        }
+                        regenerating={loading && loadingMode === "diagram"}
+                      />
+                    </div>
+                  </div>
+                );
+              }
+
               return (
                 <div key={message.id} className="flex animate-fade-in-up gap-3">
-                  <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-violet-300/25 bg-violet-300/10 text-violet-200">
-                    <IconSearch size={15} />
+                  <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-emerald-400/20 bg-emerald-400/10 text-xs font-bold text-emerald-300">
+                    SP
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="mb-1 flex items-baseline gap-2">
-                      <span className="text-xs font-semibold text-violet-200">StudyPilot Web</span>
+                      <span className="text-xs font-semibold text-slate-300">
+                        StudyPilot AI
+                      </span>
                       {mounted && message.createdAt ? (
-                        <span className="text-[11px] text-slate-500">{formatTime(message.createdAt)}</span>
+                        <span className="text-[11px] text-slate-500">
+                          {formatTime(message.createdAt)}
+                        </span>
                       ) : null}
                     </div>
-                    <div className="rounded-xl border border-violet-300/15 bg-violet-300/[0.035] px-4 py-3">
-                      <p className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-200">
-                        {message.webAnswer.concise_answer}
-                      </p>
-                      <div className="mt-4">
-                        <WebCitationList citations={message.webAnswer.web_citations} />
+
+                    {message.answer.response_mode === "offline_fallback" ? (
+                      <div className="mb-2.5 rounded-lg border border-amber-300/30 bg-amber-300/10 p-3 text-sm leading-6 text-amber-100">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <span>
+                            AI model limit reached. Showing answer from saved
+                            study material.
+                          </span>
+                          {message.retry ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (message.retry) {
+                                  sendMessage(message.retry.question, {
+                                    attachmentsOverride:
+                                      message.retry.attachments,
+                                    skipUserBubble: true,
+                                    modeOverride: message.retry.mode,
+                                  });
+                                }
+                              }}
+                              className="inline-flex h-7 items-center rounded-md border border-amber-200/35 bg-amber-200/10 px-2.5 text-xs font-semibold text-amber-50 transition hover:bg-amber-200/15"
+                            >
+                              Retry AI
+                            </button>
+                          ) : null}
+                        </div>
+                        {message.answer.fallback_notice ? (
+                          <p className="mt-1.5 text-xs text-amber-100/80">
+                            {message.answer.fallback_notice}
+                          </p>
+                        ) : null}
                       </div>
+                    ) : null}
+
+                    <div className="rounded-2xl border border-white/[0.08] bg-[#0b1220]/82 px-5 py-4 shadow-[0_18px_50px_rgba(0,0,0,0.24)]">
+                      <AssistantAnswer answer={message.answer} />
+                      {message.answer.learning_step ? (
+                        <LearningStepControls
+                          meta={message.answer.learning_step}
+                          loading={loading}
+                          onControl={sendLearningControl}
+                        />
+                      ) : null}
                     </div>
+
                     <MessageActions
-                      answer={{ short_answer: message.webAnswer.concise_answer }}
+                      answer={message.answer}
                       speaking={speakingId === message.id}
                       onCopy={answerToText}
                       onRegenerate={() => regenerate(message.id)}
-                      onReadAloud={() => readAloud(message.id, { short_answer: message.webAnswer.concise_answer })}
+                      onReadAloud={() => readAloud(message.id, message.answer)}
                       onStopSpeaking={stopSpeaking}
                       regenerating={loading}
                     />
                   </div>
                 </div>
               );
-            }
+            })}
 
-            if (message.mode === "deep_research") {
-              return (
-                <div key={message.id} className="flex animate-fade-in-up gap-3">
-                  <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-sky-300/25 bg-sky-300/10 text-sky-200">
+            {loading ? (
+              <div className="flex animate-fade-in gap-3">
+                <div
+                  className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg border ${
+                    loadingMode === "deep_research"
+                      ? "border-sky-300/25 bg-sky-300/10 text-sky-200"
+                      : loadingMode === "diagram"
+                        ? "border-pink-300/25 bg-pink-300/10 text-pink-200"
+                        : "border-emerald-400/20 bg-emerald-400/10 text-xs font-bold text-emerald-300"
+                  }`}
+                >
+                  {loadingMode === "deep_research" ? (
                     <IconSearch size={15} />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="mb-1 flex items-baseline gap-2">
-                      <span className="text-xs font-semibold text-sky-200">StudyPilot Research</span>
-                      {mounted && message.createdAt ? (
-                        <span className="text-[11px] text-slate-500">{formatTime(message.createdAt)}</span>
-                      ) : null}
-                    </div>
-                    <DeepResearchReportView report={message.researchReport} />
-                    <MessageActions
-                      answer={{ short_answer: message.researchReport.executive_summary }}
-                      speaking={speakingId === message.id}
-                      onCopy={() => deepResearchToText(message.researchReport)}
-                      onRegenerate={() => regenerate(message.id)}
-                      onReadAloud={() => readAloud(message.id, { short_answer: deepResearchToText(message.researchReport) })}
-                      onStopSpeaking={stopSpeaking}
-                      regenerating={loading}
-                    />
-                  </div>
-                </div>
-              );
-            }
-
-            if (message.mode === "diagram") {
-              return (
-                <div key={message.id} className="flex animate-fade-in-up gap-3">
-                  <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-pink-300/25 bg-pink-300/10 text-pink-200">
+                  ) : loadingMode === "diagram" ? (
                     <IconImage size={15} />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="mb-1 flex flex-wrap items-baseline gap-2">
-                      <span className="text-xs font-semibold text-pink-200">StudyPilot Visuals</span>
-                      <span className="break-words text-[11px] text-slate-500">Source: {message.sourceLabel}</span>
-                      {mounted && message.createdAt ? (
-                        <span className="text-[11px] text-slate-500">{formatTime(message.createdAt)}</span>
-                      ) : null}
-                    </div>
-                    <DiagramPreview
-                      diagram={message.diagram}
-                      onRegenerate={() => void generateDiagram(message.diagramRequest, message.sourceLabel, message.id)}
-                      regenerating={loading && loadingMode === "diagram"}
-                    />
-                  </div>
-                </div>
-              );
-            }
-
-            return (
-              <div key={message.id} className="flex animate-fade-in-up gap-3">
-                <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-emerald-400/20 bg-emerald-400/10 text-xs font-bold text-emerald-300">
-                  SP
+                  ) : (
+                    "SP"
+                  )}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="mb-1 flex items-baseline gap-2">
-                    <span className="text-xs font-semibold text-slate-300">StudyPilot AI</span>
-                    {mounted && message.createdAt ? (
-                      <span className="text-[11px] text-slate-500">{formatTime(message.createdAt)}</span>
-                    ) : null}
+                  <div className="mb-1">
+                    <span
+                      className={`text-xs font-semibold ${loadingMode === "deep_research" ? "text-sky-200" : loadingMode === "diagram" ? "text-pink-200" : "text-slate-300"}`}
+                    >
+                      {loadingMode === "deep_research"
+                        ? "StudyPilot Research"
+                        : loadingMode === "diagram"
+                          ? "StudyPilot Visuals"
+                          : "StudyPilot AI"}
+                    </span>
                   </div>
-
-                  {message.answer.response_mode === "offline_fallback" ? (
-                    <div className="mb-2.5 rounded-lg border border-amber-300/30 bg-amber-300/10 p-3 text-sm leading-6 text-amber-100">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <span>AI model limit reached. Showing answer from saved study material.</span>
-                        {message.retry ? (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (message.retry) {
-                                sendMessage(message.retry.question, {
-                                  attachmentsOverride: message.retry.attachments,
-                                  skipUserBubble: true,
-                                  modeOverride: message.retry.mode,
-                                });
-                              }
-                            }}
-                            className="inline-flex h-7 items-center rounded-md border border-amber-200/35 bg-amber-200/10 px-2.5 text-xs font-semibold text-amber-50 transition hover:bg-amber-200/15"
-                          >
-                            Retry AI
-                          </button>
-                        ) : null}
-                      </div>
-                      {message.answer.fallback_notice ? <p className="mt-1.5 text-xs text-amber-100/80">{message.answer.fallback_notice}</p> : null}
-                    </div>
-                  ) : null}
-
-                  <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3">
-                    <AssistantAnswer answer={message.answer} />
-                    {message.answer.learning_step ? (
-                      <LearningStepControls
-                        meta={message.answer.learning_step}
-                        loading={loading}
-                        onControl={sendLearningControl}
+                  {loadingMode === "deep_research" ? (
+                    <div
+                      className="rounded-xl border border-sky-300/15 bg-sky-300/[0.04] px-4 py-3"
+                      role="status"
+                      aria-live="polite"
+                    >
+                      <LoadingDots
+                        text={`${researchProgressCues[researchProgressIndex]}…`}
                       />
-                    ) : null}
-                  </div>
+                      <p className="mt-1 text-[11px] text-slate-500">
+                        Bounded to 3-5 searches and at most 12 sources.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="inline-flex items-center rounded-xl border border-emerald-300/15 bg-emerald-400/[0.04] px-4 py-2.5">
+                      <LoadingDots
+                        text={
+                          loadingMode === "web_search"
+                            ? "Searching the web…"
+                            : loadingMode === "diagram"
+                              ? "Generating a grounded diagram…"
+                              : loadingMode === LEARN_STEP_BY_STEP_MODE
+                                ? "Preparing the next learning step…"
+                                : "Thinking with your study context…"
+                        }
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : null}
+            </div>
+          )}
+        </div>
 
-                  <MessageActions
-                    answer={message.answer}
-                    speaking={speakingId === message.id}
-                    onCopy={answerToText}
-                    onRegenerate={() => regenerate(message.id)}
-                    onReadAloud={() => readAloud(message.id, message.answer)}
-                    onStopSpeaking={stopSpeaking}
-                    regenerating={loading}
+        {/* Scroll to bottom */}
+        {showScrollDown ? (
+          <button
+            type="button"
+            onClick={scrollToBottom}
+            className="absolute bottom-32 left-1/2 z-20 grid h-9 w-9 -translate-x-1/2 place-items-center rounded-full border border-white/15 bg-slate-900/90 text-slate-200 shadow-lg shadow-black/40 backdrop-blur-md transition hover:bg-slate-800"
+            aria-label="Scroll to latest message"
+          >
+            <IconArrowDown size={16} />
+          </button>
+        ) : null}
+
+        {/* Composer */}
+        <div className="z-30 shrink-0 bg-gradient-to-t from-[#070b14] via-[#070b14]/95 to-transparent px-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 backdrop-blur-sm">
+          <div className="mx-auto max-w-5xl">
+            {error ? (
+              <div
+                className="mb-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-400/30 bg-red-400/[0.09] px-3 py-2 text-sm text-red-100 shadow-lg shadow-red-950/10"
+                role="alert"
+              >
+                <span className="min-w-0 break-words leading-5">{error}</span>
+                {pendingRetry || pendingDiagramRetry ? (
+                  <div className="flex shrink-0 flex-wrap items-center gap-2">
+                    {pendingRetry?.mode === "deep_research" ? (
+                      <button
+                        type="button"
+                        onClick={switchPendingDeepResearchToFastSearch}
+                        disabled={loading}
+                        className="inline-flex h-7 items-center rounded-md border border-sky-200/30 bg-sky-200/10 px-2.5 text-xs font-semibold text-sky-100 transition hover:bg-sky-200/15 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Fast Search
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={editPendingAction}
+                      disabled={loading}
+                      className="inline-flex h-7 items-center rounded-md border border-red-200/30 bg-red-200/10 px-2.5 text-xs font-semibold text-red-100 transition hover:bg-red-200/15 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={retryPendingAction}
+                      disabled={loading}
+                      className="inline-flex h-7 items-center rounded-md border border-red-200/30 bg-red-200/10 px-2.5 text-xs font-semibold text-red-100 transition hover:bg-red-200/15 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {uploadProgress ? (
+              <div
+                className="mb-2 rounded-lg border border-emerald-300/25 bg-emerald-300/10 px-3 py-2 text-sm text-emerald-100"
+                role="status"
+              >
+                {uploadProgress}
+              </div>
+            ) : null}
+            {composerReadOnly ? (
+              <div className="mb-2 rounded-lg border border-amber-300/25 bg-amber-300/[0.08] px-3 py-2 text-xs font-medium text-amber-100">
+                Previous Study Chat is read-only. Start a new chat to continue
+                editing.
+              </div>
+            ) : null}
+
+            {requestMode === "web_search" ||
+            requestMode === "deep_research" ||
+            requestMode === LEARN_STEP_BY_STEP_MODE ? (
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={
+                    requestMode === "deep_research"
+                      ? clearDeepResearchMode
+                      : requestMode === LEARN_STEP_BY_STEP_MODE
+                        ? clearLearnStepByStepMode
+                        : clearWebSearchMode
+                  }
+                  disabled={loading}
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 disabled:cursor-not-allowed disabled:opacity-60 ${
+                    requestMode === "deep_research"
+                      ? "border-sky-300/25 bg-sky-300/10 text-sky-100 hover:bg-sky-300/15 focus-visible:ring-sky-300/50"
+                      : requestMode === LEARN_STEP_BY_STEP_MODE
+                        ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100 hover:bg-emerald-300/15 focus-visible:ring-emerald-300/50"
+                        : "border-violet-300/25 bg-violet-300/10 text-violet-100 hover:bg-violet-300/15 focus-visible:ring-violet-300/50"
+                  }`}
+                  aria-label={
+                    requestMode === "deep_research"
+                      ? "Clear Deep research mode"
+                      : requestMode === LEARN_STEP_BY_STEP_MODE
+                        ? "Clear Learn Step by Step mode"
+                        : "Clear Web search mode"
+                  }
+                  title={
+                    requestMode === "deep_research"
+                      ? "Clear Deep research mode"
+                      : requestMode === LEARN_STEP_BY_STEP_MODE
+                        ? "Clear Learn Step by Step mode"
+                        : "Clear Web search mode"
+                  }
+                >
+                  {requestMode === LEARN_STEP_BY_STEP_MODE ? (
+                    <IconFileText size={12} />
+                  ) : (
+                    <IconSearch size={12} />
+                  )}
+                  {requestMode === "deep_research"
+                    ? "Deep research"
+                    : requestMode === LEARN_STEP_BY_STEP_MODE
+                      ? "Learn Step by Step"
+                      : "Web search"}
+                  <IconX size={12} />
+                </button>
+                <span className="text-[11px] font-medium text-slate-400">
+                  {requestMode === "deep_research"
+                    ? "Enter a focused research question"
+                    : requestMode === LEARN_STEP_BY_STEP_MODE
+                      ? "Enter a topic, answer, or use the step controls"
+                      : "Enter a current-information query"}
+                </span>
+              </div>
+            ) : null}
+
+            {attachments.length ? (
+              <div className="mb-2 flex flex-wrap gap-1.5">
+                {attachments.map((attachment) => (
+                  <button
+                    key={`${attachment.type}:${attachment.id}`}
+                    type="button"
+                    onClick={() => removeAttachment(attachment)}
+                    disabled={composerDisabled || loading}
+                    className="inline-flex max-w-full items-center gap-1 break-words rounded-md border border-emerald-300/25 bg-emerald-300/10 px-2 py-0.5 text-xs font-medium text-emerald-100 transition hover:bg-emerald-300/15 disabled:cursor-not-allowed disabled:opacity-60"
+                    title="Remove attachment"
+                  >
+                    <span className="truncate">{attachment.label}</span>
+                    <IconX size={12} className="shrink-0" />
+                  </button>
+                ))}
+              </div>
+            ) : null}
+
+            <div className="relative rounded-[1.75rem] border border-emerald-300/15 bg-slate-950/92 p-2 shadow-[0_24px_80px_rgba(0,0,0,0.36),0_0_0_1px_rgba(16,185,129,0.04)]">
+              {/* Attachment menu */}
+              {menuOpen ? (
+                <>
+                  <div
+                    className="fixed inset-0 z-40 bg-black/50 sm:hidden"
+                    onClick={() => setMenuOpen(false)}
+                    aria-hidden="true"
+                  />
+                  <div
+                    ref={menuRef}
+                    role="menu"
+                    aria-label="Attach options"
+                    className="fixed inset-x-0 bottom-0 z-50 max-h-[55vh] overflow-y-auto rounded-t-2xl border-t border-white/10 bg-slate-950 p-2 shadow-2xl shadow-black/50 sm:absolute sm:bottom-[calc(100%+0.5rem)] sm:left-0 sm:inset-x-auto sm:w-72 sm:max-h-none sm:rounded-2xl sm:border sm:border-white/10 sm:p-1.5"
+                  >
+                    <div className="mb-1 flex items-center justify-between px-1 pt-1 sm:hidden">
+                      <span className="text-xs font-semibold text-slate-300">
+                        Add to chat
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setMenuOpen(false)}
+                        className="grid h-7 w-7 place-items-center rounded-md text-slate-400 hover:bg-white/10 hover:text-white"
+                        aria-label="Close menu"
+                      >
+                        <IconX size={16} />
+                      </button>
+                    </div>
+                    <div className="grid gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className={menuItemClass}
+                        role="menuitem"
+                      >
+                        <span className={menuIconClass}>
+                          <IconUpload size={14} />
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block font-medium text-white">
+                            Upload from computer
+                          </span>
+                          <span className="block text-xs text-slate-400">
+                            PDF, PPTX, DOCX, text, image, or ZIP
+                          </span>
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPickerOpen(true);
+                          setMenuOpen(false);
+                        }}
+                        className={menuItemClass}
+                        role="menuitem"
+                      >
+                        <span className={menuIconClass}>
+                          <IconFiles size={14} />
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block font-medium text-white">
+                            Attach from My Files
+                          </span>
+                          <span className="block text-xs text-slate-400">
+                            Choose existing files or notes
+                          </span>
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => imageInputRef.current?.click()}
+                        className={menuItemClass}
+                        role="menuitem"
+                      >
+                        <span className={menuIconClass}>
+                          <IconImage size={14} />
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block font-medium text-white">
+                            Add image
+                          </span>
+                          <span className="block text-xs text-slate-400">
+                            Upload an image and ask about it
+                          </span>
+                        </span>
+                      </button>
+                      <Link
+                        href="/upload"
+                        className={menuItemClass}
+                        role="menuitem"
+                      >
+                        <span className={menuIconClass}>
+                          <IconFileText size={14} />
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block font-medium text-white">
+                            Add manual note
+                          </span>
+                          <span className="block text-xs text-slate-400">
+                            Save typed notes from the upload page
+                          </span>
+                        </span>
+                      </Link>
+                      <button
+                        type="button"
+                        disabled={!recentFile}
+                        onClick={() => {
+                          if (recentFile)
+                            addAttachment({
+                              id: recentFile.id,
+                              label: recentFile.file_name,
+                              type: "file",
+                            });
+                          setMenuOpen(false);
+                        }}
+                        className={menuItemClass}
+                        role="menuitem"
+                      >
+                        <span className={menuIconClass}>
+                          <IconFiles size={14} />
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block font-medium text-white">
+                            Use recent file
+                          </span>
+                          <span className="block truncate text-xs text-slate-400">
+                            {recentFile
+                              ? recentFile.file_name
+                              : "No recent file available"}
+                          </span>
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={startVoiceQuestion}
+                        className={menuItemClass}
+                        role="menuitem"
+                      >
+                        <span className={menuIconClass}>
+                          <IconMic size={14} />
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block font-medium text-white">
+                            Voice question
+                          </span>
+                          <span className="block text-xs text-slate-400">
+                            Use browser speech-to-text
+                          </span>
+                        </span>
+                      </button>
+
+                      <div
+                        className="my-1 h-px bg-white/10"
+                        aria-hidden="true"
+                      />
+
+                      <button
+                        type="button"
+                        onClick={activateWebSearch}
+                        className={`${menuItemClass} ${requestMode === "web_search" ? "bg-violet-300/[0.08]" : ""}`}
+                        role="menuitem"
+                      >
+                        <span
+                          className={`${menuIconClass} border-violet-300/20 text-violet-200`}
+                        >
+                          <IconSearch size={14} />
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block font-medium text-white">
+                            Web search
+                          </span>
+                          <span className="block text-xs text-slate-400">
+                            Search current sources with citations
+                          </span>
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={activateDeepResearch}
+                        className={`${menuItemClass} ${requestMode === "deep_research" ? "bg-sky-300/[0.08]" : ""}`}
+                        role="menuitem"
+                      >
+                        <span
+                          className={`${menuIconClass} border-sky-300/20 text-sky-200`}
+                        >
+                          <IconSearch size={14} />
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block font-medium text-white">
+                            Deep research
+                          </span>
+                          <span className="block text-xs text-slate-400">
+                            Build a bounded multi-source report
+                          </span>
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={activateLearnStepByStep}
+                        className={`${menuItemClass} ${requestMode === LEARN_STEP_BY_STEP_MODE ? "bg-emerald-300/[0.08]" : ""}`}
+                        role="menuitem"
+                      >
+                        <span
+                          className={`${menuIconClass} border-emerald-300/20 text-emerald-200`}
+                        >
+                          <IconFileText size={14} />
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block font-medium text-white">
+                            Learn Step by Step
+                          </span>
+                          <span className="block text-xs text-slate-400">
+                            Study one guided step at a time
+                          </span>
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={activateDiagram}
+                        className={menuItemClass}
+                        role="menuitem"
+                      >
+                        <span
+                          className={`${menuIconClass} border-pink-300/20 text-pink-200`}
+                        >
+                          <IconImage size={14} />
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block font-medium text-white">
+                            Generate diagram
+                          </span>
+                          <span className="block text-xs text-slate-400">
+                            Visualize an answer, file, summary, or topic
+                          </span>
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                </>
+              ) : null}
+
+              {/* Input row */}
+              <div className="flex min-h-14 items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.035] px-2 py-1.5 shadow-inner shadow-black/20">
+                <button
+                  ref={menuButtonRef}
+                  type="button"
+                  onClick={() => setMenuOpen((open) => !open)}
+                  disabled={composerDisabled || loading}
+                  className={`grid h-10 w-10 shrink-0 place-items-center rounded-full border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070b14] disabled:cursor-not-allowed disabled:opacity-50 ${
+                    menuOpen
+                      ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
+                      : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10 hover:text-white"
+                  }`}
+                  aria-label="Add attachment"
+                  aria-expanded={menuOpen}
+                  aria-haspopup="menu"
+                >
+                  <IconPlus
+                    size={18}
+                    className={`transition-transform duration-200 ${menuOpen ? "rotate-45" : ""}`}
+                  />
+                </button>
+                <textarea
+                  ref={textareaRef}
+                  value={question}
+                  onChange={(event) => setQuestion(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (
+                      event.key === "Enter" &&
+                      !event.shiftKey &&
+                      !composerDisabled
+                    ) {
+                      event.preventDefault();
+                      sendMessage();
+                    }
+                  }}
+                  rows={1}
+                  placeholder={
+                    requestMode === "web_search"
+                      ? "Search the web…"
+                      : requestMode === "deep_research"
+                        ? "What should StudyPilot research deeply?"
+                        : requestMode === LEARN_STEP_BY_STEP_MODE
+                          ? "What topic should we learn step by step?"
+                          : composerReadOnly
+                            ? "Read-only previous chat"
+                            : "Ask StudyPilot about your study material…"
+                  }
+                  disabled={composerDisabled}
+                  className="max-h-32 min-h-10 min-w-0 flex-1 resize-none bg-transparent px-1 py-2 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500 disabled:cursor-not-allowed disabled:text-slate-500"
+                  aria-label="Type your question"
+                />
+                <div className="hidden shrink-0 sm:block [&_select]:h-10 [&_select]:min-w-28 [&_select]:rounded-full [&_select]:border-white/10 [&_select]:bg-white/[0.04] [&_select]:px-3">
+                  <LanguageSelector
+                    value={language}
+                    onChange={(value) => {
+                      setLanguage(value);
+                      if (activeId && !legacyActive)
+                        void patchConversation(activeId, { language: value });
+                    }}
+                    compact
+                    showLabel={false}
                   />
                 </div>
-              </div>
-            );
-          })}
-
-          {loading ? (
-            <div className="flex animate-fade-in gap-3">
-              <div className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg border ${
-                loadingMode === "deep_research"
-                  ? "border-sky-300/25 bg-sky-300/10 text-sky-200"
-                  : loadingMode === "diagram"
-                    ? "border-pink-300/25 bg-pink-300/10 text-pink-200"
-                    : "border-emerald-400/20 bg-emerald-400/10 text-xs font-bold text-emerald-300"
-              }`}>
-                {loadingMode === "deep_research"
-                  ? <IconSearch size={15} />
-                  : loadingMode === "diagram"
-                    ? <IconImage size={15} />
-                    : "SP"}
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="mb-1">
-                  <span className={`text-xs font-semibold ${loadingMode === "deep_research" ? "text-sky-200" : loadingMode === "diagram" ? "text-pink-200" : "text-slate-300"}`}>
-                    {loadingMode === "deep_research" ? "StudyPilot Research" : loadingMode === "diagram" ? "StudyPilot Visuals" : "StudyPilot AI"}
-                  </span>
-                </div>
-                {loadingMode === "deep_research" ? (
-                  <div className="rounded-xl border border-sky-300/15 bg-sky-300/[0.04] px-4 py-3" role="status" aria-live="polite">
-                    <LoadingDots text={`${researchProgressCues[researchProgressIndex]}…`} />
-                    <p className="mt-1 text-[11px] text-slate-500">Bounded to 3-5 searches and at most 12 sources.</p>
-                  </div>
+                <button
+                  type="button"
+                  onClick={startVoiceQuestion}
+                  disabled={composerDisabled || loading}
+                  className="hidden h-10 w-10 shrink-0 place-items-center rounded-full border border-white/10 bg-white/5 text-slate-300 transition hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070b14] disabled:cursor-not-allowed disabled:opacity-50 sm:grid"
+                  aria-label="Voice question"
+                >
+                  <IconMic size={18} />
+                </button>
+                {loading ? (
+                  <button
+                    type="button"
+                    onClick={stopGenerating}
+                    className="grid h-10 w-10 shrink-0 place-items-center rounded-full border border-white/15 bg-white/10 text-slate-100 transition hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070b14]"
+                    aria-label={
+                      loadingMode === "deep_research"
+                        ? "Cancel deep research"
+                        : "Stop generating"
+                    }
+                  >
+                    <IconStop size={16} />
+                  </button>
                 ) : (
-                  <div className="inline-flex items-center rounded-xl border border-emerald-300/15 bg-emerald-400/[0.04] px-4 py-2.5">
-                    <LoadingDots
-                      text={
-                        loadingMode === "web_search"
-                          ? "Searching the web…"
-                          : loadingMode === "diagram"
-                            ? "Generating a grounded diagram…"
-                            : loadingMode === LEARN_STEP_BY_STEP_MODE
-                              ? "Preparing the next learning step…"
-                              : "Thinking with your study context…"
-                      }
-                    />
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => sendMessage()}
+                    disabled={!canSubmit}
+                    className={`grid h-10 w-10 shrink-0 place-items-center rounded-full text-slate-950 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070b14] disabled:cursor-not-allowed disabled:opacity-40 ${
+                      requestMode === "web_search"
+                        ? "bg-violet-300 hover:bg-violet-200 focus-visible:ring-violet-300/50"
+                        : requestMode === "deep_research"
+                          ? "bg-sky-300 hover:bg-sky-200 focus-visible:ring-sky-300/50"
+                          : "bg-emerald-400 hover:bg-emerald-300 focus-visible:ring-emerald-400/50"
+                    }`}
+                    aria-label={
+                      requestMode === "web_search"
+                        ? "Search the web"
+                        : requestMode === "deep_research"
+                          ? "Start deep research"
+                          : requestMode === LEARN_STEP_BY_STEP_MODE
+                            ? "Start or continue Learn Step by Step"
+                            : "Send message"
+                    }
+                  >
+                    <IconSend size={18} />
+                  </button>
                 )}
               </div>
             </div>
-          ) : null}
-        </div>
-      )}
 
-      {/* Scroll to bottom */}
-      {showScrollDown ? (
-        <button
-          type="button"
-          onClick={scrollToBottom}
-          className="fixed bottom-32 left-1/2 z-20 grid h-9 w-9 -translate-x-1/2 place-items-center rounded-full border border-white/15 bg-slate-900/90 text-slate-200 shadow-lg shadow-black/40 backdrop-blur-md transition hover:bg-slate-800 lg:left-[calc(50%+130px)]"
-          aria-label="Scroll to latest message"
-        >
-          <IconArrowDown size={16} />
-        </button>
-      ) : null}
-
-      {/* Composer */}
-      <div className="fixed inset-x-0 bottom-0 z-30 border-t border-white/[0.06] bg-[#070b14]/90 px-3 pb-[calc(0.625rem+env(safe-area-inset-bottom))] pt-2.5 backdrop-blur-xl lg:left-[260px]">
-        <div className="mx-auto max-w-3xl">
-          {error ? (
-            <div
-              className="mb-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-400/30 bg-red-400/[0.09] px-3 py-2 text-sm text-red-100 shadow-lg shadow-red-950/10"
-              role="alert"
-            >
-              <span className="min-w-0 break-words leading-5">{error}</span>
-              {pendingRetry || pendingDiagramRetry ? (
-                <div className="flex shrink-0 flex-wrap items-center gap-2">
-                  {pendingRetry?.mode === "deep_research" ? (
-                    <button
-                      type="button"
-                      onClick={switchPendingDeepResearchToFastSearch}
-                      disabled={loading}
-                      className="inline-flex h-7 items-center rounded-md border border-sky-200/30 bg-sky-200/10 px-2.5 text-xs font-semibold text-sky-100 transition hover:bg-sky-200/15 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      Fast Search
-                    </button>
-                  ) : null}
-                  <button
-                    type="button"
-                    onClick={editPendingAction}
-                    disabled={loading}
-                    className="inline-flex h-7 items-center rounded-md border border-red-200/30 bg-red-200/10 px-2.5 text-xs font-semibold text-red-100 transition hover:bg-red-200/15 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Edit
-                  </button>
-                  <button
-                    type="button"
-                    onClick={retryPendingAction}
-                    disabled={loading}
-                    className="inline-flex h-7 items-center rounded-md border border-red-200/30 bg-red-200/10 px-2.5 text-xs font-semibold text-red-100 transition hover:bg-red-200/15 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Retry
-                  </button>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-          {uploadProgress ? (
-            <div className="mb-2 rounded-lg border border-emerald-300/25 bg-emerald-300/10 px-3 py-2 text-sm text-emerald-100" role="status">
-              {uploadProgress}
-            </div>
-          ) : null}
-          {composerReadOnly ? (
-            <div className="mb-2 rounded-lg border border-amber-300/25 bg-amber-300/[0.08] px-3 py-2 text-xs font-medium text-amber-100">
-              Previous Study Chat is read-only. Start a new chat to continue editing.
-            </div>
-          ) : null}
-
-          {requestMode === "web_search" || requestMode === "deep_research" || requestMode === LEARN_STEP_BY_STEP_MODE ? (
-            <div className="mb-2 flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={
-                  requestMode === "deep_research"
-                    ? clearDeepResearchMode
-                    : requestMode === LEARN_STEP_BY_STEP_MODE
-                      ? clearLearnStepByStepMode
-                      : clearWebSearchMode
-                }
-                disabled={loading}
-                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 disabled:cursor-not-allowed disabled:opacity-60 ${
-                  requestMode === "deep_research"
-                    ? "border-sky-300/25 bg-sky-300/10 text-sky-100 hover:bg-sky-300/15 focus-visible:ring-sky-300/50"
-                    : requestMode === LEARN_STEP_BY_STEP_MODE
-                      ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100 hover:bg-emerald-300/15 focus-visible:ring-emerald-300/50"
-                    : "border-violet-300/25 bg-violet-300/10 text-violet-100 hover:bg-violet-300/15 focus-visible:ring-violet-300/50"
-                }`}
-                aria-label={
-                  requestMode === "deep_research"
-                    ? "Clear Deep research mode"
-                    : requestMode === LEARN_STEP_BY_STEP_MODE
-                      ? "Clear Learn Step by Step mode"
-                      : "Clear Web search mode"
-                }
-                title={
-                  requestMode === "deep_research"
-                    ? "Clear Deep research mode"
-                    : requestMode === LEARN_STEP_BY_STEP_MODE
-                      ? "Clear Learn Step by Step mode"
-                      : "Clear Web search mode"
-                }
-              >
-                {requestMode === LEARN_STEP_BY_STEP_MODE ? <IconFileText size={12} /> : <IconSearch size={12} />}
-                {requestMode === "deep_research" ? "Deep research" : requestMode === LEARN_STEP_BY_STEP_MODE ? "Learn Step by Step" : "Web search"}
-                <IconX size={12} />
-              </button>
-              <span className="text-[11px] font-medium text-slate-400">
-                {requestMode === "deep_research"
-                  ? "Enter a focused research question"
+            <p className="mt-1.5 px-1 text-center text-[11px] text-slate-500">
+              {requestMode === "web_search"
+                ? "Web answers use current search results. Open the listed sources to verify important details."
+                : requestMode === "deep_research"
+                  ? "Deep research uses a bounded set of current web sources and shows its limitations."
                   : requestMode === LEARN_STEP_BY_STEP_MODE
-                    ? "Enter a topic, answer, or use the step controls"
-                    : "Enter a current-information query"}
-              </span>
-            </div>
-          ) : null}
-
-          {attachments.length ? (
-            <div className="mb-2 flex flex-wrap gap-1.5">
-              {attachments.map((attachment) => (
-                <button
-                  key={`${attachment.type}:${attachment.id}`}
-                  type="button"
-                  onClick={() => removeAttachment(attachment)}
-                  disabled={composerDisabled || loading}
-                  className="inline-flex max-w-full items-center gap-1 break-words rounded-md border border-emerald-300/25 bg-emerald-300/10 px-2 py-0.5 text-xs font-medium text-emerald-100 transition hover:bg-emerald-300/15 disabled:cursor-not-allowed disabled:opacity-60"
-                  title="Remove attachment"
-                >
-                  <span className="truncate">{attachment.label}</span>
-                  <IconX size={12} className="shrink-0" />
-                </button>
-              ))}
-            </div>
-          ) : null}
-
-          <div className="relative rounded-2xl border border-white/12 bg-slate-950/90 p-1.5 shadow-2xl shadow-black/35">
-            {/* Attachment menu */}
-            {menuOpen ? (
-              <>
-                <div className="fixed inset-0 z-40 bg-black/50 sm:hidden" onClick={() => setMenuOpen(false)} aria-hidden="true" />
-                <div
-                  ref={menuRef}
-                  role="menu"
-                  aria-label="Attach options"
-                  className="fixed inset-x-0 bottom-0 z-50 max-h-[55vh] overflow-y-auto rounded-t-2xl border-t border-white/10 bg-slate-950 p-2 shadow-2xl shadow-black/50 sm:absolute sm:bottom-[calc(100%+0.5rem)] sm:left-0 sm:inset-x-auto sm:w-72 sm:max-h-none sm:rounded-2xl sm:border sm:border-white/10 sm:p-1.5"
-                >
-                  <div className="mb-1 flex items-center justify-between px-1 pt-1 sm:hidden">
-                    <span className="text-xs font-semibold text-slate-300">Add to chat</span>
-                    <button
-                      type="button"
-                      onClick={() => setMenuOpen(false)}
-                      className="grid h-7 w-7 place-items-center rounded-md text-slate-400 hover:bg-white/10 hover:text-white"
-                      aria-label="Close menu"
-                    >
-                      <IconX size={16} />
-                    </button>
-                  </div>
-                  <div className="grid gap-0.5">
-                    <button type="button" onClick={() => fileInputRef.current?.click()} className={menuItemClass} role="menuitem">
-                      <span className={menuIconClass}><IconUpload size={14} /></span>
-                      <span className="min-w-0">
-                        <span className="block font-medium text-white">Upload from computer</span>
-                        <span className="block text-xs text-slate-400">PDF, PPTX, DOCX, text, image, or ZIP</span>
-                      </span>
-                    </button>
-                    <button type="button" onClick={() => { setPickerOpen(true); setMenuOpen(false); }} className={menuItemClass} role="menuitem">
-                      <span className={menuIconClass}><IconFiles size={14} /></span>
-                      <span className="min-w-0">
-                        <span className="block font-medium text-white">Attach from My Files</span>
-                        <span className="block text-xs text-slate-400">Choose existing files or notes</span>
-                      </span>
-                    </button>
-                    <button type="button" onClick={() => imageInputRef.current?.click()} className={menuItemClass} role="menuitem">
-                      <span className={menuIconClass}><IconImage size={14} /></span>
-                      <span className="min-w-0">
-                        <span className="block font-medium text-white">Add image</span>
-                        <span className="block text-xs text-slate-400">Upload an image and ask about it</span>
-                      </span>
-                    </button>
-                    <Link href="/upload" className={menuItemClass} role="menuitem">
-                      <span className={menuIconClass}><IconFileText size={14} /></span>
-                      <span className="min-w-0">
-                        <span className="block font-medium text-white">Add manual note</span>
-                        <span className="block text-xs text-slate-400">Save typed notes from the upload page</span>
-                      </span>
-                    </Link>
-                    <button
-                      type="button"
-                      disabled={!recentFile}
-                      onClick={() => {
-                        if (recentFile) addAttachment({ id: recentFile.id, label: recentFile.file_name, type: "file" });
-                        setMenuOpen(false);
-                      }}
-                      className={menuItemClass}
-                      role="menuitem"
-                    >
-                      <span className={menuIconClass}><IconFiles size={14} /></span>
-                      <span className="min-w-0">
-                        <span className="block font-medium text-white">Use recent file</span>
-                        <span className="block truncate text-xs text-slate-400">{recentFile ? recentFile.file_name : "No recent file available"}</span>
-                      </span>
-                    </button>
-                    <button type="button" onClick={startVoiceQuestion} className={menuItemClass} role="menuitem">
-                      <span className={menuIconClass}><IconMic size={14} /></span>
-                      <span className="min-w-0">
-                        <span className="block font-medium text-white">Voice question</span>
-                        <span className="block text-xs text-slate-400">Use browser speech-to-text</span>
-                      </span>
-                    </button>
-
-                    <div className="my-1 h-px bg-white/10" aria-hidden="true" />
-
-                    <button
-                      type="button"
-                      onClick={activateWebSearch}
-                      className={`${menuItemClass} ${requestMode === "web_search" ? "bg-violet-300/[0.08]" : ""}`}
-                      role="menuitem"
-                    >
-                      <span className={`${menuIconClass} border-violet-300/20 text-violet-200`}><IconSearch size={14} /></span>
-                      <span className="min-w-0">
-                        <span className="block font-medium text-white">Web search</span>
-                        <span className="block text-xs text-slate-400">Search current sources with citations</span>
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={activateDeepResearch}
-                      className={`${menuItemClass} ${requestMode === "deep_research" ? "bg-sky-300/[0.08]" : ""}`}
-                      role="menuitem"
-                    >
-                      <span className={`${menuIconClass} border-sky-300/20 text-sky-200`}><IconSearch size={14} /></span>
-                      <span className="min-w-0">
-                        <span className="block font-medium text-white">Deep research</span>
-                        <span className="block text-xs text-slate-400">Build a bounded multi-source report</span>
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={activateLearnStepByStep}
-                      className={`${menuItemClass} ${requestMode === LEARN_STEP_BY_STEP_MODE ? "bg-emerald-300/[0.08]" : ""}`}
-                      role="menuitem"
-                    >
-                      <span className={`${menuIconClass} border-emerald-300/20 text-emerald-200`}><IconFileText size={14} /></span>
-                      <span className="min-w-0">
-                        <span className="block font-medium text-white">Learn Step by Step</span>
-                        <span className="block text-xs text-slate-400">Study one guided step at a time</span>
-                      </span>
-                    </button>
-
-                    <button type="button" onClick={activateDiagram} className={menuItemClass} role="menuitem">
-                      <span className={`${menuIconClass} border-pink-300/20 text-pink-200`}><IconImage size={14} /></span>
-                      <span className="min-w-0">
-                        <span className="block font-medium text-white">Generate diagram</span>
-                        <span className="block text-xs text-slate-400">Visualize an answer, file, summary, or topic</span>
-                      </span>
-                    </button>
-                  </div>
-                </div>
-              </>
-            ) : null}
-
-            <div className="mb-2 flex justify-end">
-              <LanguageSelector
-                value={language}
-                onChange={(value) => {
-                  setLanguage(value);
-                  if (activeId && !legacyActive) void patchConversation(activeId, { language: value });
-                }}
-                compact
-              />
-            </div>
-
-            {/* Input row */}
-            <div className="flex items-end gap-2">
-              <button
-                ref={menuButtonRef}
-                type="button"
-                onClick={() => setMenuOpen((open) => !open)}
-                disabled={composerDisabled || loading}
-                className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070b14] disabled:cursor-not-allowed disabled:opacity-50 ${
-                  menuOpen
-                    ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200"
-                    : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10 hover:text-white"
-                }`}
-                aria-label="Add attachment"
-                aria-expanded={menuOpen}
-                aria-haspopup="menu"
-              >
-                <IconPlus size={18} className={`transition-transform duration-200 ${menuOpen ? "rotate-45" : ""}`} />
-              </button>
-              <textarea
-                ref={textareaRef}
-                value={question}
-                onChange={(event) => setQuestion(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey && !composerDisabled) {
-                    event.preventDefault();
-                    sendMessage();
-                  }
-                }}
-                rows={1}
-                placeholder={
-                  requestMode === "web_search"
-                    ? "Search the web…"
-                    : requestMode === "deep_research"
-                      ? "What should StudyPilot research deeply?"
-                      : requestMode === LEARN_STEP_BY_STEP_MODE
-                        ? "What topic should we learn step by step?"
-                      : composerReadOnly
-                        ? "Read-only previous chat"
-                        : "Ask StudyPilot about your study material…"
-                }
-                disabled={composerDisabled}
-                className="max-h-40 min-h-[2.5rem] min-w-0 flex-1 resize-none bg-transparent px-1 py-2.5 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500 disabled:cursor-not-allowed disabled:text-slate-500"
-                aria-label="Type your question"
-              />
-              <button
-                type="button"
-                onClick={startVoiceQuestion}
-                disabled={composerDisabled || loading}
-                className="hidden h-10 w-10 shrink-0 place-items-center rounded-xl border border-white/10 bg-white/5 text-slate-300 transition hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070b14] disabled:cursor-not-allowed disabled:opacity-50 sm:grid"
-                aria-label="Voice question"
-              >
-                <IconMic size={18} />
-              </button>
-              {loading ? (
-                <button
-                  type="button"
-                  onClick={stopGenerating}
-                  className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-white/15 bg-white/10 text-slate-100 transition hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070b14]"
-                  aria-label={loadingMode === "deep_research" ? "Cancel deep research" : "Stop generating"}
-                >
-                  <IconStop size={16} />
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => sendMessage()}
-                  disabled={!canSubmit}
-                  className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl text-slate-950 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070b14] disabled:cursor-not-allowed disabled:opacity-40 ${
-                    requestMode === "web_search"
-                      ? "bg-violet-300 hover:bg-violet-200 focus-visible:ring-violet-300/50"
-                      : requestMode === "deep_research"
-                        ? "bg-sky-300 hover:bg-sky-200 focus-visible:ring-sky-300/50"
-                        : "bg-emerald-400 hover:bg-emerald-300 focus-visible:ring-emerald-400/50"
-                  }`}
-                  aria-label={
-                    requestMode === "web_search"
-                      ? "Search the web"
-                      : requestMode === "deep_research"
-                        ? "Start deep research"
-                        : requestMode === LEARN_STEP_BY_STEP_MODE
-                          ? "Start or continue Learn Step by Step"
-                          : "Send message"
-                  }
-                >
-                  <IconSend size={18} />
-                </button>
-              )}
-            </div>
+                    ? "Learn Step by Step keeps one guided step active in this conversation."
+                    : "StudyPilot uses your files and notes as context. AI calls are limited on free keys."}
+            </p>
           </div>
-
-          <p className="mt-1.5 px-1 text-center text-[11px] text-slate-500">
-            {requestMode === "web_search"
-              ? "Web answers use current search results. Open the listed sources to verify important details."
-              : requestMode === "deep_research"
-                ? "Deep research uses a bounded set of current web sources and shows its limitations."
-                : requestMode === LEARN_STEP_BY_STEP_MODE
-                  ? "Learn Step by Step keeps one guided step active in this conversation."
-              : "StudyPilot uses your files and notes as context. AI calls are limited on free keys."}
-          </p>
         </div>
-      </div>
 
-      {/* Attachment picker modal */}
-      {diagramOpen ? (
-        <DiagramComposer
-          sources={diagramSources}
-          loading={loading && loadingMode === "diagram"}
-          onClose={() => setDiagramOpen(false)}
-          onGenerate={(request, sourceLabel) => void generateDiagram(request, sourceLabel)}
-        />
-      ) : null}
+        {/* Attachment picker modal */}
+        {diagramOpen ? (
+          <DiagramComposer
+            sources={diagramSources}
+            loading={loading && loadingMode === "diagram"}
+            onClose={() => setDiagramOpen(false)}
+            onGenerate={(request, sourceLabel) =>
+              void generateDiagram(request, sourceLabel)
+            }
+          />
+        ) : null}
 
-      {pickerOpen ? (
-        <div className="fixed inset-0 z-40 grid place-items-end bg-black/60 p-0 sm:place-items-center sm:p-4">
-          <div className="max-h-[86vh] w-full overflow-hidden rounded-t-2xl border border-white/10 bg-slate-950 shadow-2xl shadow-black/50 sm:max-w-2xl sm:rounded-2xl">
-            <div className="flex items-center justify-between border-b border-white/10 p-4">
-              <div>
-                <h2 className="font-semibold text-white">Attach from My Files</h2>
-                <p className="mt-1 text-xs text-slate-400">Select files or notes as context for your next question.</p>
+        {pickerOpen ? (
+          <div className="fixed inset-0 z-40 grid place-items-end bg-black/60 p-0 sm:place-items-center sm:p-4">
+            <div className="max-h-[86vh] w-full overflow-hidden rounded-t-2xl border border-white/10 bg-slate-950 shadow-2xl shadow-black/50 sm:max-w-2xl sm:rounded-2xl">
+              <div className="flex items-center justify-between border-b border-white/10 p-4">
+                <div>
+                  <h2 className="font-semibold text-white">
+                    Attach from My Files
+                  </h2>
+                  <p className="mt-1 text-xs text-slate-400">
+                    Select files or notes as context for your next question.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPickerOpen(false)}
+                  className="inline-flex h-8 items-center rounded-md border border-white/10 px-3 text-xs font-semibold text-slate-200 transition hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50"
+                >
+                  Done
+                </button>
               </div>
-              <button type="button" onClick={() => setPickerOpen(false)} className="inline-flex h-8 items-center rounded-md border border-white/10 px-3 text-xs font-semibold text-slate-200 transition hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50">
-                Done
-              </button>
-            </div>
-            <div className="grid max-h-[70vh] gap-4 overflow-auto p-4 md:grid-cols-2">
-              <section>
-                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-emerald-200">Files</h3>
-                <div className="grid gap-2">
-                  {files.map((file) => {
-                    const selected = selectedIds.has(`file:${file.id}`);
-                    return (
-                      <button
-                        key={file.id}
-                        type="button"
-                        onClick={() => {
-                          if (selected) removeAttachment({ id: file.id, label: file.file_name, type: "file" });
-                          else addAttachment({ id: file.id, label: file.file_name, type: "file" });
-                        }}
-                        className={`min-w-0 rounded-lg border p-3 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 ${
-                          selected ? "border-emerald-300/40 bg-emerald-300/10 text-emerald-100" : "border-white/10 bg-white/[0.04] text-slate-200 hover:bg-white/[0.07]"
-                        }`}
-                      >
-                        <span className="block break-words font-semibold">{file.file_name}</span>
-                        <span className="break-words text-xs text-slate-400">{file.file_type ?? file.mime_type ?? "Study file"}</span>
-                      </button>
-                    );
-                  })}
-                  {!files.length ? <p className="text-sm text-slate-500">No files yet.</p> : null}
-                </div>
-              </section>
-              <section>
-                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-emerald-200">Notes</h3>
-                <div className="grid gap-2">
-                  {notes.map((note) => {
-                    const label = note.title ?? note.topic ?? "Manual note";
-                    const selected = selectedIds.has(`note:${note.id}`);
-                    return (
-                      <button
-                        key={note.id}
-                        type="button"
-                        onClick={() => {
-                          if (selected) removeAttachment({ id: note.id, label, type: "note" });
-                          else addAttachment({ id: note.id, label, type: "note" });
-                        }}
-                        className={`min-w-0 rounded-lg border p-3 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 ${
-                          selected ? "border-emerald-300/40 bg-emerald-300/10 text-emerald-100" : "border-white/10 bg-white/[0.04] text-slate-200 hover:bg-white/[0.07]"
-                        }`}
-                      >
-                        <span className="block break-words font-semibold">{label}</span>
-                        <span className="break-words text-xs text-slate-400">{note.topic ?? "Manual note"}</span>
-                      </button>
-                    );
-                  })}
-                  {!notes.length ? <p className="text-sm text-slate-500">No manual notes yet.</p> : null}
-                </div>
-              </section>
+              <div className="grid max-h-[70vh] gap-4 overflow-auto p-4 md:grid-cols-2">
+                <section>
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-emerald-200">
+                    Files
+                  </h3>
+                  <div className="grid gap-2">
+                    {files.map((file) => {
+                      const selected = selectedIds.has(`file:${file.id}`);
+                      return (
+                        <button
+                          key={file.id}
+                          type="button"
+                          onClick={() => {
+                            if (selected)
+                              removeAttachment({
+                                id: file.id,
+                                label: file.file_name,
+                                type: "file",
+                              });
+                            else
+                              addAttachment({
+                                id: file.id,
+                                label: file.file_name,
+                                type: "file",
+                              });
+                          }}
+                          className={`min-w-0 rounded-lg border p-3 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 ${
+                            selected
+                              ? "border-emerald-300/40 bg-emerald-300/10 text-emerald-100"
+                              : "border-white/10 bg-white/[0.04] text-slate-200 hover:bg-white/[0.07]"
+                          }`}
+                        >
+                          <span className="block break-words font-semibold">
+                            {file.file_name}
+                          </span>
+                          <span className="break-words text-xs text-slate-400">
+                            {file.file_type ?? file.mime_type ?? "Study file"}
+                          </span>
+                        </button>
+                      );
+                    })}
+                    {!files.length ? (
+                      <p className="text-sm text-slate-500">No files yet.</p>
+                    ) : null}
+                  </div>
+                </section>
+                <section>
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-emerald-200">
+                    Notes
+                  </h3>
+                  <div className="grid gap-2">
+                    {notes.map((note) => {
+                      const label = note.title ?? note.topic ?? "Manual note";
+                      const selected = selectedIds.has(`note:${note.id}`);
+                      return (
+                        <button
+                          key={note.id}
+                          type="button"
+                          onClick={() => {
+                            if (selected)
+                              removeAttachment({
+                                id: note.id,
+                                label,
+                                type: "note",
+                              });
+                            else
+                              addAttachment({
+                                id: note.id,
+                                label,
+                                type: "note",
+                              });
+                          }}
+                          className={`min-w-0 rounded-lg border p-3 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 ${
+                            selected
+                              ? "border-emerald-300/40 bg-emerald-300/10 text-emerald-100"
+                              : "border-white/10 bg-white/[0.04] text-slate-200 hover:bg-white/[0.07]"
+                          }`}
+                        >
+                          <span className="block break-words font-semibold">
+                            {label}
+                          </span>
+                          <span className="break-words text-xs text-slate-400">
+                            {note.topic ?? "Manual note"}
+                          </span>
+                        </button>
+                      );
+                    })}
+                    {!notes.length ? (
+                      <p className="text-sm text-slate-500">
+                        No manual notes yet.
+                      </p>
+                    ) : null}
+                  </div>
+                </section>
+              </div>
             </div>
           </div>
-        </div>
-      ) : null}
+        ) : null}
       </div>
       {/* End chat column */}
     </div>

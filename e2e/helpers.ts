@@ -15,16 +15,39 @@ export function requireE2EEnv() {
 export async function login(page: Page) {
   requireE2EEnv();
   await page.goto("/auth?mode=login");
+
+  const alreadySignedIn = page.getByRole("heading", {
+    name: /you are already signed in/i,
+  });
+  if (await alreadySignedIn.isVisible().catch(() => false)) {
+    await page
+      .getByRole("button", { name: /sign out and use another account/i })
+      .click();
+    await expect(page).toHaveURL(/\/$/);
+    await page.goto("/auth?mode=login");
+  }
+
   await page.getByLabel("Email").fill(e2eEnv.email);
   await page.getByLabel("Password").fill(e2eEnv.password);
-  await page.locator("form").getByRole("button", { name: /^log in$/i }).click();
-  await expect(page, "login should create a Supabase session and redirect to the dashboard").toHaveURL(/\/dashboard/);
-  await expect(page.getByRole("heading", { name: /student dashboard|dashboard/i })).toBeVisible();
+  await page
+    .locator("form")
+    .getByRole("button", { name: /^log in$/i })
+    .click();
+  await expect(
+    page,
+    "login should create a Supabase session and redirect to the dashboard",
+  ).toHaveURL(/\/dashboard/);
+  await expect(
+    page.getByRole("heading", { name: /student dashboard|dashboard/i }),
+  ).toBeVisible();
 }
 
 export async function logout(page: Page) {
   await page.getByRole("button", { name: /sign out/i }).click();
-  await expect(page, "logout should clear the Supabase session and redirect home").toHaveURL(/\/$/);
+  await expect(
+    page,
+    "logout should clear the Supabase session and redirect home",
+  ).toHaveURL(/\/$/);
 }
 
 export async function stubAI(page: Page) {
@@ -36,12 +59,23 @@ export async function stubAI(page: Page) {
         summary: {
           suggested_title: "Networking Chapter",
           short_summary: "Networking covers routing, subnetting, TCP, and UDP.",
-          key_points: ["Routing connects networks.", "Subnetting is a weak-topic practice target."],
+          key_points: [
+            "Routing connects networks.",
+            "Subnetting is a weak-topic practice target.",
+          ],
           important_concepts: ["Routing", "Subnetting", "TCP"],
           covered_topics: ["Routing", "Subnetting", "Transport protocols"],
           topic_wise_summary: [
-            { topic: "Routing", explanation: "Routers forward packets.", important_points: ["Use routing tables."] },
-            { topic: "Subnetting", explanation: "Networks are divided with prefixes.", important_points: ["CIDR controls range size."] },
+            {
+              topic: "Routing",
+              explanation: "Routers forward packets.",
+              important_points: ["Use routing tables."],
+            },
+            {
+              topic: "Subnetting",
+              explanation: "Networks are divided with prefixes.",
+              important_points: ["CIDR controls range size."],
+            },
           ],
           suggested_tags: ["networking"],
           suggested_next_step: "Take a balanced quiz.",
@@ -93,10 +127,24 @@ export async function stubAI(page: Page) {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        attempt: { id: "e2e-attempt", percentage: 0, weak_topics: ["Subnetting"], strong_topics: [] },
-        analytics: { weakTopics: ["Subnetting"], strongTopics: [], lastQuizScore: { percentage: 0 } },
-        learnerProfile: { weakTopics: [{ topic: "Subnetting", accuracy: 0, misses: 1 }], strongTopics: [] },
-        revisionRecommendations: [{ topic: "Subnetting", reason: "Recent quiz miss" }],
+        attempt: {
+          id: "e2e-attempt",
+          percentage: 0,
+          weak_topics: ["Subnetting"],
+          strong_topics: [],
+        },
+        analytics: {
+          weakTopics: ["Subnetting"],
+          strongTopics: [],
+          lastQuizScore: { percentage: 0 },
+        },
+        learnerProfile: {
+          weakTopics: [{ topic: "Subnetting", accuracy: 0, misses: 1 }],
+          strongTopics: [],
+        },
+        revisionRecommendations: [
+          { topic: "Subnetting", reason: "Recent quiz miss" },
+        ],
       }),
     });
   });
@@ -112,7 +160,14 @@ export async function stubAI(page: Page) {
           important_topics: ["Routing", "Subnetting", "TCP", "UDP"],
           revise_first: ["Subnetting", "Routing"],
           pending_topics: ["TCP", "UDP"],
-          daily_plan: [{ day: 1, focus_topics: ["Subnetting", "Routing"], tasks: ["Revise full chapter", "Practice weak topic"], estimated_time: "45 minutes" }],
+          daily_plan: [
+            {
+              day: 1,
+              focus_topics: ["Subnetting", "Routing"],
+              tasks: ["Revise full chapter", "Practice weak topic"],
+              estimated_time: "45 minutes",
+            },
+          ],
         },
       }),
     });
@@ -128,7 +183,8 @@ export async function stubAI(page: Page) {
           question: "Explain subnetting",
           answer: {
             short_answer: "Subnetting divides a network into smaller ranges.",
-            simple_explanation: "Use the prefix length to determine network size.",
+            simple_explanation:
+              "Use the prefix length to determine network size.",
             step_by_step: ["Identify prefix.", "Calculate host bits."],
             example: "192.168.1.0/24",
             memory_line: "Prefix decides range.",

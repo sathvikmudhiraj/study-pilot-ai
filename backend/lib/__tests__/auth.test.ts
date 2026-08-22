@@ -8,7 +8,7 @@ vi.mock("../supabase/server", () => ({
   createServerSupabaseClient: mocks.createServerSupabaseClient,
 }));
 
-import { getCurrentUser, requireAdmin } from "../auth";
+import { getCurrentUser, requireAdmin, resolveDisplayName } from "../auth";
 
 function setSupabaseUser(user: Record<string, unknown> | null) {
   mocks.createServerSupabaseClient.mockResolvedValue({
@@ -97,5 +97,34 @@ describe("trusted admin authorization", () => {
     }));
 
     await expect(getCurrentUser()).resolves.toMatchObject({ preferredLanguage: "te" });
+  });
+
+  it("resolves display names from profile, metadata, email username, then Student", () => {
+    expect(resolveDisplayName({
+      profile: { full_name: "  Sathvik Mudhiraj  " },
+      metadata: { name: "Metadata Name" },
+      email: "student@example.com",
+    })).toBe("Sathvik Mudhiraj");
+
+    expect(resolveDisplayName({
+      metadata: { full_name: "Metadata Full Name", name: "Metadata Name" },
+      email: "student@example.com",
+    })).toBe("Metadata Full Name");
+
+    expect(resolveDisplayName({ email: "learner@example.com" })).toBe("learner");
+    expect(resolveDisplayName({})).toBe("Student");
+  });
+
+  it("does not use reserved E2E display names for normal UI", async () => {
+    setSupabaseUser(authUser({
+      email: "real.student@example.com",
+      user_metadata: { name: "E2E Student" },
+      app_metadata: { role: "student" },
+    }));
+
+    await expect(getCurrentUser()).resolves.toMatchObject({
+      name: "real.student",
+      role: "student",
+    });
   });
 });

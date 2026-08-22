@@ -6,7 +6,10 @@ import { useRouter } from "next/navigation";
 import { EmptyState, Badge } from "./ui";
 import { IconSearch, IconFiles, IconFileText } from "./icons";
 import { StudyNoteEditor } from "./StudyNoteEditor";
-import { adaptStudyNoteRow, type StudyNoteDraft } from "@/frontend/lib/studyNotes";
+import {
+  adaptStudyNoteRow,
+  type StudyNoteDraft,
+} from "@/frontend/lib/studyNotes";
 
 type FileItem = {
   id: string;
@@ -47,7 +50,32 @@ const selectClass =
 const searchClass =
   "h-11 min-w-0 w-full rounded-lg border border-white/10 bg-slate-950/70 pl-10 pr-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-emerald-300/60 focus:shadow-[0_0_0_3px_rgba(16,185,129,0.08)]";
 
-export function FilesBrowser({ files, notes }: { files: FileItem[]; notes: NoteItem[] }) {
+const supportedFileFormats = [
+  ".pdf",
+  ".pptx",
+  ".docx",
+  ".txt",
+  ".md",
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".webp",
+  ".zip",
+];
+
+function getFileExtension(fileName: string) {
+  const lower = fileName.toLowerCase();
+  const index = lower.lastIndexOf(".");
+  return index === -1 ? "" : lower.slice(index);
+}
+
+export function FilesBrowser({
+  files,
+  notes,
+}: {
+  files: FileItem[];
+  notes: NoteItem[];
+}) {
   const router = useRouter();
   const [query, setQuery] = useState("");
   const [kind, setKind] = useState("all");
@@ -58,7 +86,10 @@ export function FilesBrowser({ files, notes }: { files: FileItem[]; notes: NoteI
     return notes.map((note) => {
       const draft = adaptStudyNoteRow(note);
       if (!draft.sourceLabel && draft.fileId) {
-        return { ...draft, sourceLabel: fileNames.get(draft.fileId) ?? "Uploaded study file" };
+        return {
+          ...draft,
+          sourceLabel: fileNames.get(draft.fileId) ?? "Uploaded study file",
+        };
       }
       return draft;
     });
@@ -68,8 +99,14 @@ export function FilesBrowser({ files, notes }: { files: FileItem[]; notes: NoteI
   const filteredFiles = useMemo(() => {
     const q = query.trim().toLowerCase();
     return files.filter((file) => {
-      const matchesKind = kind === "all" || kind === "files";
-      const matchesStatus = status === "all" || (file.processing_status ?? file.status ?? "").toLowerCase() === status;
+      const matchesKind =
+        kind === "all" ||
+        kind === "files" ||
+        (kind.startsWith("format:") &&
+          getFileExtension(file.file_name) === kind.replace("format:", ""));
+      const matchesStatus =
+        status === "all" ||
+        (file.processing_status ?? file.status ?? "").toLowerCase() === status;
       const matchesQuery = !q || file.file_name.toLowerCase().includes(q);
       return matchesKind && matchesStatus && matchesQuery;
     });
@@ -78,9 +115,12 @@ export function FilesBrowser({ files, notes }: { files: FileItem[]; notes: NoteI
   const filteredNotes = useMemo(() => {
     const q = query.trim().toLowerCase();
     return savedNotes.filter((note) => {
-      const haystack = `${note.title} ${note.topic ?? ""} ${note.content} ${note.sourceLabel ?? ""}`.toLowerCase();
+      const haystack =
+        `${note.title} ${note.topic ?? ""} ${note.content} ${note.sourceLabel ?? ""}`.toLowerCase();
       const matchesKind = kind === "all" || kind === "notes";
-      const matchesImportance = importance === "all" || (note.importance ?? "").toLowerCase() === importance;
+      const matchesImportance =
+        importance === "all" ||
+        (note.importance ?? "").toLowerCase() === importance;
       const matchesQuery = !q || haystack.includes(q);
       return matchesKind && matchesImportance && matchesQuery;
     });
@@ -111,7 +151,10 @@ export function FilesBrowser({ files, notes }: { files: FileItem[]; notes: NoteI
       <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-4 animate-fade-in">
         <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_160px_180px_180px]">
           <div className="relative">
-            <IconSearch size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+            <IconSearch
+              size={16}
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-500"
+            />
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
@@ -120,18 +163,38 @@ export function FilesBrowser({ files, notes }: { files: FileItem[]; notes: NoteI
               aria-label="Search study material"
             />
           </div>
-          <select value={kind} onChange={(event) => setKind(event.target.value)} className={selectClass} aria-label="Filter by kind">
+          <select
+            value={kind}
+            onChange={(event) => setKind(event.target.value)}
+            className={selectClass}
+            aria-label="Filter by item or file format"
+          >
             <option value="all">All items</option>
             <option value="files">Files only</option>
             <option value="notes">Notes only</option>
+            {supportedFileFormats.map((format) => (
+              <option key={format} value={`format:${format}`}>
+                {format}
+              </option>
+            ))}
           </select>
-          <select value={status} onChange={(event) => setStatus(event.target.value)} className={selectClass} aria-label="Filter by status">
+          <select
+            value={status}
+            onChange={(event) => setStatus(event.target.value)}
+            className={selectClass}
+            aria-label="Filter by status"
+          >
             <option value="all">All file status</option>
             <option value="uploaded">Uploaded</option>
             <option value="processing">Processing</option>
             <option value="failed">Failed</option>
           </select>
-          <select value={importance} onChange={(event) => setImportance(event.target.value)} className={selectClass} aria-label="Filter by importance">
+          <select
+            value={importance}
+            onChange={(event) => setImportance(event.target.value)}
+            className={selectClass}
+            aria-label="Filter by importance"
+          >
             <option value="all">All importance</option>
             <option value="high">High</option>
             <option value="medium">Medium</option>
@@ -145,50 +208,84 @@ export function FilesBrowser({ files, notes }: { files: FileItem[]; notes: NoteI
           title="No study material found"
           description="Upload a study file or add manual notes to start building your workspace."
           icon={<IconFiles size={22} />}
-          action={<Link href="/upload" className="inline-flex h-10 items-center rounded-lg bg-emerald-400 px-4 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300">Add study material</Link>}
+          action={
+            <Link
+              href="/upload"
+              className="inline-flex h-10 items-center rounded-lg bg-emerald-400 px-4 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300"
+            >
+              Add study material
+            </Link>
+          }
         />
       ) : null}
 
       {/* Files grid */}
-      {filteredFiles.length ? (
+      {kind !== "notes" ? (
         <section className="animate-fade-in">
           <div className="mb-3 flex items-center justify-between">
             <h2 className="flex items-center gap-2 text-lg font-semibold text-white">
               <IconFiles size={18} className="text-slate-400" />
               Study files
             </h2>
-            <span className="text-sm text-slate-500">{filteredFiles.length} found</span>
+            <span className="text-sm text-slate-500">
+              {filteredFiles.length} found
+            </span>
           </div>
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 stagger-children">
-            {filteredFiles.map((file) => (
-              <Link
-                key={file.id}
-                href={`/files/${file.id}`}
-                className="group min-w-0 rounded-xl border border-white/[0.06] bg-white/[0.03] p-5 transition-all duration-200 hover:border-emerald-400/20 hover:bg-white/[0.06] hover:-translate-y-[1px] animate-fade-in-up"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg border border-white/10 bg-white/[0.04] text-emerald-300">
-                    <IconFiles size={18} />
+          {filteredFiles.length ? (
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 stagger-children">
+              {filteredFiles.map((file) => (
+                <Link
+                  key={file.id}
+                  href={`/files/${file.id}`}
+                  className="group min-w-0 rounded-xl border border-white/[0.06] bg-white/[0.03] p-5 transition-all duration-200 hover:border-emerald-400/20 hover:bg-white/[0.06] hover:-translate-y-[1px] animate-fade-in-up"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg border border-white/10 bg-white/[0.04] text-emerald-300">
+                      <IconFiles size={18} />
+                    </div>
+                    <Badge
+                      variant={
+                        file.processing_status === "uploaded"
+                          ? "emerald"
+                          : "amber"
+                      }
+                      className="shrink-0"
+                    >
+                      {file.processing_status ?? file.status ?? "uploaded"}
+                    </Badge>
                   </div>
-                  <Badge variant={file.processing_status === "uploaded" ? "emerald" : "amber"} className="shrink-0">
-                    {file.processing_status ?? file.status ?? "uploaded"}
-                  </Badge>
-                </div>
-                <h3 className="mt-4 line-clamp-2 font-semibold text-white text-sm">{file.file_name}</h3>
-                <p className="mt-1 text-xs font-semibold uppercase text-slate-500">{file.file_type ?? file.mime_type ?? "Study file"}</p>
-                <div className="mt-4 grid grid-cols-2 gap-3 text-sm border-t border-white/[0.06] pt-4">
-                  <div>
-                    <div className="text-xs uppercase text-slate-500">Size</div>
-                    <div className="mt-1 text-slate-200">{formatSize(file.file_size)}</div>
+                  <h3 className="mt-4 line-clamp-2 font-semibold text-white text-sm">
+                    {file.file_name}
+                  </h3>
+                  <p className="mt-1 text-xs font-semibold uppercase text-slate-500">
+                    {file.file_type ?? file.mime_type ?? "Study file"}
+                  </p>
+                  <div className="mt-4 grid grid-cols-2 gap-3 text-sm border-t border-white/[0.06] pt-4">
+                    <div>
+                      <div className="text-xs uppercase text-slate-500">
+                        Size
+                      </div>
+                      <div className="mt-1 text-slate-200">
+                        {formatSize(file.file_size)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs uppercase text-slate-500">
+                        Uploaded
+                      </div>
+                      <div className="mt-1 text-slate-200">
+                        {new Date(file.created_at).toLocaleDateString()}
+                      </div>
+                    </div>
                   </div>
-                  <div>
-                    <div className="text-xs uppercase text-slate-500">Uploaded</div>
-                    <div className="mt-1 text-slate-200">{new Date(file.created_at).toLocaleDateString()}</div>
-                  </div>
-                </div>
-              </Link>
-            ))}
-          </div>
+                </Link>
+              ))}
+            </div>
+          ) : (
+            <div className="rounded-xl border border-dashed border-white/[0.08] bg-white/[0.025] px-4 py-5 text-sm text-slate-400">
+              No uploaded files match the current filters.
+            </div>
+          )}
         </section>
       ) : null}
 
@@ -200,30 +297,58 @@ export function FilesBrowser({ files, notes }: { files: FileItem[]; notes: NoteI
               <IconFileText size={18} className="text-slate-400" />
               Saved notes
             </h2>
-            <span className="text-sm text-slate-500">{filteredNotes.length} found</span>
+            <span className="text-sm text-slate-500">
+              {filteredNotes.length} found
+            </span>
           </div>
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 stagger-children">
             {filteredNotes.map((note) => (
-              <article key={note.id} className="group min-w-0 rounded-xl border border-white/[0.06] bg-white/[0.03] p-5 transition-all duration-200 hover:border-white/[0.15] hover:bg-white/[0.06] animate-fade-in-up">
+              <article
+                key={note.id}
+                className="group min-w-0 rounded-xl border border-white/[0.06] bg-white/[0.03] p-5 transition-all duration-200 hover:border-white/[0.15] hover:bg-white/[0.06] animate-fade-in-up"
+              >
                 <div className="flex items-start justify-between gap-3">
                   <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg border border-white/10 bg-white/[0.04] text-cyan-300">
                     <IconFileText size={18} />
                   </div>
                   {note.importance ? (
                     <Badge
-                      variant={note.importance === "high" ? "amber" : note.importance === "medium" ? "cyan" : "default"}
+                      variant={
+                        note.importance === "high"
+                          ? "amber"
+                          : note.importance === "medium"
+                            ? "cyan"
+                            : "default"
+                      }
                       className="shrink-0 capitalize"
                     >
                       {note.importance}
                     </Badge>
                   ) : null}
                 </div>
-                <h3 className="mt-4 line-clamp-2 font-semibold text-white text-sm">{note.title || "Untitled note"}</h3>
-                <p className="mt-1 text-xs font-semibold uppercase text-slate-500">{note.topic || (note.sourceType === "manual" ? "Manual note" : "AI study note")}</p>
-                <p className="mt-3 line-clamp-3 whitespace-pre-line text-sm leading-6 text-slate-400">{note.content}</p>
-                {note.sourceLabel ? <p className="mt-3 line-clamp-1 text-xs text-cyan-200">Source: {note.sourceLabel}</p> : null}
+                <h3 className="mt-4 line-clamp-2 font-semibold text-white text-sm">
+                  {note.title || "Untitled note"}
+                </h3>
+                <p className="mt-1 text-xs font-semibold uppercase text-slate-500">
+                  {note.topic ||
+                    (note.sourceType === "manual"
+                      ? "Manual note"
+                      : "AI study note")}
+                </p>
+                <p className="mt-3 line-clamp-3 whitespace-pre-line text-sm leading-6 text-slate-400">
+                  {note.content}
+                </p>
+                {note.sourceLabel ? (
+                  <p className="mt-3 line-clamp-1 text-xs text-cyan-200">
+                    Source: {note.sourceLabel}
+                  </p>
+                ) : null}
                 <div className="mt-4 flex items-center justify-between gap-3 border-t border-white/[0.06] pt-3">
-                  <span className="text-xs text-slate-500">{note.createdAt ? new Date(note.createdAt).toLocaleDateString() : "Saved note"}</span>
+                  <span className="text-xs text-slate-500">
+                    {note.createdAt
+                      ? new Date(note.createdAt).toLocaleDateString()
+                      : "Saved note"}
+                  </span>
                   <button
                     type="button"
                     onClick={() => setSelectedNote(note)}
@@ -242,7 +367,9 @@ export function FilesBrowser({ files, notes }: { files: FileItem[]; notes: NoteI
 
       {selectedNote ? (
         <StudyNoteEditor
-          key={selectedNote.id ?? selectedNote.metadata?.generated_at ?? "new-note"}
+          key={
+            selectedNote.id ?? selectedNote.metadata?.generated_at ?? "new-note"
+          }
           draft={selectedNote}
           onChange={setSelectedNote}
           onClose={() => setSelectedNote(null)}

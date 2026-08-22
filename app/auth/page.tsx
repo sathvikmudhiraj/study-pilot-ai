@@ -25,6 +25,14 @@ export default async function AuthPage() {
         <div className="absolute bottom-0 left-0 h-[400px] w-[400px] rounded-full bg-cyan-500/[0.03] blur-[100px]" />
       </div>
 
+      <Link
+        href="/"
+        className="absolute left-4 top-4 z-10 inline-flex h-10 items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 text-sm font-semibold text-slate-300 shadow-lg shadow-black/20 backdrop-blur transition hover:border-emerald-400/30 hover:bg-emerald-400/10 hover:text-emerald-200 sm:left-6 sm:top-6"
+      >
+        <span aria-hidden="true">&larr;</span>
+        Back to home
+      </Link>
+
       <div className="relative w-full max-w-md animate-fade-in-up">
         {/* Logo */}
         <div className="mb-8 text-center">
