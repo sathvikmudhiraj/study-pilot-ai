@@ -104,9 +104,11 @@ export default function AdminAuditLogsPage() {
   }
 
   const notConfigured = data?.logs.length === 0 && data?.pagination.total === 0 && error === "Audit log storage is not configured.";
+  const totalLogs = data?.pagination.total ?? 0;
+  const resultLabel = totalLogs === 1 ? "1 log" : `${totalLogs} logs`;
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <PageHeader
         badge="Read-Only"
         title="Audit Logs"
@@ -121,66 +123,102 @@ export default function AdminAuditLogsPage() {
         />
       )}
 
-      <div className="flex flex-wrap items-end gap-4 mb-4">
-        <Select
-          id="action"
-          value={actionFilter}
-          onChange={(e) => { setActionFilter(e.target.value); handleFilterChange(); }}
-          className="w-[200px]"
-        >
-          <option value="">All Actions</option>
-          {ACTIONS.map((a) => <option key={a} value={a}>{a.replace(/_/g, " ")}</option>)}
-        </Select>
-
-        <Select
-          id="targetType"
-          value={targetTypeFilter}
-          onChange={(e) => { setTargetTypeFilter(e.target.value); handleFilterChange(); }}
-          className="w-[160px]"
-        >
-          <option value="">All Target Types</option>
-          {TARGET_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-        </Select>
-
-        <Select
-          id="result"
-          value={resultFilter}
-          onChange={(e) => { setResultFilter(e.target.value); handleFilterChange(); }}
-          className="w-[140px]"
-        >
-          <option value="">All Results</option>
-          {RESULTS.map((r) => <option key={r} value={r}>{r}</option>)}
-        </Select>
-
-        <div className="flex-1 min-w-[200px]">
-          <label htmlFor="requestId" className="sr-only">Request ID</label>
-          <input
-            id="requestId"
-            type="text"
-            value={requestIdFilter}
-            onChange={(e) => { setRequestIdFilter(e.target.value); handleFilterChange(); }}
-            placeholder="Filter by Request ID..."
-            className="h-11 w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-emerald-300/60"
-          />
+      <div className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-5 py-3 shadow-[0_18px_60px_rgba(0,0,0,0.16)]">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="text-sm font-semibold text-white">Audit filters</p>
+            <p className="text-xs text-slate-500">Review admin actions by category, target, result, request, or date.</p>
+          </div>
+          <span className="rounded-lg border border-white/10 bg-slate-950/60 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-300">
+            {resultLabel}
+          </span>
         </div>
 
-        <div className="flex gap-2">
-          <label htmlFor="since" className="sr-only">Since</label>
-          <input
-            id="since"
-            type="date"
-            value={sinceFilter}
-            onChange={(e) => { setSinceFilter(e.target.value); handleFilterChange(); }}
-            className="h-11 w-[160px] rounded-lg border border-white/10 bg-slate-950/70 px-3 text-sm text-slate-100 outline-none transition focus:border-emerald-300/60"
-          />
-          <label htmlFor="until" className="sr-only">Until</label>
-          <input
-            id="until"
-            type="date"
-            value={untilFilter}
-            onChange={(e) => { setUntilFilter(e.target.value); handleFilterChange(); }}
-            className="h-11 w-[160px] rounded-lg border border-white/10 bg-slate-950/70 px-3 text-sm text-slate-100 outline-none transition focus:border-emerald-300/60"
-          />
+        <div className="grid gap-3 lg:grid-cols-3 2xl:justify-center 2xl:grid-cols-[190px_170px_150px_360px_150px_150px]">
+          <div>
+            <label htmlFor="action" className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              Action
+            </label>
+            <Select
+              id="action"
+              value={actionFilter}
+              onChange={(e) => { setActionFilter(e.target.value); handleFilterChange(); }}
+              className="h-10 rounded-lg border-white/[0.08] bg-slate-950/75 text-sm font-medium text-slate-200 shadow-inner shadow-black/20 hover:border-white/[0.14]"
+            >
+              <option value="" className="bg-slate-950 text-slate-100">All actions</option>
+              {ACTIONS.map((a) => <option key={a} value={a} className="bg-slate-950 text-slate-100">{a.replace(/_/g, " ")}</option>)}
+            </Select>
+          </div>
+
+          <div>
+            <label htmlFor="targetType" className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              Target
+            </label>
+            <Select
+              id="targetType"
+              value={targetTypeFilter}
+              onChange={(e) => { setTargetTypeFilter(e.target.value); handleFilterChange(); }}
+              className="h-10 rounded-lg border-white/[0.08] bg-slate-950/75 text-sm font-medium text-slate-200 shadow-inner shadow-black/20 hover:border-white/[0.14]"
+            >
+              <option value="" className="bg-slate-950 text-slate-100">All targets</option>
+              {TARGET_TYPES.map((t) => <option key={t} value={t} className="bg-slate-950 text-slate-100">{t}</option>)}
+            </Select>
+          </div>
+
+          <div>
+            <label htmlFor="result" className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              Result
+            </label>
+            <Select
+              id="result"
+              value={resultFilter}
+              onChange={(e) => { setResultFilter(e.target.value); handleFilterChange(); }}
+              className="h-10 rounded-lg border-white/[0.08] bg-slate-950/75 text-sm font-medium text-slate-200 shadow-inner shadow-black/20 hover:border-white/[0.14]"
+            >
+              <option value="" className="bg-slate-950 text-slate-100">All results</option>
+              {RESULTS.map((r) => <option key={r} value={r} className="bg-slate-950 text-slate-100">{r}</option>)}
+            </Select>
+          </div>
+
+          <div className="min-w-0">
+            <label htmlFor="requestId" className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              Request ID
+            </label>
+            <input
+              id="requestId"
+              type="text"
+              value={requestIdFilter}
+              onChange={(e) => { setRequestIdFilter(e.target.value); handleFilterChange(); }}
+              placeholder="Filter by request ID..."
+              className="h-10 w-full rounded-lg border border-white/[0.08] bg-slate-950/75 px-3 text-sm font-medium text-slate-200 shadow-inner shadow-black/20 outline-none transition placeholder:text-slate-600 hover:border-white/[0.14] focus:border-emerald-300/60"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="since" className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              Since
+            </label>
+            <input
+              id="since"
+              type="date"
+              value={sinceFilter}
+              onChange={(e) => { setSinceFilter(e.target.value); handleFilterChange(); }}
+              className="h-10 w-full rounded-lg border border-white/[0.08] bg-slate-950/75 px-3 text-sm font-medium text-slate-200 shadow-inner shadow-black/20 outline-none transition hover:border-white/[0.14] focus:border-emerald-300/60"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="until" className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              Until
+            </label>
+            <input
+              id="until"
+              type="date"
+              value={untilFilter}
+              onChange={(e) => { setUntilFilter(e.target.value); handleFilterChange(); }}
+              className="h-10 w-full rounded-lg border border-white/[0.08] bg-slate-950/75 px-3 text-sm font-medium text-slate-200 shadow-inner shadow-black/20 outline-none transition hover:border-white/[0.14] focus:border-emerald-300/60"
+            />
+          </div>
         </div>
       </div>
 

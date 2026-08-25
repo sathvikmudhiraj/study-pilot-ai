@@ -24,10 +24,20 @@ function formatFileSize(bytes: number): string {
 
 function getStatusVariant(status: string): "ok" | "warning" | "error" | "unknown" {
   const s = status.toLowerCase();
-  if (s === "completed" || s === "processed" || s === "ready") return "ok";
+  if (s === "completed" || s === "processed" || s === "ready" || s === "extracted") return "ok";
   if (s === "processing" || s === "uploaded" || s === "pending") return "warning";
   if (s === "failed" || s === "error") return "error";
   return "unknown";
+}
+
+function formatCreatedAt(dateString: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(dateString));
 }
 
 export function AdminFilesTable({ files }: { files: AdminFile[] }) {
@@ -37,18 +47,20 @@ export function AdminFilesTable({ files }: { files: AdminFile[] }) {
         {
           key: "createdAt",
           header: "Created",
-          render: (row) => <span className="font-mono text-xs text-slate-300">{new Date(row.createdAt).toLocaleString()}</span>,
+          render: (row) => <span className="whitespace-nowrap text-xs font-medium text-slate-300">{formatCreatedAt(row.createdAt)}</span>,
           className: "whitespace-nowrap",
         },
         {
           key: "fileName",
           header: "File",
           render: (row) => (
-            <div className="flex items-center gap-2">
-              <IconFileText size={16} className="text-slate-400" />
+            <div className="flex items-center gap-3">
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-cyan-300/15 bg-cyan-300/10 text-cyan-200">
+                <IconFileText size={16} />
+              </span>
               <div>
-                <p className="text-slate-100 truncate max-w-xs">{row.fileName}</p>
-                <p className="text-xs text-slate-500 font-mono">{row.mimeType}</p>
+                <p className="max-w-xs truncate font-semibold text-slate-100">{row.fileName}</p>
+                <p className="font-mono text-xs text-slate-500">{row.mimeType}</p>
               </div>
             </div>
           ),
@@ -56,7 +68,7 @@ export function AdminFilesTable({ files }: { files: AdminFile[] }) {
         {
           key: "fileSize",
           header: "Size",
-          render: (row) => <span className="font-mono text-slate-300">{formatFileSize(row.fileSize)}</span>,
+          render: (row) => <span className="font-mono text-sm text-slate-300">{formatFileSize(row.fileSize)}</span>,
         },
         {
           key: "processingStatus",
@@ -88,6 +100,7 @@ export function AdminFilesTable({ files }: { files: AdminFile[] }) {
       keyAccessor={(row) => row.id}
       emptyMessage="No files found"
       emptyIcon={<IconFileText size={24} />}
+      compact
     />
   );
 }

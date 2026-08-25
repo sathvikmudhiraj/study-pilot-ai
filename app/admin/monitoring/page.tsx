@@ -194,7 +194,7 @@ function MonitoringError() {
   return (
     <div className="space-y-8">
       <PageHeader
-        badge="Read-Only"
+        badge="Durable"
         title="Monitoring"
         description="Live health, readiness, and AI provider configuration."
       />

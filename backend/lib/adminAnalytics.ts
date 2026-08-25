@@ -42,7 +42,7 @@ function stringList(value: unknown): string[] {
 async function getQuizAttemptsSummary(supabase: ReturnType<typeof createAdminSupabaseClient>) {
   const { data, error } = await supabase
     .from("quiz_attempts")
-    .select("percentage, total_questions, score, topic_results, weak_topics, strong_topics, created_at, language_code")
+    .select("percentage, total_questions, score, topic_results, weak_topics, strong_topics, created_at, quiz_id, quizzes!inner(language_code)")
     .limit(5000);
 
   if (error) throw new Error(`Failed to fetch quiz attempts: ${error.message}`);
@@ -101,7 +101,8 @@ export async function getAdminLearningAnalytics(): Promise<AdminQuizAnalytics> {
     totalPercentage += percentage;
     if (numeric(attempt.total_questions) > 0) completedCount += 1;
 
-    const lang = text(attempt.language_code) || "en";
+    const quizLang = (attempt.quizzes as Record<string, unknown> | null)?.language_code;
+    const lang = text(quizLang) || "en";
     languageCounts.set(lang, (languageCounts.get(lang) ?? 0) + 1);
 
     const topicResults = Array.isArray(attempt.topic_results) ? attempt.topic_results : [];

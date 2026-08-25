@@ -93,7 +93,8 @@ test.describe("focused E2E scenarios", () => {
     await page.goto("/settings");
     const preference = page.getByLabel("Preferred language");
     await expect(preference).toBeVisible();
-    await expect(preference.locator("option")).toHaveCount(8);
+    await preference.click();
+    await expect(page.getByRole("listbox", { name: "Preferred language" }).getByRole("option")).toHaveCount(8);
 
     await page.goto("/chat");
     await expect(page.getByLabel("Language").last()).toBeVisible();

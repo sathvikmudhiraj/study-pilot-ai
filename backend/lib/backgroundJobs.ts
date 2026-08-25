@@ -152,37 +152,43 @@ export async function claimNextBackgroundJob(workerId: string): Promise<Backgrou
     if (error) devLog("stale lock recovery failed", { jobId: staleJob.id, error: error.message });
   }
 
-  const next = await supabase
-    .from("background_jobs")
-    .select("*")
-    .in("status", ["queued", "retrying"])
-    .lte("next_run_at", now)
-    .order("next_run_at", { ascending: true })
-    .order("created_at", { ascending: true })
-    .limit(1)
-    .maybeSingle();
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const next = await supabase
+      .from("background_jobs")
+      .select("*")
+      .in("status", ["queued", "retrying"])
+      .lte("next_run_at", now)
+      .order("next_run_at", { ascending: true })
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
 
-  if (next.error) throw next.error;
-  if (!next.data) return null;
+    if (next.error) throw next.error;
+    if (!next.data) return null;
 
-  const job = next.data as BackgroundJobRow;
-  const claimed = await supabase
-    .from("background_jobs")
-    .update({
-      status: "processing",
-      locked_at: now,
-      locked_by: workerId,
-      started_at: job.started_at ?? now,
-      attempt_count: job.attempt_count + 1,
-      progress: { ...job.progress, stage: "processing", attempt: job.attempt_count + 1 },
-    })
-    .eq("id", job.id)
-    .in("status", ["queued", "retrying"])
-    .select()
-    .maybeSingle();
+    const job = next.data as BackgroundJobRow;
+    const claimed = await supabase
+      .from("background_jobs")
+      .update({
+        status: "processing",
+        locked_at: now,
+        locked_by: workerId,
+        started_at: job.started_at ?? now,
+        attempt_count: job.attempt_count + 1,
+        progress: { ...job.progress, stage: "processing", attempt: job.attempt_count + 1 },
+      })
+      .eq("id", job.id)
+      .in("status", ["queued", "retrying"])
+      .select()
+      .maybeSingle();
 
-  if (claimed.error) throw claimed.error;
-  return (claimed.data as BackgroundJobRow | null) ?? null;
+    if (claimed.error) throw claimed.error;
+    if (claimed.data) return claimed.data as BackgroundJobRow;
+
+    await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+  }
+
+  return null;
 }
 
 export async function updateBackgroundJobProgress(jobId: string, progress: Record<string, unknown>) {

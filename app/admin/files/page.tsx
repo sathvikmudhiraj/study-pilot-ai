@@ -75,6 +75,8 @@ export default function AdminFilesPage() {
   const uniqueStatuses = [...new Set(statuses)];
   const types = data?.files.map((f) => f.fileType).filter(Boolean) ?? [];
   const uniqueTypes = [...new Set(types)];
+  const totalFiles = data?.pagination.total ?? 0;
+  const resultLabel = totalFiles === 1 ? "1 file" : `${totalFiles} files`;
 
   if (loading && !data) {
     return (
@@ -95,48 +97,75 @@ export default function AdminFilesPage() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <PageHeader
         badge="Read-Only"
         title="File Operations"
         description="Inspect file metadata across the platform. No extracted text, private URLs, or raw content."
       />
 
-      <form onSubmit={handleSearch} className="flex flex-wrap items-end gap-4">
-        <div className="flex-1 min-w-[200px]">
-          <label htmlFor="search" className="sr-only">Search files</label>
-          <div className="relative">
-            <IconSearch size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" aria-hidden="true" />
-            <input
-              id="search"
-              type="search"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search by file name..."
-              className="h-11 w-full rounded-lg border border-white/10 bg-slate-950/70 pl-10 pr-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-emerald-300/60"
-            />
+      <form
+        onSubmit={handleSearch}
+        className="rounded-xl border border-white/[0.08] bg-white/[0.035] px-5 py-4 shadow-[0_18px_60px_rgba(0,0,0,0.18)]"
+      >
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="text-sm font-semibold text-white">File inventory</p>
+            <p className="text-xs text-slate-500">Filter uploaded study files by name, status, or type.</p>
           </div>
+          <span className="rounded-lg border border-white/10 bg-slate-950/60 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-300">
+            {resultLabel}
+          </span>
         </div>
 
-        <Select
-          id="status"
-          value={statusFilter}
-          onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}
-          className="w-[180px]"
-        >
-          <option value="">All Statuses</option>
-          {uniqueStatuses.map((s) => <option key={s} value={s}>{s}</option>)}
-        </Select>
+        <div className="grid gap-3 lg:grid-cols-3 xl:grid-cols-[minmax(260px,1fr)_190px_190px]">
+          <div className="min-w-0 flex-1">
+            <label htmlFor="search" className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Search
+            </label>
+            <div className="relative">
+              <IconSearch size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" aria-hidden="true" />
+              <input
+                id="search"
+                type="search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search by file name..."
+                className="h-10 w-full rounded-lg border border-white/10 bg-slate-950/70 pl-10 pr-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-emerald-300/60"
+              />
+            </div>
+          </div>
 
-        <Select
-          id="type"
-          value={typeFilter}
-          onChange={(e) => { setTypeFilter(e.target.value); setPage(1); }}
-          className="w-[180px]"
-        >
-          <option value="">All Types</option>
-          {uniqueTypes.map((t) => <option key={t} value={t}>{t}</option>)}
-        </Select>
+          <div className="w-full">
+            <label htmlFor="status" className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Status
+            </label>
+            <Select
+              id="status"
+              value={statusFilter}
+              onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}
+              className="h-10 rounded-xl border-white/[0.08] bg-slate-950/80 text-sm font-medium text-slate-200 shadow-inner shadow-black/20 hover:border-white/[0.14]"
+            >
+              <option value="" className="bg-slate-950 text-slate-100">All statuses</option>
+              {uniqueStatuses.map((s) => <option key={s} value={s} className="bg-slate-950 text-slate-100">{s}</option>)}
+            </Select>
+          </div>
+
+          <div className="w-full">
+            <label htmlFor="type" className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Type
+            </label>
+            <Select
+              id="type"
+              value={typeFilter}
+              onChange={(e) => { setTypeFilter(e.target.value); setPage(1); }}
+              className="h-10 rounded-xl border-white/[0.08] bg-slate-950/80 text-sm font-medium text-slate-200 shadow-inner shadow-black/20 hover:border-white/[0.14]"
+            >
+              <option value="" className="bg-slate-950 text-slate-100">All types</option>
+              {uniqueTypes.map((t) => <option key={t} value={t} className="bg-slate-950 text-slate-100">{t}</option>)}
+            </Select>
+          </div>
+        </div>
       </form>
 
       {data?.files.length ? (

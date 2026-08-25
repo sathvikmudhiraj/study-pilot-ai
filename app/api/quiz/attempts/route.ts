@@ -119,7 +119,7 @@ async function handlePost(request: Request) {
 
   const quizResult = await supabase
     .from("quizzes")
-    .select("id, file_id, questions, answer_key")
+    .select("id, file_id, questions, answer_key, language_code")
     .eq("id", quizId)
     .eq("user_id", user.id)
     .maybeSingle();
@@ -147,6 +147,7 @@ async function handlePost(request: Request) {
     .insert({
       user_id: user.id,
       quiz_id: quizId,
+      language_code: quizResult.data?.language_code ?? "en",
       ...graded,
     })
     .select("id, quiz_id, score, total_questions, percentage, wrong_questions, weak_topics, strong_topics, created_at")

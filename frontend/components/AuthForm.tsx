@@ -4,6 +4,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { createBrowserSupabaseClient } from "@/frontend/lib/supabase/browser";
 import { Field, inputClass } from "./ui";
+import { IconEye, IconEyeOff } from "./icons";
 
 function safeReturnPath(value: string | null) {
   if (!value) return "/dashboard";
@@ -52,6 +53,7 @@ export function AuthForm({
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
@@ -266,23 +268,34 @@ export function AuthForm({
           ) : null}
 
           <Field label="Password">
-            <input
-              key={`pw-${mode}-${isReauth ? "reauth" : "anon"}`}
-              className={inputClass}
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              type="password"
-              required
-              minLength={6}
-              placeholder={
-                mode === "signup"
-                  ? "At least 6 characters"
-                  : "Enter your password"
-              }
-              autoComplete={
-                mode === "login" ? "current-password" : "new-password"
-              }
-            />
+            <div className="relative">
+              <input
+                key={`pw-${mode}-${isReauth ? "reauth" : "anon"}`}
+                className={`${inputClass} pr-11`}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                type={showPassword ? "text" : "password"}
+                required
+                minLength={6}
+                placeholder={
+                  mode === "signup"
+                    ? "At least 6 characters"
+                    : "Enter your password"
+                }
+                autoComplete={
+                  mode === "login" ? "current-password" : "new-password"
+                }
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((prev) => !prev)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070b14] rounded p-1"
+                aria-label={showPassword ? "Hide characters" : "Show characters"}
+                aria-pressed={showPassword}
+              >
+                {showPassword ? <IconEyeOff size={18} /> : <IconEye size={18} />}
+              </button>
+            </div>
           </Field>
 
           {error ? (

@@ -282,6 +282,7 @@ create table if not exists public.quiz_attempts (
   weak_topics jsonb not null default '[]'::jsonb,
   strong_topics jsonb not null default '[]'::jsonb,
   topic_results jsonb not null default '[]'::jsonb,
+  language_code text not null default 'en',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -296,6 +297,7 @@ alter table public.quiz_attempts add column if not exists wrong_questions jsonb 
 alter table public.quiz_attempts add column if not exists weak_topics jsonb default '[]'::jsonb;
 alter table public.quiz_attempts add column if not exists strong_topics jsonb default '[]'::jsonb;
 alter table public.quiz_attempts add column if not exists topic_results jsonb default '[]'::jsonb;
+alter table public.quiz_attempts add column if not exists language_code text default 'en';
 alter table public.quiz_attempts add column if not exists created_at timestamptz default now();
 alter table public.quiz_attempts add column if not exists updated_at timestamptz default now();
 update public.quiz_attempts
@@ -308,6 +310,7 @@ set
   weak_topics = coalesce(weak_topics, '[]'::jsonb),
   strong_topics = coalesce(strong_topics, '[]'::jsonb),
   topic_results = coalesce(topic_results, '[]'::jsonb),
+  language_code = coalesce(language_code, 'en'),
   created_at = coalesce(created_at, now()),
   updated_at = coalesce(updated_at, now())
 where
@@ -319,6 +322,7 @@ where
   or weak_topics is null
   or strong_topics is null
   or topic_results is null
+  or language_code is null
   or created_at is null
   or updated_at is null;
 alter table public.quiz_attempts alter column user_id set not null;
@@ -331,6 +335,7 @@ alter table public.quiz_attempts alter column wrong_questions set not null;
 alter table public.quiz_attempts alter column weak_topics set not null;
 alter table public.quiz_attempts alter column strong_topics set not null;
 alter table public.quiz_attempts alter column topic_results set not null;
+alter table public.quiz_attempts alter column language_code set not null;
 alter table public.quiz_attempts alter column created_at set not null;
 alter table public.quiz_attempts alter column updated_at set not null;
 
@@ -588,6 +593,7 @@ create index if not exists ai_outputs_user_id_idx on public.ai_outputs(user_id);
 create index if not exists quizzes_user_id_idx on public.quizzes(user_id);
 create index if not exists quiz_attempts_user_id_idx on public.quiz_attempts(user_id);
 create index if not exists quiz_attempts_quiz_id_idx on public.quiz_attempts(quiz_id);
+create index if not exists quiz_attempts_language_code_idx on public.quiz_attempts(language_code);
 create index if not exists revision_plans_user_id_idx on public.revision_plans(user_id);
 create index if not exists assistant_questions_user_id_idx on public.assistant_questions(user_id);
 
@@ -671,18 +677,21 @@ alter table public.assistant_questions add column if not exists language_code te
 alter table public.ai_outputs add column if not exists language_code text default 'en';
 alter table public.quizzes add column if not exists language_code text default 'en';
 alter table public.revision_plans add column if not exists language_code text default 'en';
+alter table public.quiz_attempts add column if not exists language_code text default 'en';
 
 update public.conversations set language_code = 'en' where language_code is null;
 update public.assistant_questions set language_code = 'en' where language_code is null;
 update public.ai_outputs set language_code = 'en' where language_code is null;
 update public.quizzes set language_code = 'en' where language_code is null;
 update public.revision_plans set language_code = 'en' where language_code is null;
+update public.quiz_attempts set language_code = 'en' where language_code is null;
 
 alter table public.conversations alter column language_code set default 'en', alter column language_code set not null;
 alter table public.assistant_questions alter column language_code set default 'en', alter column language_code set not null;
 alter table public.ai_outputs alter column language_code set default 'en', alter column language_code set not null;
 alter table public.quizzes alter column language_code set default 'en', alter column language_code set not null;
 alter table public.revision_plans alter column language_code set default 'en', alter column language_code set not null;
+alter table public.quiz_attempts alter column language_code set default 'en', alter column language_code set not null;
 
 alter table public.conversations drop constraint if exists conversations_language_code_check;
 alter table public.conversations add constraint conversations_language_code_check check (language_code in ('en', 'hi', 'te', 'ta', 'kn', 'ml', 'mr', 'bn'));
@@ -694,11 +703,14 @@ alter table public.quizzes drop constraint if exists quizzes_language_code_check
 alter table public.quizzes add constraint quizzes_language_code_check check (language_code in ('en', 'hi', 'te', 'ta', 'kn', 'ml', 'mr', 'bn'));
 alter table public.revision_plans drop constraint if exists revision_plans_language_code_check;
 alter table public.revision_plans add constraint revision_plans_language_code_check check (language_code in ('en', 'hi', 'te', 'ta', 'kn', 'ml', 'mr', 'bn'));
+alter table public.quiz_attempts drop constraint if exists quiz_attempts_language_code_check;
+alter table public.quiz_attempts add constraint quiz_attempts_language_code_check check (language_code in ('en', 'hi', 'te', 'ta', 'kn', 'ml', 'mr', 'bn'));
 
 create index if not exists conversations_user_language_updated_idx on public.conversations(user_id, language_code, updated_at desc);
 create index if not exists assistant_questions_user_language_created_idx on public.assistant_questions(user_id, language_code, created_at desc);
 create index if not exists ai_outputs_user_language_created_idx on public.ai_outputs(user_id, language_code, created_at desc);
 create index if not exists quizzes_user_language_created_idx on public.quizzes(user_id, language_code, created_at desc);
 create index if not exists revision_plans_user_language_created_idx on public.revision_plans(user_id, language_code, created_at desc);
+create index if not exists quiz_attempts_user_language_created_idx on public.quiz_attempts(user_id, language_code, created_at desc);
 
 notify pgrst, 'reload schema';

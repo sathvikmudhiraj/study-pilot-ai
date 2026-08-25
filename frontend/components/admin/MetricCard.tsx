@@ -16,7 +16,7 @@ export function MetricCard({
   trend?: { value: string; positive: boolean };
 }) {
   return (
-    <div className="rounded-xl border border-white/[0.08] bg-white/[0.04] p-5">
+    <div className="admin-surface-motion group rounded-xl border border-white/[0.08] bg-white/[0.04] p-5">
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 truncate">{label}</p>
@@ -31,7 +31,7 @@ export function MetricCard({
         </div>
         {icon ? (
           <span
-            className="shrink-0 grid h-10 w-10 place-items-center rounded-lg border border-white/10 bg-white/[0.04] text-emerald-300"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-lg border border-white/10 bg-white/[0.04] text-emerald-300 transition-colors duration-200 group-hover:border-emerald-300/20 group-hover:bg-emerald-300/10"
             aria-hidden="true"
           >
             {icon}

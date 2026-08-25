@@ -448,6 +448,22 @@ select {
   animation: shimmer 2s ease-in-out infinite;
 }
 
+/* Admin UI polish: restrained motion for operational screens. */
+.admin-surface-motion {
+  animation: fadeInUp 0.38s var(--animate-ease-out) both;
+  transition:
+    transform 180ms ease,
+    border-color 180ms ease,
+    background-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.admin-surface-motion:hover {
+  transform: translateY(-1px);
+  border-color: rgba(148, 163, 184, 0.2);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.22);
+}
+
 /* Staggered children delays */
 .stagger-children > *:nth-child(1) {
   animation-delay: 0ms;

@@ -32,8 +32,8 @@ async function authorizeWorker(request: Request) {
 
 export async function GET(request: Request) {
   return withRequestObservability(request, "/api/jobs/worker", async () => {
-    const auth = await authorizeWorker(request);
-    if (!auth.ok) return NextResponse.json({ error: auth.message }, { status: auth.status });
+    const admin = await requireAdmin();
+    if (!admin.ok) return NextResponse.json({ error: admin.message }, { status: admin.status });
     const jobs = await readBackgroundJobs(25);
     return NextResponse.json({
       secretConfigured: workerSecretConfigured(),

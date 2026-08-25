@@ -47,7 +47,7 @@ export function DataTable<T>({
   }
 
   return (
-    <div className={`overflow-x-auto rounded-xl border border-white/[0.08] bg-white/[0.03] ${className}`}>
+    <div className={`admin-surface-motion overflow-x-auto rounded-xl border border-white/[0.08] bg-white/[0.03] ${className}`}>
       <table className="w-full border-collapse" role="table">
         <thead>
           <tr className="border-b border-white/[0.08]">
@@ -67,7 +67,7 @@ export function DataTable<T>({
           {data.map((row, rowIndex) => (
             <tr
               key={keyAccessor(row)}
-              className={`${hoverable ? "transition-colors hover:bg-white/[0.03]" : ""} ${striped && rowIndex % 2 === 1 ? "bg-white/[0.02]" : ""}`}
+              className={`${hoverable ? "transition-colors duration-150 hover:bg-emerald-300/[0.035]" : ""} ${striped && rowIndex % 2 === 1 ? "bg-white/[0.02]" : ""}`}
             >
               {columns.map((column) => (
                 <td
