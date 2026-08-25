@@ -80,6 +80,8 @@ export async function readAuditLogs(
     action?: AuditAction;
     targetType?: AuditTargetType;
     targetId?: string;
+    result?: AuditResult;
+    requestId?: string;
     actorUserId?: string;
     since?: Date;
     until?: Date;
@@ -98,6 +100,8 @@ export async function readAuditLogs(
     if (options.action) query = query.eq("action", options.action);
     if (options.targetType) query = query.eq("target_type", options.targetType);
     if (options.targetId) query = query.eq("target_id", options.targetId);
+    if (options.result) query = query.eq("result", options.result);
+    if (options.requestId) query = query.eq("request_id", options.requestId);
     if (options.actorUserId) query = query.eq("actor_user_id", options.actorUserId);
     if (options.since) query = query.gte("created_at", options.since.toISOString());
     if (options.until) query = query.lte("created_at", options.until.toISOString());

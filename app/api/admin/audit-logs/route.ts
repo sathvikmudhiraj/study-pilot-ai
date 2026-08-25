@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/backend/lib/auth";
-import { readAuditLogs, hasAdminSupabaseEnv, AuditAction, AuditTargetType } from "@/backend/lib/auditLog";
+import { readAuditLogs, hasAdminSupabaseEnv, AuditAction, AuditResult, AuditTargetType } from "@/backend/lib/auditLog";
 import { withRequestObservability } from "@/backend/lib/observability";
 
 export const runtime = "nodejs";
@@ -39,7 +39,8 @@ export async function GET(request: Request = new Request("http://localhost/api/a
         offset: (page - 1) * limit,
         action: action as AuditAction | undefined,
         targetType: targetType as AuditTargetType | undefined,
-        targetId: requestId,
+        result: result as AuditResult | undefined,
+        requestId,
         actorUserId: undefined,
         since,
         until,

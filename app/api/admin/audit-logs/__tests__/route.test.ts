@@ -86,7 +86,8 @@ describe("admin audit-logs API authorization", () => {
     expect(mocks.readAuditLogs).toHaveBeenCalledWith("admin-1", expect.objectContaining({
       action: "user_suspend",
       targetType: "user",
-      targetId: "req-123",
+      result: "success",
+      requestId: "req-123",
       since: expect.any(Date),
       until: expect.any(Date),
     }));

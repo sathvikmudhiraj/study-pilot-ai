@@ -151,6 +151,8 @@ describe("Audit Log", () => {
         action: "user_suspend",
         targetType: "user",
         targetId: "user-123",
+        result: "success",
+        requestId: "req-123",
         actorUserId: "admin-1",
         since: new Date("2024-01-01"),
         until: new Date("2024-12-31"),
@@ -161,6 +163,8 @@ describe("Audit Log", () => {
       expect(mocks.from).toHaveBeenCalledWith("audit_logs");
       expect(mocks.select).toHaveBeenCalledWith("*");
       expect(mocks.order).toHaveBeenCalledWith("created_at", { ascending: false });
+      expect(mocks.eq).toHaveBeenCalledWith("result", "success");
+      expect(mocks.eq).toHaveBeenCalledWith("request_id", "req-123");
     });
 
     it("returns error when admin env not configured", async () => {
