@@ -2,11 +2,29 @@
 
 StudyPilot AI is a Next.js App Router learning workspace with Supabase authentication, private uploads, notes, summaries, quizzes, revision plans, AI chat, and protected routes.
 
-## IBM Bob Usage
+## Hackathon Submission Content
 
-IBM Bob was used in StudyPilot AI as a development-time engineering assistant for debugging, code review, validation, and production-readiness review. It was not used as the student-facing runtime AI model.
+### Problem Statement and Solution
 
-During development, IBM Bob helped inspect implementation issues, analyze errors and code paths, review API and authentication behavior, identify edge cases, and act as a second reviewer before fixes were accepted. It supported review work across admin APIs, analytics, audit-log filtering, authentication flows, persistence, storage behavior, and end-to-end application workflows.
+StudyPilot AI addresses a common student problem: learning material is scattered across PDFs, slides, screenshots, notes, and documents, while revision remains manual and unstructured. Students often spend more time organizing material than actually learning it. Repeated passive rereading reduces active recall, generic chatbots do not understand a student's own notes, and exam preparation frequently becomes last-minute and stressful.
+
+StudyPilot AI solves this by bringing the complete study workflow into one personalized workspace. Students can upload their study material, after which the system extracts and processes the content and generates concise summaries, key points, important questions, MCQ quizzes, contextual Ask My Notes responses, and revision plans. The outputs remain connected to the student's own material, making the assistance more relevant than a generic chatbot.
+
+The workflow is:
+
+```text
+Upload -> Extract -> Generate -> Practice -> Revise
+```
+
+The platform uses authenticated per-user storage and database access so each student's files and generated outputs remain isolated. Quiz attempts, revision plans, summaries, and conversations are persisted so learning can continue across sessions.
+
+The objective is to reduce the gap between "I have notes" and "I am ready for the exam" by turning passive study material into an active, repeatable learning loop.
+
+### Technology Used: IBM Bob
+
+IBM Bob was used in StudyPilot AI as a development-time engineering assistant, mainly for debugging, code review, validation, and production-readiness review. It was not used as the student-facing runtime AI model.
+
+During development, IBM Bob was used to inspect implementation issues, analyze errors and code paths, review API and authentication behavior, identify edge cases, and act as a second reviewer before fixes were accepted. It helped review areas such as admin APIs, analytics, audit-log filtering, authentication flows, persistence, storage behavior, and end-to-end application workflows.
 
 The development workflow followed this pattern:
 
@@ -16,7 +34,7 @@ Build / Modify Feature -> IBM Bob Review -> Identify Bug or Edge Case -> Debug /
 
 IBM Bob was also used to validate whether a proposed fix addressed the root cause without introducing unrelated changes. After fixes were made, the project was verified using linting, TypeScript checks, unit tests, Playwright end-to-end tests, production builds, and Git diff checks.
 
-In summary, IBM Bob strengthened the StudyPilot AI engineering process through debugging, review, validation, and production-readiness support. The actual student-facing AI functionality remains handled by the application's configured AI providers and application logic.
+This made IBM Bob useful as a debugger, code reviewer, second reviewer for fixes, issue and edge-case identifier, and production-readiness support tool. The actual student-facing AI functionality in StudyPilot AI remains handled by the application's configured AI providers and application logic.
 
 ## Environment
 
