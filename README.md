@@ -2,6 +2,22 @@
 
 StudyPilot AI is a Next.js App Router learning workspace with Supabase authentication, private uploads, notes, summaries, quizzes, revision plans, AI chat, and protected routes.
 
+## IBM Bob Usage
+
+IBM Bob was used in StudyPilot AI as a development-time engineering assistant for debugging, code review, validation, and production-readiness review. It was not used as the student-facing runtime AI model.
+
+During development, IBM Bob helped inspect implementation issues, analyze errors and code paths, review API and authentication behavior, identify edge cases, and act as a second reviewer before fixes were accepted. It supported review work across admin APIs, analytics, audit-log filtering, authentication flows, persistence, storage behavior, and end-to-end application workflows.
+
+The development workflow followed this pattern:
+
+```text
+Build / Modify Feature -> IBM Bob Review -> Identify Bug or Edge Case -> Debug / Fix -> Run Tests -> Final Review
+```
+
+IBM Bob was also used to validate whether a proposed fix addressed the root cause without introducing unrelated changes. After fixes were made, the project was verified using linting, TypeScript checks, unit tests, Playwright end-to-end tests, production builds, and Git diff checks.
+
+In summary, IBM Bob strengthened the StudyPilot AI engineering process through debugging, review, validation, and production-readiness support. The actual student-facing AI functionality remains handled by the application's configured AI providers and application logic.
+
 ## Environment
 
 Create `.env.local` from `.env.example`. Keep all provider keys server-side and never commit real secrets.
