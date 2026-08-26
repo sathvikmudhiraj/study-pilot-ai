@@ -12,14 +12,29 @@ export function requireE2EEnv() {
   );
 }
 
-export async function login(page: Page) {
-  requireE2EEnv();
+export async function openLoginForm(page: Page) {
   await page.goto("/auth?mode=login");
 
+  const loginForm = page.locator("form").filter({
+    has: page.getByRole("button", { name: /^log in$/i }),
+  });
   const alreadySignedIn = page.getByRole("heading", {
     name: /you are already signed in/i,
   });
-  if (await alreadySignedIn.isVisible().catch(() => false)) {
+
+  const authState = await Promise.race([
+    loginForm
+      .getByLabel("Email")
+      .waitFor({ state: "visible", timeout: 10_000 })
+      .then(() => "login-form" as const)
+      .catch(() => null),
+    alreadySignedIn
+      .waitFor({ state: "visible", timeout: 10_000 })
+      .then(() => "already-signed-in" as const)
+      .catch(() => null),
+  ]);
+
+  if (authState === "already-signed-in") {
     await page
       .getByRole("button", { name: /sign out and use another account/i })
       .click();
@@ -27,12 +42,17 @@ export async function login(page: Page) {
     await page.goto("/auth?mode=login");
   }
 
-  await page.getByLabel("Email").fill(e2eEnv.email);
-  await page.getByLabel("Password").fill(e2eEnv.password);
-  await page
-    .locator("form")
-    .getByRole("button", { name: /^log in$/i })
-    .click();
+  await expect(loginForm.getByLabel("Email")).toBeVisible();
+  return loginForm;
+}
+
+export async function login(page: Page) {
+  requireE2EEnv();
+  const loginForm = await openLoginForm(page);
+
+  await loginForm.getByLabel("Email").fill(e2eEnv.email);
+  await loginForm.getByLabel("Password").fill(e2eEnv.password);
+  await loginForm.getByRole("button", { name: /^log in$/i }).click();
   await expect(
     page,
     "login should create a Supabase session and redirect to the dashboard",

@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { login, logout, requireE2EEnv } from "./helpers";
+import { login, logout, openLoginForm, requireE2EEnv } from "./helpers";
 
 test.describe("authentication", () => {
   test("redirects protected routes to auth when signed out", async ({
@@ -47,19 +47,12 @@ test.describe("authentication", () => {
       },
     );
 
-    await page.goto("/auth?mode=login");
-    const email = page.getByLabel("Email");
-    test.skip(
-      !(await email.isVisible().catch(() => false)),
-      "Auth form is in re-auth mode or Supabase is not configured.",
-    );
+    const loginForm = await openLoginForm(page);
+    const email = loginForm.getByLabel("Email");
 
     await email.fill("invalid-e2e-user@example.test");
-    await page.getByLabel("Password").fill("wrong-password");
-    await page
-      .locator("form")
-      .getByRole("button", { name: /^log in$/i })
-      .click();
+    await loginForm.getByLabel("Password").fill("wrong-password");
+    await loginForm.getByRole("button", { name: /^log in$/i }).click();
     await expect(
       page.getByText(/invalid|not configured|confirm/i),
     ).toBeVisible();

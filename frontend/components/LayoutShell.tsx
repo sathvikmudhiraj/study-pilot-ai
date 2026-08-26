@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useEffect, useCallback, useRef, type ReactNode } from "react";
 import { useInactivityLock } from "@/frontend/lib/useInactivityLock";
+import { createBrowserSupabaseClient } from "@/frontend/lib/supabase/browser";
 import {
   IconDashboard,
   IconUpload,
@@ -86,7 +87,18 @@ export function LayoutShell({
       return;
     }
 
-    await fetch("/api/auth/logout", { method: "POST" });
+    try {
+      await createBrowserSupabaseClient().auth.signOut();
+    } catch {
+      // Server logout below still clears the cookie when Supabase browser config is unavailable.
+    }
+
+    try {
+      await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
+    } catch {
+      // Keep logout navigation reliable even if the network request is interrupted.
+    }
+
     window.location.assign("/");
   }, [onSignOut]);
 

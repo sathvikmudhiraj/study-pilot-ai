@@ -3,7 +3,9 @@ import { loadEnvConfig } from "@next/env";
 
 loadEnvConfig(process.cwd());
 
-const baseURL = process.env.STUDYPILOT_E2E_BASE_URL || "http://localhost:3000";
+const e2ePort = process.env.STUDYPILOT_E2E_PORT || "3210";
+const baseURL =
+  process.env.STUDYPILOT_E2E_BASE_URL || `http://127.0.0.1:${e2ePort}`;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -24,9 +26,9 @@ export default defineConfig({
   webServer: process.env.STUDYPILOT_E2E_BASE_URL
     ? undefined
     : {
-        command: "npm run dev",
+        command: `npm run dev -- --hostname 127.0.0.1 --port ${e2ePort}`,
         url: baseURL,
-        reuseExistingServer: true,
+        reuseExistingServer: false,
         timeout: 120_000,
       },
   projects: [
