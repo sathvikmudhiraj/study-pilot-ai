@@ -10,6 +10,9 @@ Set these server environment variables:
 STUDYPILOT_MONITORING_WEBHOOK_URL=
 STUDYPILOT_ENVIRONMENT=production
 STUDYPILOT_RELEASE=<git-sha-or-release-id>
+STUDYPILOT_ALERT_COOLDOWN_MS=900000
+STUDYPILOT_CRITICAL_ERROR_WINDOW_MS=300000
+STUDYPILOT_CRITICAL_ERROR_THRESHOLD=3
 ```
 
 The webhook payload contains sanitized operational metadata only:
@@ -24,6 +27,27 @@ The webhook payload contains sanitized operational metadata only:
 
 It must not include prompts, student notes, answers, emails, API keys, tokens, signed URLs, or storage paths.
 
+## Direct Alerts
+
+When configured, StudyPilot sends direct webhook alerts for production-relevant failures while still recording durable `monitoring_events`.
+
+Direct alert categories:
+
+- `readiness_failed`
+- `database_unhealthy`
+- `storage_unhealthy`
+- `ai_provider_unhealthy`
+- `ai_configuration_invalid`
+- `critical_errors_repeated`
+
+Webhook delivery failures are recorded as operational events when possible and must never crash application requests or health checks.
+
+## Repeated Error Thresholds
+
+Repeated critical application failures are detected from recent `monitoring_events`. By default, StudyPilot alerts after 3 matching `request.failed` events within 5 minutes.
+
+To avoid noise, alerts with the same fingerprint are suppressed for 15 minutes by default. The fingerprint is based on the route, method, error category, and alert type. A later incident after the cooldown can alert again.
+
 ## Uptime Monitoring
 
 Use:
@@ -31,7 +55,7 @@ Use:
 - `/api/health/live` for process liveness.
 - `/api/health/ready` for dependency readiness.
 
-External uptime checks should alert on repeated readiness failures, not a single transient failure.
+StudyPilot can send direct readiness/dependency alerts from these checks. External uptime checks should still monitor hosted availability and alert on repeated failures from outside the app process.
 
 ## Recommended Alerts
 

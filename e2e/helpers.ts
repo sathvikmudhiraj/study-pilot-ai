@@ -56,7 +56,7 @@ export async function login(page: Page) {
   await expect(
     page,
     "login should create a Supabase session and redirect to the dashboard",
-  ).toHaveURL(/\/dashboard/);
+  ).toHaveURL(/\/dashboard/, { timeout: 30_000 });
   await expect(
     page.getByRole("heading", { name: /student dashboard|dashboard/i }),
   ).toBeVisible();

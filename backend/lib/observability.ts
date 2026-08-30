@@ -228,6 +228,8 @@ export type RequestLogger = ReturnType<typeof createRequestLogger>;
 type RequestContext = {
   requestId: RequestId;
   logger: RequestLogger;
+  route: string;
+  method: string;
 };
 
 const requestContext = new AsyncLocalStorage<RequestContext>();
@@ -241,7 +243,7 @@ export async function withRequestObservability<T extends Response>(
   const logger = createRequestLogger(requestId, route, request.method);
   const startedAt = Date.now();
 
-  return requestContext.run({ requestId, logger }, async () => {
+  return requestContext.run({ requestId, logger, route, method: request.method }, async () => {
     logger.info("request.started");
     persistMonitoringEvent({
       requestId,
@@ -250,7 +252,7 @@ export async function withRequestObservability<T extends Response>(
       method: request.method,
     });
     try {
-      const response = await handler({ requestId, logger });
+      const response = await handler({ requestId, logger, route, method: request.method });
       response.headers.set(REQUEST_ID_HEADER, requestId);
       const durationMs = Date.now() - startedAt;
       logger.withDuration({ status: response.status }).info("request.completed");
@@ -287,6 +289,18 @@ export async function withRequestObservability<T extends Response>(
         status: 500,
         metadata: { durationMs },
       });
+      void import("./alerting")
+        .then(({ alertRepeatedCriticalError }) => alertRepeatedCriticalError({
+          requestId,
+          route,
+          method: request.method,
+          status: 500,
+          errorCategory: sanitizedError.category,
+          metadata: { durationMs },
+        }))
+        .catch(() => {
+          // Alerting must never change request failure behavior.
+        });
       throw error;
     }
   });
@@ -335,6 +349,28 @@ export function logProviderTelemetry(event: ProviderTelemetryLogEvent): void {
       operation: `ai.${event.event}`,
     },
   });
+  if (event.event === "provider_failed") {
+    void import("./alerting")
+      .then(({ alertDependencyFailure }) => alertDependencyFailure({
+        category: "ai_provider_unhealthy",
+        requestId: context.requestId,
+        route: context.route,
+        method: context.method,
+        status: null,
+        provider: event.provider,
+        model: event.model,
+        errorCategory: event.errorKind ?? "provider_failed",
+        metadata: {
+          aiEvent: event.event,
+          durationMs: event.durationMs,
+          retryCount: event.retryCount,
+          fallbackTriggered: event.fallbackTriggered,
+        },
+      }))
+      .catch(() => {
+        // Provider alerting must never affect AI response handling.
+      });
+  }
 }
 
 export function sanitizeError(error: unknown): { message: string; category: string } {

@@ -403,7 +403,31 @@ ${text}`;
 
   devLog("AI quiz response received", { rawLength: response.length });
 
-  const parsed = tryParseJson(response);
+  let parsed = tryParseJson(response);
+  if (!parsed) {
+    devLog("AI quiz JSON repair started", { rawLength: response.length });
+    const repairedResponse = await generateAIText(
+      `Repair the quiz payload below into one complete, valid JSON object.
+Return JSON only, with no markdown or commentary. Preserve the original language and facts.
+The object must contain title, source_summary, difficulty, and a questions array.
+Each MCQ needs type, topic_id, topic_en, topic, question, options, correct_index, and explanation.
+Each short-answer question needs type, topic_id, topic_en, topic, question, acceptable_answers, and explanation.
+Discard an incomplete trailing question rather than inventing missing facts.
+
+PAYLOAD TO REPAIR:
+${response}`,
+      {
+        temperature: 0.1,
+        maxOutputTokens: Math.min(1600 + count * 300, 5200),
+        responseMimeType: "application/json",
+      },
+    );
+    parsed = tryParseJson(repairedResponse);
+    devLog("AI quiz JSON repair completed", {
+      repairedLength: repairedResponse.length,
+      parsed: Boolean(parsed),
+    });
+  }
   if (!parsed) {
     throw new Error("AI returned a quiz format StudyPilot could not read. Please try again.");
   }

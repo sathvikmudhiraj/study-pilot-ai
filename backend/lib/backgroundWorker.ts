@@ -179,7 +179,20 @@ async function saveSummary(job: BackgroundJobRow, summary: Awaited<ReturnType<ty
     output_type: "summary",
     language_code: language,
     content: JSON.stringify(sanitizedSummary),
-    ...sanitizedSummary,
+    suggested_title: sanitizedSummary.suggested_title,
+    short_summary: sanitizedSummary.short_summary,
+    module_overview: sanitizedSummary.module_overview,
+    covered_topics: sanitizedSummary.covered_topics,
+    key_points: sanitizedSummary.key_points,
+    topic_wise_summary: sanitizedSummary.topic_wise_summary,
+    exam_focus_points: sanitizedSummary.exam_focus_points,
+    memory_lines: sanitizedSummary.memory_lines,
+    common_mistakes: sanitizedSummary.common_mistakes,
+    important_concepts: sanitizedSummary.important_concepts,
+    action_items: sanitizedSummary.action_items,
+    suggested_tags: sanitizedSummary.suggested_tags,
+    suggested_next_step: sanitizedSummary.suggested_next_step,
+    source_citations: sanitizedSummary.source_citations,
   };
 
   const result = existing.data?.id

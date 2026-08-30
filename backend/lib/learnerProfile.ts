@@ -128,7 +128,7 @@ function list(value: unknown): string[] {
 }
 
 function normalizeTopic(topic: string) {
-  return topic.toLocaleLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+  return topic.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function displayTopic(existing: string | undefined, next: string) {
@@ -266,7 +266,7 @@ export function buildLearnerProfile(attemptRows: unknown[], activityRows: unknow
       return {
         score,
         total,
-        percentage: numeric(attempt.percentage) || (total ? Math.round((score / total) * 100) : 0),
+        percentage: numeric(attempt.percentage) || (total ? Math.round((score / total) * 10000) / 100 : 0),
         attemptedAt: text(attempt.created_at),
       };
     })
@@ -466,7 +466,7 @@ function buildTopicImprovementHistory(attemptRows: unknown[]): TopicImprovementS
           attemptedAt,
           correct: stats.correct,
           total: stats.total,
-          percentage: stats.total ? Math.round((stats.correct / stats.total) * 100) : 0,
+          percentage: stats.total ? Math.round((stats.correct / stats.total) * 10000) / 100 : 0,
         })),
     }))
     .filter((series) => series.points.length >= 1);

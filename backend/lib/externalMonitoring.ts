@@ -12,6 +12,8 @@ type CaptureExternalErrorInput = {
   metadata?: Record<string, unknown>;
 };
 
+export type ExternalAlertInput = CaptureExternalErrorInput;
+
 const MAX_STRING_LENGTH = 500;
 const MONITORING_TIMEOUT_MS = 1500;
 
@@ -58,15 +60,15 @@ export function externalMonitoringConfigured() {
   return Boolean(monitoringWebhookUrl());
 }
 
-export async function captureExternalError(input: CaptureExternalErrorInput): Promise<void> {
+export async function sendExternalAlert(input: ExternalAlertInput): Promise<boolean> {
   const webhookUrl = monitoringWebhookUrl();
-  if (!webhookUrl) return;
+  if (!webhookUrl) return false;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), MONITORING_TIMEOUT_MS);
 
   try {
-    await fetch(webhookUrl, {
+    const response = await fetch(webhookUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       signal: controller.signal,
@@ -86,9 +88,15 @@ export async function captureExternalError(input: CaptureExternalErrorInput): Pr
         occurredAt: new Date().toISOString(),
       }),
     });
+    return response.ok;
   } catch {
     // External monitoring must never affect app requests.
+    return false;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export async function captureExternalError(input: CaptureExternalErrorInput): Promise<void> {
+  await sendExternalAlert(input);
 }

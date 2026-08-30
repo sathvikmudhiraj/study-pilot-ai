@@ -154,4 +154,53 @@ describe("quiz server-side grading inputs", () => {
 
     expect(submitted.duplicateQuestionIds).toEqual(["q1"]);
   });
+
+  it("throws on missing correct_index in answer key", () => {
+    const questionsMissingKey = [
+      { id: "q1", type: "mcq", topic: "Test", question: "Q?", options: ["A", "B"], correct_index: 0 },
+      { id: "q2", type: "mcq", topic: "Test", question: "Q?", options: ["A", "B"] }, // missing correct_index
+    ];
+    const keyMissingIndex = [
+      { id: "q1", correct_index: 0 },
+      { id: "q2" }, // missing correct_index
+    ];
+
+    expect(() =>
+      gradeQuizAttempt({ questions: questionsMissingKey, answerKey: keyMissingIndex, answers: { q1: "0", q2: "1" } })
+    ).toThrow(/Invalid or missing correct_index/);
+  });
+
+  it("throws on NaN correct_index in answer key", () => {
+    const questions = [
+      { id: "q1", type: "mcq", topic: "Test", question: "Q?", options: ["A", "B"], correct_index: 0 },
+    ];
+    const key = [{ id: "q1", correct_index: "not-a-number" }];
+
+    expect(() =>
+      gradeQuizAttempt({ questions, answerKey: key, answers: { q1: "0" } })
+    ).toThrow(/Invalid or missing correct_index/);
+  });
+
+  it("throws on out-of-range correct_index in answer key", () => {
+    const questions = [
+      { id: "q1", type: "mcq", topic: "Test", question: "Q?", options: ["A", "B"], correct_index: 0 },
+    ];
+    const key = [{ id: "q1", correct_index: 5 }]; // only 2 options (0, 1)
+
+    expect(() =>
+      gradeQuizAttempt({ questions, answerKey: key, answers: { q1: "0" } })
+    ).toThrow(/Invalid or missing correct_index/);
+  });
+
+  it("grades correctly with valid correct_index", () => {
+    const questions = [
+      { id: "q1", type: "mcq", topic: "Test", question: "Q?", options: ["A", "B"], correct_index: 1 },
+    ];
+    const key = [{ id: "q1", correct_index: 1 }];
+
+    const graded = gradeQuizAttempt({ questions, answerKey: key, answers: { q1: "1" } });
+
+    expect(graded.score).toBe(1);
+    expect(graded.user_answers[0].is_correct).toBe(true);
+  });
 });

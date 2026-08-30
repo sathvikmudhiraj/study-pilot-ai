@@ -6,6 +6,7 @@ import { getSupabaseEnv, hasSupabaseEnv } from "@/backend/lib/supabase/env";
 import { withRequestObservability } from "@/backend/lib/observability";
 import { readBackgroundJobs } from "@/backend/lib/backgroundJobs";
 import { readMonitoringEvents, recordMonitoringEvent, summarizeMonitoringEvents } from "@/backend/lib/monitoring";
+import { alertReadinessFailures } from "@/backend/lib/alerting";
 
 export const runtime = "nodejs";
 
@@ -97,7 +98,7 @@ function incidentSeverity(status: number | null, eventType: string): "error" | "
 }
 
 export async function GET(request: Request = new Request("http://localhost/api/admin/monitoring")) {
-  return withRequestObservability(request, "/api/admin/monitoring", async ({ logger }) => {
+  return withRequestObservability(request, "/api/admin/monitoring", async ({ logger, requestId }) => {
     const admin = await requireAdmin();
     if (!admin.ok) {
       logger.warn("admin.monitoring.denied", { status: admin.status, errorCategory: "authorization" });
@@ -146,12 +147,20 @@ export async function GET(request: Request = new Request("http://localhost/api/a
       const telemetrySummary = summarizeMonitoringEvents(events);
       if (!ready) {
         await recordMonitoringEvent({
+          requestId,
           eventType: "health.failure",
           route: "/api/admin/monitoring",
           method: "GET",
           status: 503,
           errorCategory: "readiness",
           metadata: checks,
+        });
+        await alertReadinessFailures({
+          requestId,
+          route: "/api/admin/monitoring",
+          method: "GET",
+          status: 503,
+          checks,
         });
       }
       const recentIncidents = events

@@ -850,7 +850,30 @@ ${text}`;
     maxOutputTokens,
     coverageRetry: Boolean(coverageReminder),
   });
-  const parsed = parseSummaryJson(response);
+  let parsed = parseSummaryJson(response);
+  if (!parsed) {
+    devLog("AI summary JSON repair started", { rawLength: response.length });
+    const repairedResponse = await generateSummaryAIText(
+      `Repair the summary payload below into one complete, valid JSON object.
+Return JSON only, with no markdown or commentary. Preserve the original language and facts.
+Use exactly these keys: suggested_title, short_summary, module_overview, covered_topics, key_points, topic_wise_summary, exam_focus_points, memory_lines, common_mistakes, important_concepts, action_items, suggested_tags, suggested_next_step.
+Use strings for text fields and arrays for list fields. Each topic_wise_summary item must contain topic, explanation, and important_points.
+Remove incomplete trailing fragments instead of inventing source content.
+
+PAYLOAD TO REPAIR:
+${response}`,
+      {
+        temperature: 0.1,
+        maxOutputTokens,
+        responseMimeType: "application/json",
+      },
+    );
+    parsed = parseSummaryJson(repairedResponse);
+    devLog("AI summary JSON repair completed", {
+      repairedLength: repairedResponse.length,
+      parsed: Boolean(parsed),
+    });
+  }
   if (!parsed) throw new Error("Gemini JSON parse failed.");
   // Do not apply the deterministic backstop here: the orchestrator measures
   // coverage first and only falls back to it if Gemini still misses topics.

@@ -46,6 +46,17 @@ function formatMinutes(value: number | null) {
   return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
 }
 
+function fileStatusBadgeVariant(status: string | null | undefined) {
+  const success = ["uploaded", "extracted", "chunked", "complete", "partially_complete"];
+  const processing = ["extracting", "chunking", "generating"];
+  const failed = ["failed"];
+  const s = status ?? "uploaded";
+  if (success.includes(s)) return "emerald";
+  if (processing.includes(s)) return "amber";
+  if (failed.includes(s)) return "red";
+  return "default";
+}
+
 export default async function DashboardPage() {
   const user = await getCurrentUser();
   const supabase = await createServerSupabaseClient();
@@ -310,7 +321,7 @@ export default async function DashboardPage() {
                 <Link key={file.id} href={`/files/${file.id}`} className="min-w-0 rounded-lg border border-white/[0.06] bg-slate-950/50 p-4 transition-all duration-200 hover:-translate-y-[2px] hover:border-emerald-400/20 hover:bg-white/[0.04] hover:shadow-lg hover:shadow-emerald-950/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#070b14] animate-fade-in-up motion-reduce:transition-none motion-reduce:hover:translate-y-0">
                   <div className="flex items-center justify-between gap-3">
                     <div className="min-w-0 break-words font-medium text-white text-sm">{file.file_name}</div>
-                    <Badge variant={file.processing_status === "uploaded" ? "emerald" : "amber"} className="shrink-0">
+                    <Badge variant={fileStatusBadgeVariant(file.processing_status ?? file.status)} className="shrink-0">
                       {file.processing_status ?? file.status ?? "uploaded"}
                     </Badge>
                   </div>

@@ -357,6 +357,57 @@ function normalizeLimitations(value: unknown, citationCount: number) {
     .slice(0, 8);
 }
 
+function snippetSentence(source: WebCitation, maxChars = 280) {
+  const text = cleanSingleLine(source.snippet || source.source_name, maxChars);
+  if (!text) return "";
+  const sentence = text.match(/^.{80,260}?(?:[.!?](?=\s|$)|$)/u)?.[0] ?? text;
+  return sentence.trim().replace(/[.!?]*$/, ".");
+}
+
+function synthesizeDeterministicReport(
+  researchQuestion: string,
+  subQueries: string[],
+  sources: WebCitation[],
+) {
+  const usableSources = sources
+    .map((source) => ({ source, sentence: snippetSentence(source) }))
+    .filter((item) => item.sentence);
+
+  if (usableSources.length < MIN_USEFUL_SOURCES) {
+    throw new DeepResearchError("Deep research could not produce a grounded report. Please try again.", "provider", 502);
+  }
+
+  const topSources = usableSources.slice(0, 6);
+  const executiveSummary = `StudyPilot found ${usableSources.length} usable web sources for "${cleanSingleLine(researchQuestion, 180)}". The strongest retrieved evidence points to these source-backed findings: ${topSources
+    .slice(0, 3)
+    .map(({ source }) => `[${source.locator_start}]`)
+    .join(", ")}.`;
+  const keyFindings = topSources.slice(0, 5).map(({ source, sentence }) => `${sentence} [${source.locator_start}]`);
+  const detailedAnalysis = topSources.slice(0, 4).map(({ source, sentence }, index) => ({
+    heading: index === 0 ? "Most relevant evidence" : `Supporting evidence ${index + 1}`,
+    content: `${sentence} This point is grounded in ${source.domain}. [${source.locator_start}]`,
+  }));
+  const differentViewpoints = topSources.slice(4, 6).map(({ source, sentence }, index) => ({
+    heading: `Additional perspective ${index + 1}`,
+    content: `${sentence} [${source.locator_start}]`,
+  }));
+  const practicalConclusion = `Use these results as a source-backed starting point, then verify any important decision against the linked sources shown below. [${topSources[0].source.locator_start}]`;
+  const researchLimitations = [
+    "AI synthesis returned an invalid citation format, so StudyPilot used a deterministic source-snippet fallback.",
+    `Only claims connected to the retrieved source snippets are included. [${topSources[0].source.locator_start}]`,
+    `Searched sub-queries: ${subQueries.length}.`,
+  ];
+
+  return {
+    executiveSummary,
+    keyFindings,
+    detailedAnalysis,
+    differentViewpoints,
+    practicalConclusion,
+    researchLimitations,
+  };
+}
+
 function awaitAbortableGeneration(generation: Promise<string>, signal: AbortSignal) {
   if (signal.aborted) {
     return Promise.reject(new DeepResearchError("Deep research was cancelled.", "cancelled", 499));
@@ -587,12 +638,18 @@ export async function runDeepResearch(query: string, requestSignal?: AbortSignal
 
     const aiTimeoutMs = synthesisTimeoutMs(startedAt);
     const aiStartedAt = Date.now();
-    const synthesized = await synthesizeReport(query, subQueries, sources, controller.signal, {
-      timeoutMs: aiTimeoutMs,
-      maxAttempts: providerInfo.configuredProvider === "gemini" ? 2 : 1,
-      telemetry: (event) => applyProviderTelemetry(metrics, event),
-      metrics,
-    });
+    let synthesized: Awaited<ReturnType<typeof synthesizeReport>>;
+    try {
+      synthesized = await synthesizeReport(query, subQueries, sources, controller.signal, {
+        timeoutMs: aiTimeoutMs,
+        maxAttempts: providerInfo.configuredProvider === "gemini" ? 2 : 1,
+        telemetry: (event) => applyProviderTelemetry(metrics, event),
+        metrics,
+      });
+    } catch (error) {
+      if (!(error instanceof DeepResearchError) || error.code !== "provider") throw error;
+      synthesized = synthesizeDeterministicReport(query, subQueries, sources);
+    }
     metrics.aiLatencyMs = Date.now() - aiStartedAt;
     if (controller.signal.aborted) {
       throw new DeepResearchError("Deep research was cancelled.", "cancelled", 499);

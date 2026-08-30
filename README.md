@@ -24,6 +24,8 @@ The objective is to reduce the gap between "I have notes" and "I am ready for th
 
 IBM Bob was used in StudyPilot AI as a development-time engineering assistant, mainly for debugging, code review, validation, and production-readiness review. It was not used as the student-facing runtime AI model.
 
+[Read IBM Bob Usage](./IBM_BOB_USAGE.md)
+
 During development, IBM Bob was used to inspect implementation issues, analyze errors and code paths, review API and authentication behavior, identify edge cases, and act as a second reviewer before fixes were accepted. It helped review areas such as admin APIs, analytics, audit-log filtering, authentication flows, persistence, storage behavior, and end-to-end application workflows.
 
 The development workflow followed this pattern:

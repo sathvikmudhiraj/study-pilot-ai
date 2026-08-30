@@ -30,6 +30,7 @@ const contentSecurityPolicy = [
 ].join("; ");
 
 const nextConfig: NextConfig = {
+  allowedDevOrigins: ["127.0.0.1"],
   // PDF.js workers must remain filesystem assets. Turbopack otherwise turns
   // worker module paths into numeric bundle ids, which Node path APIs cannot
   // resolve at runtime.

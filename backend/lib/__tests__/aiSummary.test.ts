@@ -366,6 +366,22 @@ describe("summarizeStudyText - resilient chunk processing", () => {
 });
 
 describe("summarizeStudyText - user-facing formatting cleanup", () => {
+  it("repairs one malformed provider response before failing summary generation", async () => {
+    let calls = 0;
+    mockGenerator = () => {
+      calls += 1;
+      return Promise.resolve(calls === 1 ? '{"suggested_title":"Broken summary"' : synthesisJson(["Routing", "Subnetting"]));
+    };
+
+    const summary = await summarizeStudyText("Routing connects networks while subnetting divides address space.", {
+      sourceType: "note",
+      sourceName: "Networking Note",
+    });
+
+    expect(calls).toBe(2);
+    expect(summary.covered_topics).toEqual(expect.arrayContaining(["Routing", "Subnetting"]));
+  });
+
   it("returns a clean structured summary for a single chunk", async () => {
     mockGenerator = () => Promise.resolve(synthesisJson(["Hill cipher", "Matrix inverse"]));
 

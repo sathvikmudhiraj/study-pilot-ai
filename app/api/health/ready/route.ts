@@ -4,6 +4,7 @@ import { getAIProviderRuntimeInfo } from "@/backend/lib/aiProvider";
 import { getSupabaseEnv, hasSupabaseEnv } from "@/backend/lib/supabase/env";
 import { withRequestObservability } from "@/backend/lib/observability";
 import { recordMonitoringEvent } from "@/backend/lib/monitoring";
+import { alertReadinessFailures } from "@/backend/lib/alerting";
 
 export const runtime = "nodejs";
 
@@ -104,19 +105,27 @@ function checkAIConfiguration(): ReadinessCheck {
 }
 
 export async function GET(request: Request = new Request("http://localhost/api/health/ready")) {
-  return withRequestObservability(request, "/api/health/ready", async () => {
+  return withRequestObservability(request, "/api/health/ready", async ({ requestId }) => {
     const [database, storage] = await Promise.all([checkDatabase(), checkStorage()]);
     const aiConfiguration = checkAIConfiguration();
     const checks = { database, storage, aiConfiguration };
     const ready = Object.values(checks).every((check) => check.status === "ok");
     if (!ready) {
       await recordMonitoringEvent({
+        requestId,
         eventType: "health.failure",
         route: "/api/health/ready",
         method: "GET",
         status: 503,
         errorCategory: "readiness",
         metadata: checks,
+      });
+      await alertReadinessFailures({
+        requestId,
+        route: "/api/health/ready",
+        method: "GET",
+        status: 503,
+        checks,
       });
     }
 

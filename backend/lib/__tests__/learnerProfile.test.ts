@@ -267,4 +267,59 @@ describe("learner profile", () => {
 
     expect(metrics.beforeVsLatest).toEqual([]);
   });
+
+  describe("topic canonicalization (locale-independent)", () => {
+    it("aggregates equivalent topic names under one canonical ID", () => {
+      const profile = buildLearnerProfile([
+        {
+          score: 5,
+          total_questions: 10,
+          percentage: 50,
+          topic_results: [
+            { topic_id: "ip_address", topic: "IP Address", correct: 3, total: 5 },
+            { topic_id: "ip_address", topic: "ip address", correct: 2, total: 5 },
+          ],
+          created_at: "2026-07-14T00:00:00.000Z",
+        },
+      ]);
+
+      expect(profile.weakTopics).toHaveLength(1);
+      expect(profile.weakTopics[0].canonicalId).toBe("ip_address");
+      expect(profile.weakTopics[0].attempts).toBe(10);
+    });
+
+    it("handles locale-sensitive characters deterministically", () => {
+      const profile = buildLearnerProfile([
+        {
+          score: 0,
+          total_questions: 2,
+          percentage: 0,
+          topic_results: [
+            { topic_id: "i", topic: "I", correct: 0, total: 1 },
+            { topic_id: "i", topic: "İ", correct: 0, total: 1 },
+          ],
+          created_at: "2026-07-14T00:00:00.000Z",
+        },
+      ]);
+
+      expect(profile.weakTopics).toHaveLength(1);
+      expect(profile.weakTopics[0].canonicalId).toBe("i");
+    });
+
+    it("aligns with canonicalTopicId behavior", () => {
+      const profile = buildLearnerProfile([
+        {
+          score: 5,
+          total_questions: 10,
+          percentage: 50,
+          topic_results: [
+            { topic: "IP Address", correct: 5, total: 10 },
+          ],
+          created_at: "2026-07-14T00:00:00.000Z",
+        },
+      ]);
+
+      expect(profile.weakTopics[0].canonicalId).toBe("ip_address");
+    });
+  });
 });

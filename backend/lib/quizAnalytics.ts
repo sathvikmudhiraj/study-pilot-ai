@@ -121,9 +121,12 @@ export function gradeQuizAttempt({
       const options = stringList(question.options ?? question.choices);
       const correctIndexRaw = key.correct_index ?? key.correctIndex ?? question.correct_index ?? question.correctIndex;
       const correctIndex = typeof correctIndexRaw === "number" ? correctIndexRaw : Number(correctIndexRaw);
+      if (!Number.isFinite(correctIndex) || correctIndex < 0 || correctIndex >= options.length) {
+        throw new Error(`Invalid or missing correct_index for question ${questionId}: expected 0..${options.length - 1}, got ${correctIndexRaw}`);
+      }
       const selectedIndex = Number(userAnswer);
-      isCorrect = Boolean(userAnswer) && Number.isFinite(selectedIndex) && Number.isFinite(correctIndex) && selectedIndex === correctIndex;
-      correctAnswer = Number.isFinite(correctIndex) ? options[correctIndex] ?? "" : "";
+      isCorrect = Boolean(userAnswer) && Number.isFinite(selectedIndex) && selectedIndex === correctIndex;
+      correctAnswer = options[correctIndex] ?? "";
     } else {
       const acceptable = stringList(
         key.acceptable_answers ?? key.acceptableAnswers ?? question.acceptable_answers ?? question.acceptableAnswers,
