@@ -26,6 +26,12 @@ type TextGenerationConfig = {
 
 const DEFAULT_PROVIDER_TIMEOUT_MS = 30000;
 const DEFAULT_SUMMARY_TIMEOUT_MS = 120000;
+// The NVIDIA fallback endpoint (NIM hosted reasoning models) routinely needs
+// 60-120s for a full tutor-style JSON answer (~26 output tokens/s measured).
+// Using the shared default provider timeout (30s) here meant every
+// Gemini->NVIDIA fallback timed out and could never succeed, so NVIDIA gets
+// its own, longer default (override via NVIDIA_TIMEOUT_MS).
+const DEFAULT_NVIDIA_TIMEOUT_MS = 180_000;
 const DEFAULT_NVIDIA_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b";
 const TIMEOUT_MESSAGE = "AI is taking longer than expected. Try fewer questions or switch to faster model.";
 export const SUMMARY_TIMEOUT_MESSAGE = "Summary generation is taking longer than expected. Please retry or use a faster AI model.";
@@ -261,7 +267,10 @@ async function askNvidia(
   const model = runtime.nvidiaModel;
   const temperature = generationConfig.temperature ?? 0.35;
   const maxTokens = generationConfig.maxOutputTokens ?? 1400;
-  const timeoutMs = runtime.timeoutMs;
+  const timeoutMs = configuredTimeout(
+    process.env.NVIDIA_TIMEOUT_MS,
+    Math.max(runtime.timeoutMs, DEFAULT_NVIDIA_TIMEOUT_MS),
+  );
   const startedAt = Date.now();
   const maxRetries = 3;
   let retryCount = 0;
@@ -286,18 +295,22 @@ async function askNvidia(
     }, timeoutMs);
 
     try {
+      const requestBody: Record<string, unknown> = {
+        model,
+        messages: [{ role: "user", content: prompt }],
+        temperature,
+        max_tokens: maxTokens,
+      };
+      if (generationConfig.responseMimeType === "application/json") {
+        requestBody.response_format = { type: "json_object" };
+      }
       const response = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({
-          model,
-          messages: [{ role: "user", content: prompt }],
-          temperature,
-          max_tokens: maxTokens,
-        }),
+        body: JSON.stringify(requestBody),
         signal: controller.signal,
       });
 

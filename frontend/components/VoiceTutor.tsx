@@ -611,7 +611,11 @@ export function VoiceTutor({
 
       const answer = normalizeAnswer({
         ...(data.chat?.answer ?? {}),
-        response_mode: data.mode ?? data.chat?.answer?.response_mode,
+        // Prefer the answer-level response_mode ("ai" | "cache" |
+        // "offline_fallback"): the top-level data.mode carries the context
+        // strategy ("selected-context" | "keyword-context" | ...) and would
+        // mislabel a genuine AI answer.
+        response_mode: data.chat?.answer?.response_mode ?? data.mode,
       });
       const answerId = typeof data.chat?.id === "string" ? data.chat.id : undefined;
 

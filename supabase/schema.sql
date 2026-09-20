@@ -713,4 +713,80 @@ create index if not exists quizzes_user_language_created_idx on public.quizzes(u
 create index if not exists revision_plans_user_language_created_idx on public.revision_plans(user_id, language_code, created_at desc);
 create index if not exists quiz_attempts_user_language_created_idx on public.quiz_attempts(user_id, language_code, created_at desc);
 
+-- ============================================================
+-- Diagrams persistence
+-- ============================================================
+create table if not exists public.diagrams (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  title text not null,
+  diagram_type text not null,
+  source_type text not null,
+  mermaid text not null,
+  explanation text,
+  source_file_id uuid references public.files(id) on delete set null,
+  source_answer_id uuid references public.assistant_questions(id) on delete set null,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+alter table public.diagrams add column if not exists user_id uuid references auth.users(id) on delete cascade;
+alter table public.diagrams add column if not exists title text;
+alter table public.diagrams add column if not exists diagram_type text;
+alter table public.diagrams add column if not exists source_type text;
+alter table public.diagrams add column if not exists mermaid text;
+alter table public.diagrams add column if not exists explanation text;
+alter table public.diagrams add column if not exists source_file_id uuid references public.files(id) on delete set null;
+alter table public.diagrams add column if not exists source_answer_id uuid references public.assistant_questions(id) on delete set null;
+alter table public.diagrams add column if not exists created_at timestamptz default now();
+alter table public.diagrams add column if not exists updated_at timestamptz default now();
+alter table public.diagrams alter column id set default gen_random_uuid();
+alter table public.diagrams alter column created_at set default now();
+alter table public.diagrams alter column updated_at set default now();
+update public.diagrams
+set
+  title = coalesce(title, 'Untitled diagram'),
+  diagram_type = coalesce(diagram_type, 'flowchart'),
+  source_type = coalesce(source_type, 'topic'),
+  mermaid = coalesce(mermaid, ''),
+  created_at = coalesce(created_at, now()),
+  updated_at = coalesce(updated_at, now())
+where
+  title is null
+  or diagram_type is null
+  or source_type is null
+  or mermaid is null
+  or created_at is null
+  or updated_at is null;
+alter table public.diagrams alter column user_id set not null;
+alter table public.diagrams alter column title set not null;
+alter table public.diagrams alter column diagram_type set not null;
+alter table public.diagrams alter column source_type set not null;
+alter table public.diagrams alter column mermaid set not null;
+
+drop trigger if exists set_diagrams_updated_at on public.diagrams;
+create trigger set_diagrams_updated_at
+  before update on public.diagrams
+  for each row execute function public.set_updated_at();
+
+alter table public.diagrams enable row level security;
+
+drop policy if exists "diagrams_select_own" on public.diagrams;
+create policy "diagrams_select_own"
+  on public.diagrams for select using (auth.uid() = user_id);
+drop policy if exists "diagrams_insert_own" on public.diagrams;
+create policy "diagrams_insert_own"
+  on public.diagrams for insert with check (auth.uid() = user_id);
+drop policy if exists "diagrams_update_own" on public.diagrams;
+create policy "diagrams_update_own"
+  on public.diagrams for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
+drop policy if exists "diagrams_delete_own" on public.diagrams;
+create policy "diagrams_delete_own"
+  on public.diagrams for delete using (auth.uid() = user_id);
+
+create index if not exists diagrams_user_id_idx on public.diagrams(user_id);
+create index if not exists diagrams_user_id_created_at_idx on public.diagrams(user_id, created_at desc);
+create index if not exists diagrams_source_file_id_idx on public.diagrams(source_file_id) where source_file_id is not null;
+create index if not exists diagrams_source_answer_id_idx on public.diagrams(source_answer_id) where source_answer_id is not null;
+
 notify pgrst, 'reload schema';

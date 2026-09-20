@@ -1,0 +1,1 @@
+The primary purpose of lexical analysis is tokenization. Lexical analysis converts source code into tokens. This is the first phase of compilation. A flowchart showing the process: source code -> lexer -> tokens -> parser -> AST.

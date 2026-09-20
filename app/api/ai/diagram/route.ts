@@ -12,6 +12,7 @@ import {
   isAiTimeoutError,
 } from "@/backend/lib/aiProvider";
 import { withRequestObservability } from "@/backend/lib/observability";
+import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -41,6 +42,49 @@ function normalizeProviderError(error: unknown) {
   return { message: "Diagram generation failed. Please try again.", status: 502 };
 }
 
+async function persistDiagram(
+  userId: string,
+  diagram: {
+    title: string;
+    diagram_type: string;
+    source_type: string;
+    mermaid: string;
+    explanation: string;
+  },
+  input: { sourceType: string; fileId?: string; answerId?: string }
+) {
+  const supabase = await createServerSupabaseClient();
+  if (!supabase) return null;
+
+  const insertData: Record<string, unknown> = {
+    user_id: userId,
+    title: diagram.title,
+    diagram_type: diagram.diagram_type,
+    source_type: diagram.source_type,
+    mermaid: diagram.mermaid,
+    explanation: diagram.explanation,
+  };
+
+  if (input.sourceType === "file" && input.fileId) {
+    insertData.source_file_id = input.fileId;
+  }
+  if (input.sourceType === "answer" && input.answerId) {
+    insertData.source_answer_id = input.answerId;
+  }
+
+  const { data, error } = await supabase
+    .from("diagrams")
+    .insert(insertData)
+    .select("id, created_at")
+    .single();
+
+  if (error) {
+    console.error("[diagram] Persistence failed:", error.message);
+    return null;
+  }
+  return data;
+}
+
 async function handlePost(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
@@ -65,7 +109,11 @@ async function handlePost(request: Request) {
 
   try {
     const diagram = await generateGroundedDiagram(user.id, input, request.signal, { requestSizeBytes });
-    return NextResponse.json({ diagram });
+
+    // Persist the diagram to database
+    const persisted = await persistDiagram(user.id, diagram, input);
+
+    return NextResponse.json({ diagram, persisted: !!persisted, diagramId: persisted?.id ?? null });
   } catch (error) {
     if (error instanceof DiagramGenerationError) {
       return apiError(error.message, error.status);
