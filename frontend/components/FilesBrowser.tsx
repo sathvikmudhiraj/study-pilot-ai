@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { EmptyState, Badge } from "./ui";
-import { IconSearch, IconFiles, IconFileText } from "./icons";
+import { IconSearch, IconFiles, IconFileText, IconTrash } from "./icons";
 import { StudyNoteEditor } from "./StudyNoteEditor";
 import {
   adaptStudyNoteRow,
@@ -81,6 +81,9 @@ export function FilesBrowser({
   const [kind, setKind] = useState("all");
   const [status, setStatus] = useState("all");
   const [importance, setImportance] = useState("all");
+  const [savedFiles, setSavedFiles] = useState<FileItem[]>(files);
+  const [deletingFileId, setDeletingFileId] = useState<string | null>(null);
+  const [fileDeleteError, setFileDeleteError] = useState("");
   const [savedNotes, setSavedNotes] = useState<StudyNoteDraft[]>(() => {
     const fileNames = new Map(files.map((file) => [file.id, file.file_name]));
     return notes.map((note) => {
@@ -98,7 +101,7 @@ export function FilesBrowser({
 
   const filteredFiles = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return files.filter((file) => {
+    return savedFiles.filter((file) => {
       const matchesKind =
         kind === "all" ||
         kind === "files" ||
@@ -110,7 +113,7 @@ export function FilesBrowser({
       const matchesQuery = !q || file.file_name.toLowerCase().includes(q);
       return matchesKind && matchesStatus && matchesQuery;
     });
-  }, [files, query, kind, status]);
+  }, [savedFiles, query, kind, status]);
 
   const filteredNotes = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -141,6 +144,24 @@ export function FilesBrowser({
     setSavedNotes((current) => current.filter((note) => note.id !== id));
     setSelectedNote(null);
     router.refresh();
+  }
+
+  async function handleDeleteFile(file: FileItem) {
+    if (!window.confirm(`Delete "${file.file_name}" and its generated notes and summaries?`)) return;
+    setDeletingFileId(file.id);
+    setFileDeleteError("");
+    try {
+      const response = await fetch(`/api/files/${file.id}`, { method: "DELETE" });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || "Could not delete the file.");
+      setSavedFiles((current) => current.filter((item) => item.id !== file.id));
+      setSavedNotes((current) => current.filter((note) => note.fileId !== file.id));
+      router.refresh();
+    } catch (error) {
+      setFileDeleteError(error instanceof Error ? error.message : "Could not delete the file.");
+    } finally {
+      setDeletingFileId(null);
+    }
   }
 
   const empty = !filteredFiles.length && !filteredNotes.length;
@@ -219,6 +240,10 @@ export function FilesBrowser({
         />
       ) : null}
 
+      {fileDeleteError ? (
+        <p role="alert" className="text-sm text-rose-300">{fileDeleteError}</p>
+      ) : null}
+
       {/* Files grid */}
       {kind !== "notes" ? (
         <section className="animate-fade-in">
@@ -234,9 +259,8 @@ export function FilesBrowser({
           {filteredFiles.length ? (
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 stagger-children">
               {filteredFiles.map((file) => (
-                <Link
+                <article
                   key={file.id}
-                  href={`/files/${file.id}`}
                   className="group min-w-0 rounded-xl border border-white/[0.06] bg-white/[0.03] p-5 transition-all duration-200 hover:border-emerald-400/20 hover:bg-white/[0.06] hover:-translate-y-[1px] animate-fade-in-up"
                 >
                   <div className="flex items-start justify-between gap-3">
@@ -255,7 +279,9 @@ export function FilesBrowser({
                     </Badge>
                   </div>
                   <h3 className="mt-4 line-clamp-2 font-semibold text-white text-sm">
-                    {file.file_name}
+                    <Link href={`/files/${file.id}`} className="transition hover:text-emerald-200">
+                      {file.file_name}
+                    </Link>
                   </h3>
                   <p className="mt-1 text-xs font-semibold uppercase text-slate-500">
                     {file.file_type ?? file.mime_type ?? "Study file"}
@@ -278,7 +304,22 @@ export function FilesBrowser({
                       </div>
                     </div>
                   </div>
-                </Link>
+                  <div className="mt-4 flex items-center justify-between gap-3 border-t border-white/[0.06] pt-3">
+                    <Link href={`/files/${file.id}`} className="text-xs font-semibold text-emerald-200 hover:text-emerald-100">
+                      Open file
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteFile(file)}
+                      disabled={deletingFileId === file.id}
+                      className="grid h-8 w-8 place-items-center rounded-md border border-rose-300/20 text-rose-200 transition hover:bg-rose-300/10 disabled:cursor-wait disabled:opacity-50"
+                      aria-label={`Delete ${file.file_name}`}
+                      title="Delete file"
+                    >
+                      <IconTrash size={15} />
+                    </button>
+                  </div>
+                </article>
               ))}
             </div>
           ) : (

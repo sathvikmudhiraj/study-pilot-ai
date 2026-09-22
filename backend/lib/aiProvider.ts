@@ -98,6 +98,11 @@ function boundedTimeout(value: number | undefined, fallback: number) {
   return Math.min(Math.round(value), fallback);
 }
 
+function validTimeout(value: number | undefined) {
+  if (!Number.isFinite(value) || !value || value < 1000) return undefined;
+  return Math.round(value);
+}
+
 function boundedMaxAttempts(value: number | undefined, fallback: number) {
   if (!Number.isFinite(value) || !value) return fallback;
   return Math.max(1, Math.min(5, Math.trunc(value)));
@@ -267,10 +272,8 @@ async function askNvidia(
   const model = runtime.nvidiaModel;
   const temperature = generationConfig.temperature ?? 0.35;
   const maxTokens = generationConfig.maxOutputTokens ?? 1400;
-  const timeoutMs = configuredTimeout(
-    process.env.NVIDIA_TIMEOUT_MS,
-    Math.max(runtime.timeoutMs, DEFAULT_NVIDIA_TIMEOUT_MS),
-  );
+  const callerTimeoutMs = validTimeout(generationConfig.timeoutMs);
+  const timeoutMs = callerTimeoutMs ?? configuredTimeout(process.env.NVIDIA_TIMEOUT_MS, DEFAULT_NVIDIA_TIMEOUT_MS);
   const startedAt = Date.now();
   const maxRetries = 3;
   let retryCount = 0;
@@ -284,6 +287,10 @@ async function askNvidia(
   });
 
   while (true) {
+    const remainingTimeoutMs = timeoutMs - (Date.now() - startedAt);
+    if (remainingTimeoutMs <= 0) {
+      throw new AIProviderError(runtime.timeoutMessage, "timeout", "nvidia");
+    }
     const controller = new AbortController();
     let timedOut = false;
     const onExternalAbort = () => controller.abort(generationConfig.signal?.reason);
@@ -292,7 +299,7 @@ async function askNvidia(
     const timeout = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, timeoutMs);
+    }, remainingTimeoutMs);
 
     try {
       const requestBody: Record<string, unknown> = {
@@ -365,7 +372,11 @@ async function askNvidia(
             delayMs,
             retryAfterHeader: retryAfterHeader ?? null,
           });
-          await sleepMs(delayMs, generationConfig.signal);
+          const remainingAfterResponseMs = timeoutMs - (Date.now() - startedAt);
+          if (remainingAfterResponseMs <= 0) {
+            throw new AIProviderError(runtime.timeoutMessage, "timeout", "nvidia");
+          }
+          await sleepMs(Math.min(delayMs, remainingAfterResponseMs), generationConfig.signal);
           continue;
         }
 
@@ -470,7 +481,10 @@ async function generateAITextForProfile(
   prompt: string,
   generationConfig?: TextGenerationConfig,
 ) {
+  const requestStartedAt = Date.now();
   const runtime = getRuntimeConfig(profile);
+  const providerChainTimeoutMs = validTimeout(generationConfig?.timeoutMs)
+    ?? configuredTimeout(process.env.NVIDIA_TIMEOUT_MS, DEFAULT_NVIDIA_TIMEOUT_MS);
   const callTimeoutMs = boundedTimeout(generationConfig?.timeoutMs, runtime.timeoutMs);
   const callRuntime: ProviderRuntimeConfig = {
     ...runtime,
@@ -483,6 +497,7 @@ async function generateAITextForProfile(
     temperature: generationConfig?.temperature,
     maxOutputTokens: generationConfig?.maxOutputTokens,
     responseMimeType: generationConfig?.responseMimeType,
+    timeoutMs: generationConfig?.timeoutMs,
     maxAttempts: generationConfig?.maxAttempts,
     signal: generationConfig?.signal,
   };
@@ -685,7 +700,15 @@ async function generateAITextForProfile(
         timeoutMs: callRuntime.timeoutMs,
         fallbackTriggered: true,
       });
-      const response = await askNvidia(prompt, providerGenerationConfig, callRuntime);
+      const fallbackTimeoutMs = providerChainTimeoutMs - (Date.now() - requestStartedAt);
+      if (fallbackTimeoutMs < 1_000) {
+        throw new AIProviderError(callRuntime.timeoutMessage, "timeout", "nvidia");
+      }
+      const response = await askNvidia(
+        prompt,
+        { ...providerGenerationConfig, timeoutMs: fallbackTimeoutMs },
+        callRuntime,
+      );
       devLog("final provider used", {
         profile,
         provider: "nvidia",

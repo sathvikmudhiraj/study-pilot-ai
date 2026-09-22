@@ -9,9 +9,11 @@ vi.mock("server-only", () => ({}));
 // zero env-var dependencies. The mock factory returns a function the test
 // overrides per-case via mockImplementation.
 let mockGenerator: ((prompt: string) => Promise<string>) | null = null;
+const observedGenerationConfigs: Array<Record<string, unknown> | undefined> = [];
 
 vi.mock("../aiProvider", () => ({
-  generateSummaryAIText: vi.fn((prompt: string) => {
+  generateSummaryAIText: vi.fn((prompt: string, config?: Record<string, unknown>) => {
+    observedGenerationConfigs.push(config);
     if (mockGenerator) return mockGenerator(prompt);
     return Promise.resolve("{}");
   }),
@@ -153,6 +155,7 @@ function expectNoUserFacingMetadata(summary: Awaited<ReturnType<typeof summarize
 
 beforeEach(() => {
   mockGenerator = null;
+  observedGenerationConfigs.length = 0;
 });
 
 afterEach(() => {
@@ -160,6 +163,41 @@ afterEach(() => {
 });
 
 describe("summarizeStudyText - resilient chunk processing", () => {
+  it("bounds chunk-map, synthesis, and repair provider calls", async () => {
+    mockGenerator = (prompt: string) => {
+      if (isChunkMapPrompt(prompt)) {
+        if (prompt.includes("Page 1")) return Promise.resolve(chunkMapJson(1, 3, CHUNK1_TOPICS));
+        if (prompt.includes("Page 27")) return Promise.resolve(chunkMapJson(2, 3, CHUNK2_TOPICS));
+        return Promise.resolve(chunkMapJson(3, 3, CHUNK3_TOPICS));
+      }
+      return Promise.resolve(synthesisJson([...CHUNK1_TOPICS, ...CHUNK2_TOPICS, ...CHUNK3_TOPICS]));
+    };
+
+    await summarizeStudyText(CNS_SOURCE, { sourceType: "file", sourceName: "CNSmodule-1.pdf" });
+
+    expect(observedGenerationConfigs.every((config) => config?.timeoutMs === 24_000)).toBe(true);
+  });
+
+  it("keeps the first valid synthesis when the bounded coverage retry times out", async () => {
+    let synthesisCalls = 0;
+    mockGenerator = (prompt: string) => {
+      if (isChunkMapPrompt(prompt)) {
+        if (prompt.includes("Page 1")) return Promise.resolve(chunkMapJson(1, 3, CHUNK1_TOPICS));
+        if (prompt.includes("Page 27")) return Promise.resolve(chunkMapJson(2, 3, CHUNK2_TOPICS));
+        return Promise.resolve(chunkMapJson(3, 3, CHUNK3_TOPICS));
+      }
+      synthesisCalls += 1;
+      if (synthesisCalls > 1) return Promise.reject(new Error("timeout: coverage refinement exceeded its budget"));
+      return Promise.resolve(synthesisJson([...CHUNK1_TOPICS, ...CHUNK2_TOPICS, ...CHUNK3_TOPICS]));
+    };
+
+    const summary = await summarizeStudyText(CNS_SOURCE, { sourceType: "file", sourceName: "CNSmodule-1.pdf" });
+
+    expect(synthesisCalls).toBe(2);
+    expect(summary.short_summary).toBe("Summary of CNS Module 1");
+    expect(summary.covered_topics.join(" ")).toMatch(/Hill cipher/i);
+  });
+
   it("processes all 29,510 characters and produces 3 ordered chunks", async () => {
     expect(CNS_SOURCE.length).toBeGreaterThan(24000);
     expect(CNS_SOURCE.length).toBeLessThanOrEqual(31000);
@@ -257,7 +295,7 @@ describe("summarizeStudyText - resilient chunk processing", () => {
     expect(summary.generation_metadata.partialCoverage).toBe(true);
   });
 
-  it("throws a clean summary-generation error when the final merge fails", async () => {
+  it("falls back to validated chunk maps when the final AI merge fails", async () => {
     mockGenerator = (prompt: string) => {
       if (isChunkMapPrompt(prompt)) {
         if (prompt.includes("Page 1")) return Promise.resolve(chunkMapJson(1, 3, CHUNK1_TOPICS));
@@ -269,17 +307,24 @@ describe("summarizeStudyText - resilient chunk processing", () => {
       return Promise.reject(new Error("busy: AI overloaded, try again later"));
     };
 
-    await expect(
-      summarizeStudyText(CNS_SOURCE, { sourceType: "file", sourceName: "CNSmodule-1.pdf" }),
-    ).rejects.toThrow(/summary generation failed|busy/i);
+    const summary = await summarizeStudyText(CNS_SOURCE, { sourceType: "file", sourceName: "CNSmodule-1.pdf" });
+
+    expect(summary.module_overview).toMatch(/AI synthesis was unavailable/i);
+    expect(summary.generation_metadata.failureCategories).toContain("synthesis-busy");
+    expect(summary.covered_topics.join(" ")).toMatch(/Hill cipher/i);
   });
 
-  it("throws a clean summary-generation error when every chunk fails (AI quota reached)", async () => {
+  it("returns an explicitly labeled source-only fallback when every AI chunk fails", async () => {
     mockGenerator = () => Promise.reject(new Error("quota: free ai limit reached"));
 
-    await expect(
-      summarizeStudyText(CNS_SOURCE, { sourceType: "file", sourceName: "CNSmodule-1.pdf" }),
-    ).rejects.toThrow(/Summary generation failed/);
+    const summary = await summarizeStudyText(CNS_SOURCE, { sourceType: "file", sourceName: "CNSmodule-1.pdf" });
+
+    expect(summary.module_overview).toMatch(/AI processing was unavailable/i);
+    expect(summary.generation_metadata.successfulChunks).toEqual([]);
+    expect(summary.generation_metadata.failedChunks).toEqual([1, 2, 3]);
+    expect(summary.generation_metadata.failureCategories).toEqual(expect.arrayContaining(["quota", "extractive-fallback"]));
+    expect(summary.generation_metadata.partialCoverage).toBe(true);
+    expect(summary.short_summary).toMatch(/cryptography|plaintext|ciphertext/i);
   });
 
   it("falls back to deterministic chunk maps when AI returns invalid JSON", async () => {

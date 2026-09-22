@@ -8,6 +8,7 @@ import {
 } from "@/backend/lib/aiProvider";
 import { answerWebSearch, WebSearchError } from "@/backend/lib/webSearch";
 import { withRequestObservability } from "@/backend/lib/observability";
+import { enforceAiRateLimit } from "@/backend/lib/rateLimit";
 
 export const runtime = "nodejs";
 
@@ -47,6 +48,8 @@ function normalizeUnexpectedError(error: unknown) {
 async function handlePost(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
+  const rateLimited = enforceAiRateLimit(user.id);
+  if (rateLimited) return rateLimited;
 
   let body: unknown;
   try {

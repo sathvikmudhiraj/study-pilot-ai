@@ -9,6 +9,9 @@ const supabaseOrigin = (() => {
   }
 })();
 const supabaseWsOrigin = supabaseOrigin.replace(/^https:/, "wss:");
+const scriptSources = process.env.NODE_ENV === "development"
+  ? "'self' 'unsafe-inline' 'unsafe-eval'"
+  : "'self' 'unsafe-inline'";
 const supabaseSources = Array.from(
   new Set([supabaseOrigin, supabaseWsOrigin, "https://*.supabase.co", "wss://*.supabase.co"].filter(Boolean)),
 ).join(" ");
@@ -22,7 +25,7 @@ const contentSecurityPolicy = [
   `img-src 'self' data: blob: ${supabaseSources}`,
   "font-src 'self' data:",
   "style-src 'self' 'unsafe-inline'",
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+  `script-src ${scriptSources}`,
   `connect-src 'self' ${supabaseSources}`,
   `frame-src 'self' ${supabaseSources}`,
   `media-src 'self' blob: ${supabaseSources}`,

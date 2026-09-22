@@ -16,6 +16,7 @@ import { getAiUserMessage, isAiBusyError, isAiQuotaError } from "@/backend/lib/a
 import { isGreeting, greetingResponse } from "@/backend/lib/greetingDetector";
 import { buildLearnerProfile, buildPersonalizedChatContext, recommendWeakTopic } from "@/backend/lib/learnerProfile";
 import { isSupportedLanguageCode, type SupportedLanguageCode } from "@/shared/languages";
+import { enforceAiRateLimit } from "@/backend/lib/rateLimit";
 
 export const runtime = "nodejs";
 
@@ -978,6 +979,8 @@ async function handlePost(request: Request) {
 
   const user = await measure("authentication", () => requireUser());
   if (!user) return apiError("Please log in first.", 401);
+  const rateLimited = enforceAiRateLimit(user.id);
+  if (rateLimited) return rateLimited;
 
   const supabase = await createServerSupabaseClient();
   if (!supabase) return apiError("Supabase is not configured.", 500);

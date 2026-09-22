@@ -19,6 +19,7 @@ import {
 } from "@/backend/lib/aiProvider";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { withRequestObservability } from "@/backend/lib/observability";
+import { enforceAiRateLimit } from "@/backend/lib/rateLimit";
 
 export const runtime = "nodejs";
 
@@ -590,6 +591,8 @@ async function resolveSource(
 async function handlePost(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
+  const rateLimited = enforceAiRateLimit(user.id);
+  if (rateLimited) return rateLimited;
 
   const supabase = await createServerSupabaseClient();
   if (!supabase) return apiError("StudyPilot storage is not configured.", 500);

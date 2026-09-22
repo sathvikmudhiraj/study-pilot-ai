@@ -20,6 +20,7 @@ import { processStudyMaterial, type StudyPageMetadata } from "@/backend/lib/stud
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { withRequestObservability } from "@/backend/lib/observability";
 import { buildLearnerProfile, buildSummaryPersonalization } from "@/backend/lib/learnerProfile";
+import { enforceAiRateLimit } from "@/backend/lib/rateLimit";
 import {
   getAIProviderRuntimeInfo,
   getAiUserMessage,
@@ -410,6 +411,8 @@ function metadataForSourceText(text: string, sourceId: string | null, stage: "ex
 async function handlePost(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
+  const rateLimited = enforceAiRateLimit(user.id);
+  if (rateLimited) return rateLimited;
 
   const supabase = await createServerSupabaseClient();
   if (!supabase) return apiError("Supabase is not configured.", 500);

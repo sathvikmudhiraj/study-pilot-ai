@@ -8,6 +8,7 @@ import { withRequestObservability } from "@/backend/lib/observability";
 import { getAiUserMessage, isAiBusyError, isAiQuotaError } from "@/backend/lib/aiProvider";
 import { buildLearnerProfile } from "@/backend/lib/learnerProfile";
 import { isSupportedLanguageCode, type SupportedLanguageCode } from "@/shared/languages";
+import { enforceAiRateLimit } from "@/backend/lib/rateLimit";
 
 export const runtime = "nodejs";
 
@@ -304,6 +305,8 @@ async function handleGet(request: Request) {
 async function handlePost(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
+  const rateLimited = enforceAiRateLimit(user.id);
+  if (rateLimited) return rateLimited;
 
   const supabase = await createServerSupabaseClient();
   if (!supabase) return apiError("Supabase is not configured.", 500);

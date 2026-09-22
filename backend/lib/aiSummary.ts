@@ -70,6 +70,8 @@ export type SummarySourceContext = {
 };
 
 const MAX_CHUNK_CHARS = 12000;
+const SUMMARY_CHUNK_TIMEOUT_MS = 24_000;
+const SUMMARY_CHUNK_CONCURRENCY = 3;
 
 // Synthesis token budget scales with module size so large multi-section
 // modules (e.g. CNS Module 1) are not squeezed into a tiny output and forced
@@ -665,6 +667,47 @@ function ensureFullModuleCoverage(summary: StructuredSummary, chunkMaps: ChunkMa
   };
 }
 
+function summaryFromChunkMaps(chunkMaps: ChunkMap[], sourceName: string, partialCoverage: boolean): StructuredSummary {
+  const topics = uniqueList(chunkMaps.flatMap((chunk) => chunk.topics.length ? chunk.topics : [chunk.heading]), 30);
+  const keyPoints = uniqueList(chunkMaps.flatMap((chunk) => chunk.important_points), 24);
+  const topicWiseSummary = chunkMaps.flatMap((chunk) => {
+    const chunkTopics = chunk.topics.length ? chunk.topics : [chunk.heading];
+    return chunkTopics.map((topic) => ({
+      topic,
+      explanation: chunk.important_points.slice(0, 3).join(" ") || `This topic appears in ${sourceName}.`,
+      important_points: chunk.important_points.slice(0, 5),
+    }));
+  }).slice(0, 24);
+
+  return {
+    suggested_title: `${sourceName} study summary`,
+    short_summary: keyPoints.slice(0, 4).join(" ") || `Study summary for ${sourceName}.`,
+    module_overview: partialCoverage
+      ? "AI processing was unavailable for some or all sections, so this source-only extractive summary may be incomplete."
+      : "AI synthesis was unavailable, so this summary was assembled from the successfully processed source sections.",
+    covered_topics: topics,
+    key_points: keyPoints,
+    topic_wise_summary: topicWiseSummary,
+    exam_focus_points: uniqueList(chunkMaps.flatMap((chunk) => chunk.exam_focus_points), 20),
+    memory_lines: uniqueList(chunkMaps.flatMap((chunk) => chunk.memory_lines), 14),
+    common_mistakes: uniqueList(chunkMaps.flatMap((chunk) => chunk.common_mistakes), 14),
+    important_concepts: uniqueList(chunkMaps.flatMap((chunk) => chunk.important_concepts), 28),
+    action_items: ["Review the key points, then test your recall without looking at the source."],
+    suggested_tags: topics.slice(0, 8),
+    suggested_next_step: "Review the topic summaries and create a short practice quiz.",
+    source_citations: [],
+    generation_metadata: {
+      attemptedChunks: 0,
+      successfulChunks: [],
+      failedChunks: [],
+      failureCategories: [],
+      partialCoverage,
+      sourceTextLength: 0,
+      language: DEFAULT_LANGUAGE,
+    },
+  };
+}
+
 async function summarizeChunk(
   chunk: string,
   index: number,
@@ -700,6 +743,7 @@ ${chunk}`;
       temperature: 0.2,
       maxOutputTokens: 2200,
       responseMimeType: "application/json",
+      timeoutMs: SUMMARY_CHUNK_TIMEOUT_MS,
     }),
   );
 
@@ -842,6 +886,7 @@ ${text}`;
       temperature: coverageReminder ? 0.3 : 0.2,
       maxOutputTokens,
       responseMimeType: "application/json",
+      timeoutMs: SUMMARY_CHUNK_TIMEOUT_MS,
     }),
   );
   devLog("AI structured response received", {
@@ -866,6 +911,7 @@ ${response}`,
         temperature: 0.1,
         maxOutputTokens,
         responseMimeType: "application/json",
+        timeoutMs: SUMMARY_CHUNK_TIMEOUT_MS,
       },
     );
     parsed = parseSummaryJson(repairedResponse);
@@ -947,9 +993,13 @@ export async function summarizeStudyText(
     const reminder = buildCoverageReminder(summary, [], chunks[0]);
     devLog("single-chunk coverage check", { missedCount: reminder ? 1 : 0, retry: Boolean(reminder) });
     if (reminder) {
-      const retried = await generateStructuredSummary(chunks[0], "full-text", [], reminder, undefined, personalizationHint, language);
-      // Keep the retry only if it actually improved coverage.
-      if (retried.covered_topics.length >= summary.covered_topics.length) summary = retried;
+      try {
+        const retried = await generateStructuredSummary(chunks[0], "full-text", [], reminder, undefined, personalizationHint, language);
+        // Keep the retry only if it actually improved coverage.
+        if (retried.covered_topics.length >= summary.covered_topics.length) summary = retried;
+      } catch (error) {
+        devLog("single-chunk coverage retry skipped", { failureCategory: classifyChunkFailure(error) });
+      }
     }
     const final: StructuredSummary = sanitizeUserFacingSummary({
       ...ensureFullModuleCoverage(summary, []),
@@ -983,24 +1033,33 @@ export async function summarizeStudyText(
   if (failedChunks.length) failureCategoriesSet.add("processing-budget");
   const chunkMaps: ChunkMap[] = [];
 
-  for (let index = 0; index < processableChunks.length; index += 1) {
-    const attempt = await attemptSummarizeChunk(chunks[index], index, chunks.length, segments[index].citation, language);
-    if (attempt.ok) {
-      chunkMaps.push(attempt.chunkMap);
-      successfulChunks.push(index + 1);
-    } else {
-      failedChunks.push(attempt.chunkNumber);
-      failureCategoriesSet.add(attempt.failureCategory);
+  for (let start = 0; start < processableChunks.length; start += SUMMARY_CHUNK_CONCURRENCY) {
+    const batch = processableChunks.slice(start, start + SUMMARY_CHUNK_CONCURRENCY);
+    const attempts = await Promise.all(batch.map((chunk, offset) => {
+      const index = start + offset;
+      return attemptSummarizeChunk(chunk, index, chunks.length, segments[index].citation, language);
+    }));
+    for (const attempt of attempts) {
+      if (attempt.ok) {
+        chunkMaps.push(attempt.chunkMap);
+        successfulChunks.push(attempt.chunkMap.chunk_number);
+      } else {
+        failedChunks.push(attempt.chunkNumber);
+        failureCategoriesSet.add(attempt.failureCategory);
+      }
     }
   }
 
-  const failureCategories = [...failureCategoriesSet];
-
-  if (chunkMaps.length === 0) {
-    // Every chunk failed. Surface a clean summary-generation error so the
-    // API route can preserve the prior saved summary and label it stale.
-    const flatCategories = failureCategories.join(", ") || "provider-error";
-    throw new Error(`Summary generation failed: every chunk failed (${flatCategories}).`);
+  const allAiChunksFailed = chunkMaps.length === 0;
+  if (allAiChunksFailed) {
+    processableChunks.forEach((chunk, index) => {
+      chunkMaps.push(fallbackChunkMap(chunk, index, chunks.length, segments[index].citation));
+    });
+    failureCategoriesSet.add("extractive-fallback");
+    devLog("all AI chunk maps failed; using source-only extractive maps", {
+      attempted: attemptedChunks,
+      fallbackMaps: chunkMaps.length,
+    });
   }
 
   const partialCoverage = failedChunks.length > 0;
@@ -1016,7 +1075,21 @@ export async function summarizeStudyText(
   const partialHint = partialCoverage
     ? { successfulChunks, failedChunks, totalChunks: attemptedChunks }
     : undefined;
-  let summary = await generateStructuredSummary(material, "chunk-map", chunkMaps, undefined, partialHint, personalizationHint, language);
+  let synthesisFallbackUsed = allAiChunksFailed;
+  let summary: StructuredSummary;
+  if (allAiChunksFailed) {
+    summary = summaryFromChunkMaps(chunkMaps, sourceName, partialCoverage);
+  } else {
+    try {
+      summary = await generateStructuredSummary(material, "chunk-map", chunkMaps, undefined, partialHint, personalizationHint, language);
+    } catch (error) {
+      const failureCategory = classifyChunkFailure(error);
+      failureCategoriesSet.add(`synthesis-${failureCategory}`);
+      synthesisFallbackUsed = true;
+      summary = summaryFromChunkMaps(chunkMaps, sourceName, partialCoverage);
+      devLog("structured synthesis fallback used", { failureCategory, chunkMaps: chunkMaps.length });
+    }
+  }
   const reminder = buildCoverageReminder(summary, chunkMaps);
   devLog("multi-chunk coverage check", {
     detectedTopicCount,
@@ -1024,13 +1097,18 @@ export async function summarizeStudyText(
     retry: Boolean(reminder),
     ...(reminder ? { missedReminder: reminder.slice(0, 200) } : {}),
   });
-  if (reminder) {
-    const retried = await generateStructuredSummary(material, "chunk-map", chunkMaps, reminder, partialHint, personalizationHint, language);
-    if (retried.covered_topics.length >= summary.covered_topics.length) summary = retried;
-    devLog("multi-chunk coverage retry complete", {
-      retriedCovered: retried.covered_topics.length,
-      accepted: retried.covered_topics.length >= summary.covered_topics.length,
-    });
+  if (reminder && !synthesisFallbackUsed) {
+    try {
+      const retried = await generateStructuredSummary(material, "chunk-map", chunkMaps, reminder, partialHint, personalizationHint, language);
+      const accepted = retried.covered_topics.length >= summary.covered_topics.length;
+      if (accepted) summary = retried;
+      devLog("multi-chunk coverage retry complete", {
+        retriedCovered: retried.covered_topics.length,
+        accepted,
+      });
+    } catch (error) {
+      devLog("multi-chunk coverage retry skipped", { failureCategory: classifyChunkFailure(error) });
+    }
   }
 
   const final: StructuredSummary = sanitizeUserFacingSummary({
@@ -1040,7 +1118,7 @@ export async function summarizeStudyText(
       attemptedChunks,
       successfulChunks,
       failedChunks,
-      failureCategories,
+      failureCategories: [...failureCategoriesSet],
       partialCoverage,
       sourceTextLength,
       language,
