@@ -8,6 +8,21 @@ import { sanitizeError, sanitizeForLogging } from "./observability";
 export type BackgroundJobType = "pdf_extraction" | "summary_generation";
 export type BackgroundJobStatus = "queued" | "processing" | "retrying" | "completed" | "failed" | "cancelled";
 
+export type ExtractionProgressDetail = {
+  stage: "native-extraction" | "vision-queue" | "vision-processing" | "vision-complete" | "merging" | "complete" | "failed";
+  totalPages: number;
+  nativePagesProcessed: number;
+  nativePagesReadable: number;
+  visionPagesQueued: number;
+  visionPagesCompleted: number;
+  visionPagesFailed: number;
+  currentBatch?: { startPage: number; endPage: number; provider: "gemini-vision" | "nvidia-vision" };
+  partialFailures: string[];
+  completedPageRanges?: Array<{ startPage: number; endPage: number; extractor: string; success: boolean }>;
+  failedPages?: number[];
+  extractedTextLength?: number;
+};
+
 export type BackgroundJobRow = {
   id: string;
   job_type: BackgroundJobType;
@@ -308,4 +323,60 @@ export async function readBackgroundJobs(limit = 25, userId?: string): Promise<B
     devLog("read jobs failed", { error: error instanceof Error ? error.message : "unknown" });
     return [];
   }
+}
+
+export async function saveExtractionProgress(
+  fileId: string,
+  userId: string,
+  progress: ExtractionProgressDetail,
+): Promise<void> {
+  if (!hasAdminSupabaseEnv()) return;
+  const supabase = createAdminSupabaseClient();
+  const { error } = await supabase.from("files").update({
+    extraction_progress: sanitizePayload(progress),
+    extraction_updated_at: new Date().toISOString(),
+  }).eq("id", fileId).eq("user_id", userId);
+  if (error) devLog("extraction progress save failed", { fileId, error: error.message });
+}
+
+export async function loadExtractionProgress(
+  fileId: string,
+  userId: string,
+): Promise<ExtractionProgressDetail | null> {
+  if (!hasAdminSupabaseEnv()) return null;
+  const supabase = createAdminSupabaseClient();
+  const { data, error } = await supabase.from("files").select("extraction_progress").eq("id", fileId).eq("user_id", userId).maybeSingle();
+  if (error || !data?.extraction_progress) return null;
+  return data.extraction_progress as ExtractionProgressDetail;
+}
+
+export async function clearExtractionProgress(
+  fileId: string,
+  userId: string,
+): Promise<void> {
+  if (!hasAdminSupabaseEnv()) return;
+  const supabase = createAdminSupabaseClient();
+  const { error } = await supabase.from("files").update({
+    extraction_progress: null,
+    extraction_updated_at: null,
+  }).eq("id", fileId).eq("user_id", userId);
+  if (error) devLog("extraction progress clear failed", { fileId, error: error.message });
+}
+
+export function getCompletedPagesFromProgress(progress: ExtractionProgressDetail | null): Set<number> {
+  if (!progress?.completedPageRanges) return new Set();
+  const pages = new Set<number>();
+  for (const range of progress.completedPageRanges) {
+    if (range.success) {
+      for (let p = range.startPage; p <= range.endPage; p++) {
+        pages.add(p);
+      }
+    }
+  }
+  return pages;
+}
+
+export function getFailedPagesFromProgress(progress: ExtractionProgressDetail | null): Set<number> {
+  if (!progress?.failedPages) return new Set();
+  return new Set(progress.failedPages);
 }

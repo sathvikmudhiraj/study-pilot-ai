@@ -17,6 +17,8 @@ export type ChatAnswer = {
   learning_step?: unknown;
   source_chips?: { id?: string; label: string; type: string }[];
   source_citations?: SourceCitationValue[];
+  found_in_notes?: boolean;
+  source_ids?: string[];
 };
 
 type Section = {
@@ -25,19 +27,60 @@ type Section = {
   accent?: boolean;
 };
 
+const PLACEHOLDER_VALUES = new Set(["string", "example", "placeholder", "null", "undefined", "n/a", "none", "todo"]);
+
+function cleanDisplayText(value: unknown) {
+  const text = String(value ?? "")
+    .normalize("NFKC")
+    .replace(/^\s*["'`]+|["'`]+\s*$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return "";
+  const normalized = text.toLowerCase().replace(/[.!?;:]+$/g, "").trim();
+  if (PLACEHOLDER_VALUES.has(normalized)) return "";
+  if (/^PRACTICE QUESTION:\s*string$/i.test(text)) return "";
+  if (/^NEXT STEP:\s*string$/i.test(text)) return "";
+  return text;
+}
+
+function cleanDisplayList(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const items: string[] = [];
+  for (const item of value) {
+    const cleaned = cleanDisplayText(item);
+    const key = cleaned.toLowerCase();
+    if (!cleaned || seen.has(key)) continue;
+    seen.add(key);
+    items.push(cleaned);
+  }
+  return items;
+}
+
 /** Assemble the structured answer into ordered, labeled blocks. */
 function buildSections(answer: ChatAnswer): Section[] {
   const sections: Section[] = [];
-  if (answer.short_answer?.trim()) sections.push({ heading: "Short answer", body: answer.short_answer });
-  if (answer.simple_explanation?.trim()) sections.push({ heading: "Simple explanation", body: answer.simple_explanation });
-  if (answer.step_by_step?.length) sections.push({ heading: "Step-by-step", body: answer.step_by_step });
-  if (answer.example?.trim()) sections.push({ heading: "Example", body: answer.example });
-  if (answer.memory_line?.trim()) sections.push({ heading: "Memory trick", body: answer.memory_line, accent: true });
-  if (answer.common_mistake?.trim()) sections.push({ heading: "Common mistake", body: answer.common_mistake });
-  if (answer.exam_viva_answer?.trim()) sections.push({ heading: "Exam / viva answer", body: answer.exam_viva_answer });
-  if (answer.practice_question?.trim()) sections.push({ heading: "Practice question", body: answer.practice_question });
-  if (answer.related_files_notes?.length) sections.push({ heading: "Related files & notes", body: answer.related_files_notes });
-  if (answer.next_step?.trim()) sections.push({ heading: "Next step", body: answer.next_step });
+  const shortAnswer = cleanDisplayText(answer.short_answer);
+  const simpleExplanation = cleanDisplayText(answer.simple_explanation);
+  const stepByStep = cleanDisplayList(answer.step_by_step);
+  const example = cleanDisplayText(answer.example);
+  const memoryLine = cleanDisplayText(answer.memory_line);
+  const commonMistake = cleanDisplayText(answer.common_mistake);
+  const examAnswer = cleanDisplayText(answer.exam_viva_answer);
+  const practiceQuestion = cleanDisplayText(answer.practice_question);
+  const related = cleanDisplayList(answer.related_files_notes);
+  const nextStep = cleanDisplayText(answer.next_step);
+
+  if (shortAnswer) sections.push({ heading: "Short answer", body: shortAnswer });
+  if (simpleExplanation) sections.push({ heading: "Simple explanation", body: simpleExplanation });
+  if (stepByStep.length) sections.push({ heading: "Step-by-step", body: stepByStep });
+  if (example) sections.push({ heading: "Example", body: example });
+  if (memoryLine) sections.push({ heading: "Memory trick", body: memoryLine, accent: true });
+  if (commonMistake) sections.push({ heading: "Common mistake", body: commonMistake });
+  if (examAnswer) sections.push({ heading: "Exam / viva answer", body: examAnswer });
+  if (practiceQuestion) sections.push({ heading: "Practice question", body: practiceQuestion });
+  if (related.length) sections.push({ heading: "Related files & notes", body: related });
+  if (nextStep) sections.push({ heading: "Next step", body: nextStep });
   return sections;
 }
 
@@ -62,7 +105,22 @@ function hasContent(answer: ChatAnswer) {
  * lightweight inline headings instead of heavy bordered cards.
  */
 export function AssistantAnswer({ answer }: { answer: ChatAnswer }) {
-  const lead = answer.short_answer?.trim() ? answer.short_answer : answer.simple_explanation?.trim();
+  if (answer.found_in_notes === false) {
+    return (
+      <div className="min-w-0 text-sm leading-6 text-slate-200">
+        <p className="font-medium text-amber-100">Not found in your selected notes.</p>
+        <p className="mt-1 text-slate-400">StudyPilot did not find enough supporting evidence in the selected study material.</p>
+        <button
+          type="button"
+          className="mt-3 rounded-md border border-cyan-300/25 bg-cyan-300/[0.08] px-3 py-1.5 text-xs font-semibold text-cyan-100"
+        >
+          Search outside my notes
+        </button>
+      </div>
+    );
+  }
+
+  const lead = cleanDisplayText(answer.short_answer) || cleanDisplayText(answer.simple_explanation);
   const rest = buildSections(answer).filter(
     (section) => section.heading !== "Short answer" && (lead ? section.heading !== "Simple explanation" : true),
   );

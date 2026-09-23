@@ -28,7 +28,7 @@ export default defineConfig({
     : {
         command: `npm run dev -- --hostname 127.0.0.1 --port ${e2ePort}`,
         url: baseURL,
-        reuseExistingServer: false,
+        reuseExistingServer: true,
         timeout: 120_000,
       },
   projects: [

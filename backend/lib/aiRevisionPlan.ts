@@ -1,6 +1,6 @@
 import "server-only";
 
-import { generateAIText, getAIProviderRuntimeInfo, type AIProviderTelemetryEvent } from "./aiProvider";
+import { generateAITextWithMetadata, generateRevisionAITextWithMetadata, getAIProviderRuntimeInfo, type AIProviderResult, type AIProviderTelemetryEvent } from "./aiProvider";
 import { generateLocalizedText } from "./aiLanguage";
 import { STUDYPILOT_TUTOR_INSTRUCTION } from "./tutorPrompt";
 import type { LearnerProfile } from "./learnerProfile";
@@ -251,34 +251,74 @@ function extractFirstJsonObject(raw: string) {
   return "";
 }
 
-function tryParseJson(raw: string): Record<string, unknown> | null {
+type ParseAttempt = {
+  parsed: Record<string, unknown> | null;
+  method: string;
+  error: string | null;
+};
+
+function parseJsonWithDiagnostics(raw: string): ParseAttempt {
+  if (!raw.trim()) {
+    return { parsed: null, method: "none", error: "empty response" };
+  }
+
   const candidates = [
-    stripJsonFence(raw),
-    extractFirstJsonObject(stripJsonFence(raw)),
-    extractFirstJsonObject(raw),
-  ].filter(Boolean);
+    { method: "direct-or-fence", value: stripJsonFence(raw) },
+    { method: "fenced-first-object", value: extractFirstJsonObject(stripJsonFence(raw)) },
+    { method: "raw-first-object", value: extractFirstJsonObject(raw) },
+  ].filter((candidate) => Boolean(candidate.value));
+
+  let lastError: string | null = null;
 
   for (const candidate of candidates) {
     try {
-      const parsed = JSON.parse(candidate);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
-    } catch {
+      const parsed = JSON.parse(candidate.value);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return { parsed: parsed as Record<string, unknown>, method: candidate.method, error: null };
+      }
+      lastError = "Parsed JSON was not an object.";
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "JSON parse failed.";
       // try repair
-      const repaired = candidate
+      const repaired = candidate.value
         .replace(/,\s*}/g, "}")
         .replace(/,\s*]/g, "]")
         .replace(/[\u201c\u201d]/g, '"')
         .replace(/[\u2018\u2019]/g, "'");
       try {
         const parsed = JSON.parse(repaired);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
-      } catch {
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          return { parsed: parsed as Record<string, unknown>, method: `${candidate.method}-punctuation-repair`, error: null };
+        }
+        lastError = "Repaired JSON was not an object.";
+      } catch (repairError) {
+        lastError = repairError instanceof Error ? repairError.message : "JSON repair parse failed.";
         // continue to next candidate
       }
     }
   }
 
-  return null;
+  return { parsed: null, method: "none", error: lastError };
+}
+
+function responseDebugShape(raw: string, parsed?: Record<string, unknown> | null) {
+  const stripped = stripJsonFence(raw);
+  const firstObject = extractFirstJsonObject(stripped || raw);
+  const rootKeys = parsed ? Object.keys(parsed).slice(0, 30) : [];
+  const planValue = parsed?.plan;
+  const dailyValue = parsed?.daily_plan ?? parsed?.dailyPlan ?? parsed?.days ?? parsed?.schedule;
+
+  return {
+    rawLength: raw.length,
+    startsWithFence: raw.trimStart().startsWith("```"),
+    hasLeadingProse: raw.trimStart()[0] !== "{",
+    hasTrailingProse: Boolean(firstObject && stripped.trim() !== firstObject.trim()),
+    rootKeys,
+    dailyPlanType: Array.isArray(dailyValue) ? "array" : typeof dailyValue,
+    dailyPlanLength: Array.isArray(dailyValue) ? dailyValue.length : null,
+    planType: Array.isArray(planValue) ? "array" : typeof planValue,
+    sample: raw.slice(0, 1800),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -498,53 +538,93 @@ function buildReducedStudyContextText(ctx: StudyContext): { text: string; stats:
 // Validate and normalize Gemini response into RevisionPlan
 // ---------------------------------------------------------------------------
 
+function requiredText(record: Record<string, unknown>, ...keys: string[]) {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function firstArray(record: Record<string, unknown>, ...keys: string[]) {
+  for (const key of keys) {
+    const value = record[key];
+    if (Array.isArray(value)) return value;
+  }
+  return [];
+}
+
+function firstRecord(record: Record<string, unknown>, ...keys: string[]) {
+  for (const key of keys) {
+    const value = record[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  }
+  return {};
+}
+
 function validateRevisionPlan(record: Record<string, unknown>, ctx: StudyContext): RevisionPlan {
-  const title = String(record.title ?? "Revision Plan").trim() || "Revision Plan";
+  const errors: string[] = [];
+  const title = requiredText(record, "title", "plan_title", "planTitle", "revision_title", "revisionTitle");
+  if (!title) errors.push("title is missing");
   const trackedWeakTopics = uniqueStrings(ctx.quiz_analytics.weak_topics, 20);
   const trackedStrongTopics = uniqueStrings(ctx.quiz_analytics.strong_topics, 20);
   const importantTopics = uniqueStrings(
-    [...trackedWeakTopics, ...stringList(record.important_topics ?? record.importantTopics ?? record.topics)],
+    [...trackedWeakTopics, ...stringList(firstArray(record, "important_topics", "importantTopics", "topics", "all_topics", "allTopics"))],
     30,
   );
   const reviseFirst = uniqueStrings(
-    [...trackedWeakTopics, ...stringList(record.revise_first ?? record.reviseFirst ?? record.priority_topics)],
+    [...trackedWeakTopics, ...stringList(firstArray(record, "revise_first", "reviseFirst", "priority_topics", "priorityTopics", "high_priority_topics", "highPriorityTopics"))],
     20,
   );
   const weakKeys = new Set(trackedWeakTopics.map((topic) => topic.toLowerCase()));
   const pendingTopics = uniqueStrings(
-    stringList(record.pending_topics ?? record.pendingTopics ?? record.remaining_topics).filter(
+    stringList(firstArray(record, "pending_topics", "pendingTopics", "remaining_topics", "remainingTopics", "later_topics", "laterTopics")).filter(
       (topic) => !weakKeys.has(topic.toLowerCase()),
     ),
     30,
   );
+  if (!importantTopics.length) errors.push("important_topics is missing or empty");
+  if (!reviseFirst.length) errors.push("revise_first is missing or empty");
 
   // Parse daily plan
-  const rawDaily = record.daily_plan ?? record.dailyPlan ?? [];
+  const rawDaily = record.daily_plan ?? record.dailyPlan ?? record.days ?? record.schedule ?? record.week_plan ?? record.weekPlan ?? [];
   const dailyPlan: DayPlan[] = (Array.isArray(rawDaily) ? rawDaily : [])
     .map((item: unknown, index: number) => {
       if (!item || typeof item !== "object") return null;
       const day = item as Record<string, unknown>;
+      const focusTopics = uniqueStrings(stringList(day.focus_topics ?? day.focusTopics ?? day.topics ?? day.focus), 10);
+      const tasks = uniqueStrings(stringList(day.tasks ?? day.study_tasks ?? day.studyTasks ?? day.activities ?? day.to_do ?? day.todo), 10);
+      if (!focusTopics.length || !tasks.length) return null;
       return {
         day: Number(day.day ?? day.day_number ?? index + 1) || index + 1,
         date: String(day.date ?? "").trim() || "",
-        focus_topics: uniqueStrings(stringList(day.focus_topics ?? day.focusTopics ?? day.topics), 10),
-        tasks: uniqueStrings(stringList(day.tasks ?? day.study_tasks ?? day.activities), 10),
+        focus_topics: focusTopics,
+        tasks,
         estimated_time: String(day.estimated_time ?? day.time ?? day.duration ?? "1 hour").trim() || "1 hour",
       };
     })
     .filter((item): item is DayPlan => Boolean(item))
     .slice(0, 14);
+  if (!dailyPlan.length) errors.push("daily_plan is missing or contains no valid days");
 
   // Parse plan metadata
-  const rawPlan = record.plan ?? {};
+  const rawPlan = firstRecord(record, "plan", "metadata", "plan_meta", "planMeta");
+  const nextSteps = uniqueStrings(stringList(rawPlan.next_steps ?? rawPlan.nextSteps ?? record.next_steps ?? record.nextSteps), 8);
+  const studyTips = uniqueStrings(stringList(rawPlan.study_tips ?? rawPlan.studyTips ?? record.study_tips ?? record.studyTips), 8);
+  if (!nextSteps.length) errors.push("plan.next_steps is missing or empty");
+  if (!studyTips.length) errors.push("plan.study_tips is missing or empty");
   const plan: PlanMeta = {
-    total_days: Number((rawPlan as Record<string, unknown>)?.total_days ?? (rawPlan as Record<string, unknown>)?.totalDays ?? dailyPlan.length) || dailyPlan.length || DEFAULT_PLAN_DAYS,
-    next_steps: uniqueStrings(stringList((rawPlan as Record<string, unknown>)?.next_steps ?? (rawPlan as Record<string, unknown>)?.nextSteps ?? record.next_steps), 8),
-    study_tips: uniqueStrings(stringList((rawPlan as Record<string, unknown>)?.study_tips ?? (rawPlan as Record<string, unknown>)?.studyTips ?? []), 8),
+    total_days: Number(rawPlan.total_days ?? rawPlan.totalDays ?? dailyPlan.length) || dailyPlan.length || DEFAULT_PLAN_DAYS,
+    next_steps: nextSteps,
+    study_tips: studyTips,
     strong_topics: trackedStrongTopics,
     weak_topics: trackedWeakTopics,
     last_quiz_score: ctx.quiz_analytics.last_quiz_score,
   };
+
+  if (errors.length) {
+    throw new Error(`AI revision plan schema validation failed: ${errors.join("; ")}.`);
+  }
 
   // Compute dates from today if not provided
   const today = new Date();
@@ -593,9 +673,10 @@ function validateRevisionPlan(record: Record<string, unknown>, ctx: StudyContext
 export async function generateRevisionPlan(
   ctx: StudyContext,
   language: SupportedLanguageCode = DEFAULT_LANGUAGE,
+  signal?: AbortSignal,
 ): Promise<RevisionPlan> {
   const { text: contextText, stats } = buildReducedStudyContextText(ctx);
-  const providerInfo = getAIProviderRuntimeInfo("default");
+  const providerInfo = getAIProviderRuntimeInfo("revision");
   const telemetryEvents: AIProviderTelemetryEvent[] = [];
   let actualProvider = providerInfo.primaryProvider;
   let actualModel = providerInfo.primaryModel;
@@ -683,12 +764,15 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
 
   const aiStartedAt = Date.now();
   let response = "";
+  const providerResultRef: { current: AIProviderResult | null } = { current: null };
   try {
     response = await generateLocalizedText(prompt, language, (localizedPrompt) =>
-      generateAIText(localizedPrompt, {
+      generateRevisionAITextWithMetadata(localizedPrompt, {
         temperature: 0.25,
         maxOutputTokens: 6000,
         responseMimeType: "application/json",
+        timeoutMs: providerInfo.timeoutMs,
+        signal,
         telemetry(event) {
           telemetryEvents.push(event);
           if (event.event === "provider_started" || event.event === "final_provider") {
@@ -700,6 +784,9 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
             aiLatencyMs = event.durationMs;
           }
         },
+      }).then((result) => {
+        providerResultRef.current = result;
+        return result.text;
       }),
     );
   } catch (error) {
@@ -730,14 +817,138 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
     originalFileTextChars: stats.originalFileTextChars,
     includedFileTextChars: stats.includedFileTextChars,
     fullExtractedTextSent: stats.fullExtractedTextSent,
+    responseMode: providerResultRef.current?.responseMode ?? null,
+    providerFailureCategory: providerResultRef.current?.providerFailureCategory ?? null,
   });
 
-  devLog("AI response received", { rawLength: response.length });
+  const unavailableMessage = providerUnavailableMessage(providerResultRef.current, actualProvider);
+  if (unavailableMessage) {
+    devLog("AI revision provider unavailable", {
+      provider: actualProvider,
+      model: actualModel,
+      responseMode: providerResultRef.current?.responseMode ?? null,
+      providerFailureCategory: providerResultRef.current?.providerFailureCategory ?? null,
+      responseChars: response.length,
+    });
+    throw new Error(unavailableMessage);
+  }
 
-  const parsed = tryParseJson(response);
-  if (!parsed) throw new Error("AI returned a plan format StudyPilot could not read. Please try again.");
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[DEBUG] REVISION raw AI response:", {
+      provider: actualProvider,
+      model: actualModel,
+      rawLength: response.length,
+      rawPreview: response.slice(0, 500),
+      startsWithFence: response.trimStart().startsWith("```"),
+      leadingProse: response.trimStart()[0] !== "{",
+    });
+  }
 
-  const plan = validateRevisionPlan(parsed, ctx);
+  const parseAttempt = parseJsonWithDiagnostics(response);
+  devLog("AI revision response received", {
+    provider: actualProvider,
+    model: actualModel,
+    parseMethod: parseAttempt.method,
+    parseError: parseAttempt.error,
+    shape: responseDebugShape(response, parseAttempt.parsed),
+  });
+
+  let parsed = parseAttempt.parsed;
+  let plan: RevisionPlan | null = null;
+  let validationError: string | null = null;
+
+  if (parsed) {
+    try {
+      plan = validateRevisionPlan(parsed, ctx);
+    } catch (error) {
+      validationError = error instanceof Error ? error.message : "AI revision plan schema validation failed.";
+      devLog("AI revision schema validation failed", {
+        provider: actualProvider,
+        model: actualModel,
+        error: validationError,
+        shape: responseDebugShape(response, parsed),
+      });
+    }
+  }
+
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[DEBUG] REVISION validation:", {
+      parseMethod: parseAttempt.method,
+      parseError: parseAttempt.error,
+      parsedKeys: parsed ? Object.keys(parsed) : null,
+      validationPassed: !!plan,
+      validationError,
+    });
+  }
+
+  const providerResult = providerResultRef.current;
+  const isProviderFailure =
+    !providerResult ||
+    providerResult.responseMode === "offline_fallback" ||
+    !providerResult.text.trim() ||
+    (providerResult.providerFailureCategory &&
+      ["timeout", "quota", "busy", "auth", "config", "request"].includes(providerResult.providerFailureCategory));
+
+  if (!plan && !isProviderFailure) {
+    const failureReason = parseAttempt.error
+      ? `JSON parse failed: ${parseAttempt.error}`
+      : validationError ?? "Revision plan schema validation failed.";
+    devLog("AI revision JSON repair started", {
+      provider: actualProvider,
+      model: actualModel,
+      failureReason,
+      rawLength: response.length,
+    });
+
+    const repairedResponse = await repairRevisionJson({
+      response,
+      language,
+      failureReason,
+      providerInfo,
+      telemetryEvents,
+      signal,
+    });
+    const repairUnavailableMessage = providerUnavailableMessage(repairedResponse.result, actualProvider);
+    if (repairUnavailableMessage) {
+      devLog("AI revision repair provider unavailable", {
+        responseMode: repairedResponse.result?.responseMode ?? null,
+        providerFailureCategory: repairedResponse.result?.providerFailureCategory ?? null,
+        responseChars: repairedResponse.text.length,
+      });
+      throw new Error(repairUnavailableMessage);
+    }
+
+    const repairedParse = parseJsonWithDiagnostics(repairedResponse.text);
+    devLog("AI revision repair response received", {
+      parseMethod: repairedParse.method,
+      parseError: repairedParse.error,
+      shape: responseDebugShape(repairedResponse.text, repairedParse.parsed),
+    });
+    parsed = repairedParse.parsed;
+    if (parsed) {
+      try {
+        plan = validateRevisionPlan(parsed, ctx);
+      } catch (error) {
+        validationError = error instanceof Error ? error.message : "AI revision plan schema validation failed.";
+        devLog("AI revision repaired schema validation failed", {
+          error: validationError,
+          shape: responseDebugShape(repairedResponse.text, parsed),
+        });
+      }
+    }
+  } else if (!plan && isProviderFailure) {
+    devLog("AI revision skipping JSON repair due to provider failure", {
+      provider: actualProvider,
+      model: actualModel,
+      responseMode: providerResult?.responseMode ?? null,
+      providerFailureCategory: providerResult?.providerFailureCategory ?? null,
+      hasText: Boolean(providerResult?.text?.trim()),
+    });
+  }
+
+  if (!plan) {
+    throw new Error("AI returned a plan format StudyPilot could not read. Please try again.");
+  }
 
   devLog("revision plan validated", {
     title: plan.title,
@@ -750,4 +961,109 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
   });
 
   return plan;
+}
+
+function revisionSchemaRepairPrompt(rawResponse: string, failureReason: string) {
+  return `Repair the revision plan payload below into one complete, valid JSON object.
+Return JSON only, with no markdown or commentary. Preserve the original facts, topics, dates, and tasks. Do not invent new study content.
+
+The JSON object must match this exact schema:
+{
+  "title": "string",
+  "important_topics": ["string"],
+  "revise_first": ["string"],
+  "pending_topics": ["string"],
+  "daily_plan": [
+    {
+      "day": 1,
+      "date": "YYYY-MM-DD",
+      "focus_topics": ["string"],
+      "tasks": ["string"],
+      "estimated_time": "string"
+    }
+  ],
+  "starts_on": "YYYY-MM-DD",
+  "ends_on": "YYYY-MM-DD",
+  "plan": {
+    "total_days": 7,
+    "next_steps": ["string"],
+    "study_tips": ["string"]
+  }
+}
+
+Rules:
+- Convert camelCase or alternate field names to the snake_case schema above.
+- If the payload is wrapped in Markdown or prose, keep only the JSON object.
+- If a required field is genuinely absent or empty, return the best valid JSON only if the missing value is explicitly present elsewhere in the payload.
+- Discard impossible malformed fragments rather than inventing unsupported study content.
+
+Failure reason:
+${failureReason.slice(0, 500)}
+
+PAYLOAD TO REPAIR:
+${rawResponse.slice(0, 12000)}`;
+}
+
+async function repairRevisionJson({
+  response,
+  language,
+  failureReason,
+  providerInfo,
+  telemetryEvents,
+  signal,
+}: {
+  response: string;
+  language: SupportedLanguageCode;
+  failureReason: string;
+  providerInfo: ReturnType<typeof getAIProviderRuntimeInfo>;
+  telemetryEvents: AIProviderTelemetryEvent[];
+  signal?: AbortSignal;
+}) {
+  const repairStartedAt = Date.now();
+  let repairProvider = providerInfo.primaryProvider;
+  let repairModel = providerInfo.primaryModel;
+  let repairTimeoutMs = providerInfo.timeoutMs;
+  const repairResultRef: { current: AIProviderResult | null } = { current: null };
+  const repairResponse = await generateLocalizedText(revisionSchemaRepairPrompt(response, failureReason), language, (localizedPrompt) =>
+    generateAITextWithMetadata(localizedPrompt, {
+      temperature: 0,
+      maxOutputTokens: 5200,
+      responseMimeType: "application/json",
+      timeoutMs: providerInfo.timeoutMs,
+      signal,
+      telemetry(event) {
+        telemetryEvents.push(event);
+        if (event.event === "provider_started" || event.event === "final_provider") {
+          if (event.provider !== "auto") repairProvider = event.provider;
+          if (event.model) repairModel = event.model;
+          if (event.timeoutMs) repairTimeoutMs = event.timeoutMs;
+        }
+      },
+    }).then((result) => {
+      repairResultRef.current = result;
+      return result.text;
+    }),
+  );
+
+  telemetryLog("revision ai repair completed", {
+    provider: repairProvider,
+    model: repairModel,
+    timeoutMs: repairTimeoutMs,
+    aiLatencyMs: Date.now() - repairStartedAt,
+    responseChars: repairResponse.length,
+    responseMode: repairResultRef.current?.responseMode ?? null,
+    providerFailureCategory: repairResultRef.current?.providerFailureCategory ?? null,
+  });
+
+  return { text: repairResponse, result: repairResultRef.current };
+}
+
+function providerUnavailableMessage(result: AIProviderResult | null, provider: string) {
+  if (!result) return null;
+  if (result.responseMode !== "offline_fallback" && result.text.trim()) return null;
+  if (result.providerFailureCategory === "quota") return "Free AI limit reached. Please try again later.";
+  if (result.providerFailureCategory === "timeout") return "StudyPilot AI timed out while creating the revision plan. Please try again.";
+  if (result.providerFailureCategory) return "StudyPilot AI could not create a revision plan right now. Please try again.";
+  if (!result.text.trim()) return `StudyPilot AI returned an empty revision response from ${provider}. Please try again.`;
+  return null;
 }

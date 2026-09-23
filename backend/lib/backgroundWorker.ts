@@ -6,11 +6,18 @@ import {
   failBackgroundJob,
   updateBackgroundJobProgress,
   type BackgroundJobRow,
+  saveExtractionProgress,
+  loadExtractionProgress,
+  clearExtractionProgress,
+  getCompletedPagesFromProgress,
+  getFailedPagesFromProgress,
+  type ExtractionProgressDetail,
 } from "./backgroundJobs";
 import { createAdminSupabaseClient } from "./adminSupabase";
 import { analyzeCnsCoverage, summarizeStudyText, validateCnsExtractionCoverage } from "./aiSummary";
 import { processStudyMaterial } from "./studyMaterial";
 import { chunkDocument } from "./documentProcessing";
+import { generateAndStorePptxPreview, type PptxPreviewMetadata } from "./pptxPreview";
 import { sanitizeSummaryForDisplay } from "@/shared/summarySanitizer";
 import { DEFAULT_LANGUAGE, isSupportedLanguageCode, type SupportedLanguageCode } from "@/shared/languages";
 import { recordMonitoringEvent } from "./monitoring";
@@ -69,11 +76,16 @@ async function processPdfExtractionJob(job: BackgroundJobRow) {
   if (!file) throw new Error("File not found for PDF extraction job.");
   if (!file.storage_path) throw new Error("File storage path is missing.");
 
+  const savedProgress = await loadExtractionProgress(file.id, file.user_id);
+  const completedPages = getCompletedPagesFromProgress(savedProgress);
+  const failedPages = getFailedPagesFromProgress(savedProgress);
+  const isRetry = job.attempt_count > 1 && (completedPages.size > 0 || failedPages.size > 0);
+
   await updateBackgroundJobProgress(job.id, { stage: "downloading", fileId: file.id });
   await updateFile(file.id, file.user_id, {
     processing_status: "extracting",
     status: "extracting",
-    processing_notes: ["Background extraction started."],
+    processing_notes: isRetry ? ["Background extraction resumed."] : ["Background extraction started."],
   });
 
   const download = await supabase.storage.from("study-files").download(file.storage_path);
@@ -86,12 +98,21 @@ async function processPdfExtractionJob(job: BackgroundJobRow) {
     const coverage = validateCnsExtractionCoverage(text, file.file_name);
     return coverage.required ? coverage.valid : text.trim().length >= 40;
   };
+
+  const progressCallback = async (progress: ExtractionProgressDetail) => {
+    await saveExtractionProgress(file.id, file.user_id, progress);
+    const { stage, ...rest } = progress;
+    await updateBackgroundJobProgress(job.id, { stage, ...rest });
+  };
+
   const processed = await processStudyMaterial({
     buffer,
     fileName: file.file_name,
     mimeType: file.mime_type || download.data.type || "",
     userId: file.user_id,
     validateExtractedText,
+    resumeProgress: savedProgress,
+    progressCallback,
   });
 
   if (!processed.extractedText.trim()) {
@@ -106,6 +127,7 @@ async function processPdfExtractionJob(job: BackgroundJobRow) {
         processedBy: "background-worker",
       },
     });
+    await clearExtractionProgress(file.id, file.user_id);
     throw new Error(processed.extractionFailure?.message ?? "No readable text found during background extraction.");
   }
 
@@ -128,7 +150,38 @@ async function processPdfExtractionJob(job: BackgroundJobRow) {
         processedBy: "background-worker",
       },
     });
+    await clearExtractionProgress(file.id, file.user_id);
     throw new Error("Full file extraction is incomplete.");
+  }
+
+  let previewMetadata: PptxPreviewMetadata | null = null;
+  let previewFailureMetadata: Record<string, string> | null = null;
+  const previewNotes: string[] = [];
+  if (processed.contentType === "pptx") {
+    try {
+      previewMetadata = await generateAndStorePptxPreview({
+        supabase,
+        userId: file.user_id,
+        fileId: file.id,
+        fileName: file.file_name,
+        pptxBuffer: buffer,
+      });
+      previewNotes.push("PPTX visual preview generated as a separate PDF asset.");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "unknown error";
+      const message = "PPTX visual preview conversion failed in this environment. Text preview is shown instead.";
+      previewFailureMetadata = {
+        type: "pdf",
+        status: "failed",
+        attemptedAt: new Date().toISOString(),
+        reason: message,
+      };
+      previewNotes.push(message);
+      devLog("pptx preview generation skipped", {
+        fileId: file.id,
+        error: detail,
+      });
+    }
   }
 
   await updateFile(file.id, file.user_id, {
@@ -137,14 +190,18 @@ async function processPdfExtractionJob(job: BackgroundJobRow) {
     status: "extracted",
     chunks_count: processed.chunksCount,
     content_type: processed.contentType,
-    processing_notes: [...processed.processingNotes, "Background extraction completed."],
+    processing_notes: [...processed.processingNotes, ...previewNotes, "Background extraction completed."],
     extracted_metadata: {
       ...(processed.documentMetadata ?? {}),
       ...(processed.pageMetadata ?? {}),
+      ...(previewMetadata ? { preview: previewMetadata } : {}),
+      ...(!previewMetadata && previewFailureMetadata ? { preview: previewFailureMetadata } : {}),
       extractionValidated: true,
       processedBy: "background-worker",
     },
   });
+
+  await clearExtractionProgress(file.id, file.user_id);
 
   await completeBackgroundJob(job, {
     fileId: file.id,
@@ -152,6 +209,10 @@ async function processPdfExtractionJob(job: BackgroundJobRow) {
     chunksCount: processed.chunksCount,
     pageCount: processed.pageMetadata?.totalPages ?? null,
     extractedPageCount: processed.pageMetadata?.extractedPageCount ?? null,
+    visionPagesSucceeded: processed.pageMetadata?.visionPagesSucceeded ?? 0,
+    visionPagesFailed: processed.pageMetadata?.visionPagesFailed ?? 0,
+    nativePagesSucceeded: processed.pageMetadata?.nativePagesSucceeded ?? 0,
+    fallbackProviderUsed: processed.pageMetadata?.fallbackProviderUsed ?? null,
   });
 }
 

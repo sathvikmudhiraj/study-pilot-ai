@@ -93,108 +93,116 @@ async function handleGet() {
 }
 
 async function handlePost(request: Request) {
-  const user = await requireUser();
-  if (!user) return apiError("Please log in first.", 401);
-
-  const supabase = await createServerSupabaseClient();
-  if (!supabase) return apiError("Supabase is not configured.", 500);
-
-  let body: QuizAttemptRequestBody;
   try {
-    body = await request.json();
-  } catch {
-    return apiError("Invalid request body.", 400);
-  }
+    const user = await requireUser();
+    if (!user) return apiError("Please log in first.", 401);
 
-  if (Object.prototype.hasOwnProperty.call(body, "score")) {
-    return apiError("Client-provided scores are not accepted.", 400);
-  }
+    const supabase = await createServerSupabaseClient();
+    if (!supabase) return apiError("Supabase is not configured.", 500);
 
-  const quizId = body.quizId?.trim();
-  const fileId = typeof body.fileId === "string" && body.fileId.trim() ? body.fileId.trim() : null;
-  const submitted = normalizeSubmittedAnswers(body.answers);
-  if (!quizId) return apiError("Choose a quiz first.", 400);
-  if (submitted.invalid) return apiError("Submit answers as questionId and selectedAnswer pairs.", 400);
-  if (submitted.duplicateQuestionIds.length) return apiError("Duplicate question IDs are not allowed.", 400);
+    let body: QuizAttemptRequestBody;
+    try {
+      body = await request.json();
+    } catch {
+      return apiError("Invalid request body.", 400);
+    }
 
-  const quizResult = await supabase
-    .from("quizzes")
-    .select("id, file_id, questions, answer_key, language_code")
-    .eq("id", quizId)
-    .eq("user_id", user.id)
-    .maybeSingle();
+    if (Object.prototype.hasOwnProperty.call(body, "score")) {
+      return apiError("Client-provided scores are not accepted.", 400);
+    }
 
-  if (quizResult.error) return apiError("Could not load this quiz.", 500);
-  if (!quizResult.data) return apiError("Quiz not found or you do not have access to it.", 404);
-  if (fileId && quizResult.data.file_id !== fileId) return apiError("Quiz file context does not match this attempt.", 400);
+    const quizId = body.quizId?.trim();
+    const fileId = typeof body.fileId === "string" && body.fileId.trim() ? body.fileId.trim() : null;
+    const submitted = normalizeSubmittedAnswers(body.answers);
+    if (!quizId) return apiError("Choose a quiz first.", 400);
+    if (submitted.invalid) return apiError("Submit answers as questionId and selectedAnswer pairs.", 400);
+    if (submitted.duplicateQuestionIds.length) return apiError("Duplicate question IDs are not allowed.", 400);
 
-  const unknownQuestionIds = findUnknownAnswerQuestionIds(quizResult.data.questions, submitted.answers);
-  if (unknownQuestionIds.length) return apiError("Submitted answers contain unknown questions.", 400);
+    const quizResult = await supabase
+      .from("quizzes")
+      .select("id, file_id, questions, answer_key, language_code")
+      .eq("id", quizId)
+      .eq("user_id", user.id)
+      .maybeSingle();
 
-  const graded = gradeQuizAttempt({
-    questions: quizResult.data.questions,
-    answerKey: quizResult.data.answer_key,
-    answers: submitted.answers,
-  });
+    if (quizResult.error) return apiError("Could not load this quiz.", 500);
+    if (!quizResult.data) return apiError("Quiz not found or you do not have access to it.", 404);
+    if (fileId && quizResult.data.file_id !== fileId) return apiError("Quiz file context does not match this attempt.", 400);
 
-  if (!graded.total_questions) return apiError("This quiz has no readable questions.", 400);
-  if (graded.user_answers.some((answer) => !answer.user_answer)) {
-    return apiError("Answer all questions before submitting.", 400);
-  }
+    const unknownQuestionIds = findUnknownAnswerQuestionIds(quizResult.data.questions, submitted.answers);
+    if (unknownQuestionIds.length) return apiError("Submitted answers contain unknown questions.", 400);
 
-  const saved = await supabase
-    .from("quiz_attempts")
-    .insert({
-      user_id: user.id,
-      quiz_id: quizId,
-      language_code: quizResult.data?.language_code ?? "en",
-      ...graded,
-    })
-    .select("id, quiz_id, score, total_questions, percentage, wrong_questions, weak_topics, strong_topics, created_at")
-    .single();
-
-  if (saved.error) return apiError(attemptStorageError(saved.error.message), 500);
-
-  const attempt = {
-    ...saved.data,
-    user_answers: graded.user_answers,
-    wrong_questions: graded.wrong_questions,
-  };
-  const gradeResponse: SecureQuizGradeResponse = {
-    score: graded.score,
-    totalQuestions: graded.total_questions,
-    percentage: graded.percentage,
-    correctAnswers: graded.user_answers
-      .filter((answer) => answer.is_correct)
-      .map((answer) => ({
-        questionId: answer.question_id,
-        userAnswer: answer.user_answer,
-      })),
-    wrongAnswers: graded.wrong_questions.map((answer) => ({
-      questionId: answer.question_id,
-      question: answer.question,
-      userAnswer: answer.user_answer,
-      correctAnswer: answer.correct_answer,
-    })),
-  };
-  const answerKey = buildReviewAnswerKey({
-    questions: quizResult.data.questions,
-    answerKey: quizResult.data.answer_key,
-  });
-
-  try {
-    const analytics = await loadAnalytics(supabase, user.id);
-    const learnerProfile = await loadLearnerProfile(supabase, user.id);
-    return NextResponse.json({
-      ...gradeResponse,
-      attempt,
-      answer_key: answerKey,
-      analytics,
-      learnerProfile,
-      revisionRecommendations: buildRevisionRecommendations(learnerProfile),
+    const graded = gradeQuizAttempt({
+      questions: quizResult.data.questions,
+      answerKey: quizResult.data.answer_key,
+      answers: submitted.answers,
     });
-  } catch {
-    return NextResponse.json({ ...gradeResponse, attempt, answer_key: answerKey, analytics: null });
+
+    if (!graded.total_questions) return apiError("This quiz has no readable questions.", 400);
+    if (graded.user_answers.some((answer) => !answer.user_answer)) {
+      return apiError("Answer all questions before submitting.", 400);
+    }
+
+    const saved = await supabase
+      .from("quiz_attempts")
+      .insert({
+        user_id: user.id,
+        quiz_id: quizId,
+        language_code: quizResult.data?.language_code ?? "en",
+        ...graded,
+      })
+      .select("id, quiz_id, score, total_questions, percentage, wrong_questions, weak_topics, strong_topics, created_at")
+      .single();
+
+    if (saved.error) return apiError(attemptStorageError(saved.error.message), 500);
+
+    const attempt = {
+      ...saved.data,
+      user_answers: graded.user_answers,
+      wrong_questions: graded.wrong_questions,
+    };
+    const gradeResponse: SecureQuizGradeResponse = {
+      score: graded.score,
+      totalQuestions: graded.total_questions,
+      percentage: graded.percentage,
+      correctAnswers: graded.user_answers
+        .filter((answer) => answer.is_correct)
+        .map((answer) => ({
+          questionId: answer.question_id,
+          userAnswer: answer.user_answer,
+        })),
+      wrongAnswers: graded.wrong_questions.map((answer) => ({
+        questionId: answer.question_id,
+        question: answer.question,
+        userAnswer: answer.user_answer,
+        correctAnswer: answer.correct_answer,
+      })),
+    };
+    const answerKey = buildReviewAnswerKey({
+      questions: quizResult.data.questions,
+      answerKey: quizResult.data.answer_key,
+    });
+
+    try {
+      const analytics = await loadAnalytics(supabase, user.id);
+      const learnerProfile = await loadLearnerProfile(supabase, user.id);
+      return NextResponse.json({
+        ...gradeResponse,
+        attempt,
+        answer_key: answerKey,
+        analytics,
+        learnerProfile,
+        revisionRecommendations: buildRevisionRecommendations(learnerProfile),
+      });
+    } catch {
+      return NextResponse.json({ ...gradeResponse, attempt, answer_key: answerKey, analytics: null });
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not save this quiz attempt.";
+    const userMessage = message.includes("Invalid or missing correct_index")
+      ? "This saved quiz cannot be graded. Generate a fresh quiz and try again."
+      : "Could not save this quiz attempt. Please try again.";
+    return apiError(userMessage, 500);
   }
 }
 

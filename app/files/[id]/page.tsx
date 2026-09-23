@@ -6,6 +6,7 @@ import { Badge } from "@/frontend/components/ui";
 import { IconChevronLeft, IconFileText } from "@/frontend/components/icons";
 import { getCurrentUser } from "@/backend/lib/auth";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
+import { generateAndStorePptxPreview, type PptxPreviewMetadata } from "@/backend/lib/pptxPreview";
 import { supabaseSetupMessage } from "@/frontend/lib/supabase/errors";
 import { isSupportedLanguageCode } from "@/shared/languages";
 
@@ -53,6 +54,31 @@ function cleanProcessingNotes(notes: string[] | null) {
   return Array.from(new Set(friendly));
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function readPreviewMetadata(value: unknown): PptxPreviewMetadata | null {
+  if (!isRecord(value)) return null;
+  const preview = value.preview;
+  if (!isRecord(preview)) return null;
+  if (preview.type !== "pdf" || preview.mimeType !== "application/pdf" || typeof preview.storagePath !== "string") return null;
+  if (preview.converter !== "libreoffice" && preview.converter !== "powerpoint-com") return null;
+  return {
+    type: "pdf",
+    storagePath: preview.storagePath,
+    mimeType: "application/pdf",
+    generatedAt: typeof preview.generatedAt === "string" ? preview.generatedAt : "",
+    converter: preview.converter,
+  };
+}
+
+function hasPreviewFailure(value: unknown) {
+  if (!isRecord(value)) return false;
+  const preview = value.preview;
+  return isRecord(preview) && preview.type === "pdf" && preview.status === "failed";
+}
+
 export default async function FileDetailPage({
   params,
   searchParams,
@@ -68,6 +94,8 @@ export default async function FileDetailPage({
   const supabase = await createServerSupabaseClient();
 
   let signedUrl: string | null = null;
+  let previewSignedUrl: string | null = null;
+  let textPreviewLabel = "Extracted text";
   let previewError = "";
 
   if (!user) {
@@ -90,7 +118,7 @@ export default async function FileDetailPage({
 
   const baseResult = await supabase
     .from("files")
-    .select("id, user_id, file_name, file_type, mime_type, file_size, storage_path, processing_status, status, extracted_text, created_at")
+    .select("id, user_id, file_name, file_type, mime_type, file_size, storage_path, processing_status, status, extracted_text, extracted_metadata, created_at")
     .eq("id", id)
     .eq("user_id", user.id)
     .maybeSingle();
@@ -153,6 +181,63 @@ export default async function FileDetailPage({
     previewError = "This file does not have a storage path.";
   }
 
+  const isPptx = file.content_type === "pptx" || file.mime_type === "application/vnd.openxmlformats-officedocument.presentationml.presentation" || file.file_name.toLowerCase().endsWith(".pptx");
+  let previewMetadata = readPreviewMetadata(file.extracted_metadata);
+  const previewPreviouslyFailed = hasPreviewFailure(file.extracted_metadata);
+
+  if (isPptx && !previewMetadata && !previewPreviouslyFailed && file.storage_path) {
+    try {
+      const download = await supabase.storage.from("study-files").download(file.storage_path);
+      if (download.error) throw new Error("Could not read the uploaded PPTX from storage.");
+
+      const generated = await generateAndStorePptxPreview({
+        supabase,
+        userId: user.id,
+        fileId: file.id,
+        fileName: file.file_name,
+        pptxBuffer: Buffer.from(await download.data.arrayBuffer()),
+      });
+      const metadata = isRecord(file.extracted_metadata) ? file.extracted_metadata : {};
+      const updated = await supabase
+        .from("files")
+        .update({ extracted_metadata: { ...metadata, preview: generated } })
+        .eq("id", file.id)
+        .eq("user_id", user.id);
+      if (!updated.error) previewMetadata = generated;
+    } catch {
+      previewError = "PPTX visual preview conversion failed in this environment. Text preview is shown instead.";
+      const metadata = isRecord(file.extracted_metadata) ? file.extracted_metadata : {};
+      await supabase
+        .from("files")
+        .update({
+          extracted_metadata: {
+            ...metadata,
+            preview: {
+              type: "pdf",
+              status: "failed",
+              attemptedAt: new Date().toISOString(),
+              reason: previewError,
+            },
+          },
+        })
+        .eq("id", file.id)
+        .eq("user_id", user.id);
+    }
+  }
+
+  if (previewMetadata?.storagePath) {
+    const signedPreview = await supabase.storage.from("study-files").createSignedUrl(previewMetadata.storagePath, 60 * 10);
+    if (!signedPreview.error) {
+      previewSignedUrl = signedPreview.data.signedUrl;
+    } else if (isPptx) {
+      previewError = "The generated PPTX preview is not available. Text preview is shown instead.";
+    }
+  }
+
+  if (isPptx && !previewSignedUrl) {
+    textPreviewLabel = "Text preview";
+  }
+
   const summaryBase = await supabase
     .from("ai_outputs")
     .select("id, short_summary, key_points, action_items, important_concepts, suggested_tags, suggested_title, suggested_next_step")
@@ -208,7 +293,7 @@ export default async function FileDetailPage({
       </div>
 
       {/* Split view: preview left, summary right */}
-      <div className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(300px,0.65fr)]">
+      <div className="grid w-full max-w-full min-w-0 gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(300px,0.65fr)]">
         {/* ─── Preview panel (independent scroll) ───────────────────────── */}
         <section className="min-w-0 self-start rounded-xl border border-white/[0.06] bg-white/[0.03] p-4 sm:p-5 animate-fade-in">
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -252,11 +337,18 @@ export default async function FileDetailPage({
               <div className="relative max-h-[70vh] min-h-[400px] overflow-auto p-4">
                 <Image src={signedUrl} alt={file.file_name} fill unoptimized className="object-contain p-4" />
               </div>
+            ) : previewSignedUrl ? (
+              <iframe src={`${previewSignedUrl}#toolbar=1&navpanes=0`} title={`${file.file_name} visual preview`} className="h-[70vh] min-h-[400px] w-full" />
             ) : signedUrl && (file.content_type === "pdf" || file.mime_type === "application/pdf" || file.file_name.toLowerCase().endsWith(".pdf")) ? (
               <iframe src={`${signedUrl}#toolbar=1&navpanes=0`} title={file.file_name} className="h-[70vh] min-h-[400px] w-full" />
             ) : file.extracted_text ? (
               <div className="max-h-[70vh] min-h-[400px] overflow-auto p-4 sm:p-5">
-                <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Extracted text</h2>
+                <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">{textPreviewLabel}</h2>
+                {isPptx ? (
+                  <p className="mt-2 text-xs leading-5 text-amber-200">
+                    {previewError || "A visual slide preview is not available in this environment, so StudyPilot is showing extracted slide text."}
+                  </p>
+                ) : null}
                 <pre className="mt-3 whitespace-pre-wrap text-sm leading-7 text-slate-300">{file.extracted_text.slice(0, 12000)}</pre>
               </div>
             ) : (

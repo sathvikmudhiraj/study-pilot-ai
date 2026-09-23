@@ -403,6 +403,15 @@ ${text}`;
 
   devLog("AI quiz response received", { rawLength: response.length });
 
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[DEBUG] QUIZ raw AI response:", {
+      rawLength: response.length,
+      rawPreview: response.slice(0, 500),
+      startsWithFence: response.trimStart().startsWith("```"),
+      leadingProse: response.trimStart()[0] !== "{",
+    });
+  }
+
   let parsed = tryParseJson(response);
   if (!parsed) {
     devLog("AI quiz JSON repair started", { rawLength: response.length });
@@ -432,9 +441,16 @@ ${response}`,
     throw new Error("AI returned a quiz format StudyPilot could not read. Please try again.");
   }
 
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[DEBUG] QUIZ parsed JSON:", {
+      parsedKeys: Object.keys(parsed),
+      questionsCount: Array.isArray(parsed.questions) ? parsed.questions.length : 0,
+    });
+  }
+
   const title = String(parsed.title ?? parsed.quiz_title ?? "Practice quiz").trim() || "Practice quiz";
   const sourceSummary = String(parsed.source_summary ?? parsed.summary ?? "").trim() || "Generated from your study material.";
-  const rawQuestions = parsed.questions ?? parsed.quiz ?? [];
+  const rawQuestions: unknown[] = Array.isArray(parsed.questions) ? parsed.questions : Array.isArray(parsed.quiz) ? parsed.quiz : [];
   const requestedTypesFinal = requestedTypes;
 
   const questions: QuizQuestion[] = (Array.isArray(rawQuestions) ? rawQuestions : [])
@@ -443,6 +459,14 @@ ${response}`,
     // Renumber ids sequentially after dropping invalid questions.
     .map((item, index) => ({ ...item, id: `q${index + 1}` }))
     .slice(0, MAX_QUESTIONS);
+
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[DEBUG] QUIZ validation:", {
+      inputQuestions: rawQuestions.length,
+      validQuestions: questions.length,
+      minRequired: MIN_QUESTIONS,
+    });
+  }
 
   if (questions.length < MIN_QUESTIONS) {
     throw new Error("AI did not return enough valid questions. Please try again.");

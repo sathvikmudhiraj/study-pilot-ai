@@ -10,21 +10,20 @@ vi.mock("../gemini", () => ({
 }));
 vi.mock("../observability", () => ({ logProviderTelemetry: vi.fn() }));
 
-import { generateAIText } from "../aiProvider";
+import { generateAITextWithMetadata } from "../aiProvider";
 import { askGemini } from "../gemini";
 
 describe("NVIDIA request budget", () => {
   beforeEach(() => {
-    vi.useFakeTimers();
     vi.stubEnv("AI_PROVIDER", "nvidia");
     vi.stubEnv("NVIDIA_API_KEY", "test-key");
     vi.stubEnv("NVIDIA_TIMEOUT_MS", "180000");
+    vi.stubEnv("AI_INTERACTIVE_TIMEOUT_MS", "10000");
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
-    vi.useRealTimers();
   });
 
   it("treats a caller timeout as the total budget across 429 retries", async () => {
@@ -36,12 +35,13 @@ describe("NVIDIA request budget", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const generation = generateAIText("hello", { timeoutMs: 1_000 }).catch((error: unknown) => error);
-    await vi.advanceTimersByTimeAsync(1_001);
+    const result = await generateAITextWithMetadata("hello", { timeoutMs: 1_000 });
 
-    await expect(generation).resolves.toMatchObject({ message: expect.stringMatching(/temporarily unavailable/i) });
+    expect(result.offlineFallbackUsed).toBe(true);
+    expect(result.text).toBe("");
+    expect(result.providerFailureCategory).toBe("timeout");
     expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
+  }, 10_000);
 
   it("aborts a hanging request at the caller timeout", async () => {
     const fetchMock = vi.fn((_url: string, init?: RequestInit) =>
@@ -53,12 +53,13 @@ describe("NVIDIA request budget", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const generation = generateAIText("hello", { timeoutMs: 1_000 }).catch((error: unknown) => error);
-    await vi.advanceTimersByTimeAsync(1_001);
+    const result = await generateAITextWithMetadata("hello", { timeoutMs: 1_000 });
 
-    await expect(generation).resolves.toMatchObject({ message: expect.stringMatching(/temporarily unavailable/i) });
+    expect(result.offlineFallbackUsed).toBe(true);
+    expect(result.text).toBe("");
+    expect(result.providerFailureCategory).toBe("timeout");
     expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
+  }, 10_000);
 
   it("shares a caller timeout across Gemini and NVIDIA fallback", async () => {
     vi.stubEnv("AI_PROVIDER", "auto");
@@ -72,11 +73,12 @@ describe("NVIDIA request budget", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const generation = generateAIText("hello", { timeoutMs: 1_000 }).catch((error: unknown) => error);
-    await vi.advanceTimersByTimeAsync(1_001);
+    const result = await generateAITextWithMetadata("hello", { timeoutMs: 5_000 });
 
-    await expect(generation).resolves.toMatchObject({ message: expect.stringMatching(/temporarily unavailable/i) });
+    expect(result.offlineFallbackUsed).toBe(true);
+    expect(result.text).toBe("");
+    expect(result.providerFailureCategory).toBe("timeout");
     expect(askGemini).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
+  }, 10_000);
 });

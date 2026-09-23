@@ -344,11 +344,13 @@ export function selectRelevantChunks({
   query,
   maxChunks = 6,
   preserveOrder = false,
+  minScore = 0,
 }: {
   chunks: DocumentChunk[];
   query: string;
   maxChunks?: number;
   preserveOrder?: boolean;
+  minScore?: number;
 }) {
   if (!query.trim()) return chunks.slice(0, maxChunks);
   const queryTokens = tokenSet(query);
@@ -363,6 +365,7 @@ export function selectRelevantChunks({
 
   const selected = ranked
     .sort((a, b) => b.score - a.score || a.chunk.index - b.chunk.index)
+    .filter((item) => item.score >= minScore)
     .slice(0, maxChunks)
     .map((item) => item.chunk);
 

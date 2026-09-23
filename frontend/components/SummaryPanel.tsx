@@ -9,6 +9,7 @@ import {
 } from "./SourceCitationChips";
 import { StudyNoteEditor } from "./StudyNoteEditor";
 import { adaptStudyNoteRow, type StudyNoteDraft } from "@/frontend/lib/studyNotes";
+import { cancelSpeechSynthesis } from "@/frontend/lib/speechSynthesis";
 import { sanitizeSummaryForDisplay } from "@/shared/summarySanitizer";
 import { LanguageSelector } from "./LanguageSelector";
 import { languageDetails, type SupportedLanguageCode } from "@/shared/languages";
@@ -65,8 +66,85 @@ function list(value: unknown) {
   return Array.isArray(value) ? value.filter(Boolean) : [];
 }
 
+const RAW_FIELD_LABELS = [
+  "study_areas",
+  "studyAreas",
+  "covered_topics",
+  "coveredTopics",
+  "important_concepts",
+  "importantConcepts",
+  "key_points",
+  "keyPoints",
+  "exam_focus_points",
+  "examFocusPoints",
+  "memory_lines",
+  "memoryLines",
+  "common_mistakes",
+  "commonMistakes",
+  "action_items",
+  "actionItems",
+  "suggested_tags",
+  "suggestedTags",
+  "suggested_next_step",
+  "suggestedNextStep",
+];
+
+const RAW_FIELD_PATTERN = new RegExp(`^(?:${RAW_FIELD_LABELS.join("|")})\\s*[:=\\-]\\s*`, "i");
+const RAW_FIELD_ONLY_PATTERN = new RegExp(`^(?:${RAW_FIELD_LABELS.join("|")})$`, "i");
+const RAW_FIELD_INLINE_PATTERN = new RegExp(`(?:^|[\\s"'{}[\\],])(?:${RAW_FIELD_LABELS.join("|")})\\s*[:=]`, "i");
+
+function normalizeDisplayKey(value: string) {
+  return value
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function normalizeInsightItem(value: unknown) {
+  const raw = String(value ?? "").normalize("NFKC").trim();
+  if (!raw) return "";
+
+  let cleaned = raw
+    .replace(/```(?:json)?/gi, "")
+    .replace(/[{}[\]]/g, " ")
+    .replace(/^\s*["',:;|]+|["',:;|]+\s*$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  while (RAW_FIELD_PATTERN.test(cleaned)) {
+    cleaned = cleaned.replace(RAW_FIELD_PATTERN, "").trim();
+  }
+
+  if (!cleaned || RAW_FIELD_ONLY_PATTERN.test(cleaned)) return "";
+  if (RAW_FIELD_INLINE_PATTERN.test(cleaned)) return "";
+  if (/["']?\w+["']?\s*:\s*["[{]/.test(cleaned)) return "";
+  if (/^(null|undefined|n\/a|none)$/i.test(cleaned)) return "";
+  if (/[\s:/-](vs|versus)$/i.test(cleaned) || /^(vs|versus)$/i.test(cleaned)) return "";
+  if (cleaned.length < 3) return "";
+
+  return cleaned;
+}
+
+function displayList(value: unknown, limit = 24, exclude = new Set<string>()) {
+  const seen = new Set<string>();
+  const items: string[] = [];
+
+  for (const item of list(value)) {
+    const cleaned = normalizeInsightItem(item);
+    const key = cleaned.toLocaleLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    if (!cleaned || !key || seen.has(key) || exclude.has(key)) continue;
+    seen.add(key);
+    items.push(cleaned);
+    if (items.length >= limit) break;
+  }
+
+  return items;
+}
+
 function stringList(value: unknown) {
-  return list(value).map((item) => String(item));
+  return displayList(value);
 }
 
 function topicList(value: unknown): TopicSummary[] {
@@ -150,18 +228,38 @@ function normalizeSummary(summary: Summary | null): Summary | null {
   };
 }
 
-function SectionList({ title, items }: { title: string; items: string[] }) {
+const insightCardClass = "min-w-0 rounded-lg border border-white/10 bg-slate-950/65 p-4";
+const insightSectionClass = "min-w-0";
+const insightHeadingClass = "text-xs font-semibold uppercase tracking-wide text-emerald-200";
+
+function SectionList({ title, items, columns = false }: { title: string; items: string[]; columns?: boolean }) {
   if (!items.length) return null;
   return (
-    <section>
-      <h3 className="text-sm font-semibold uppercase text-emerald-200">{title}</h3>
-      <ul className="mt-3 grid gap-2 text-sm leading-6 text-slate-300">
+    <section className={insightSectionClass}>
+      <h3 className={insightHeadingClass}>{normalizeDisplayKey(title)}</h3>
+      <ul className={`mt-3 grid gap-3 text-sm leading-6 text-slate-300 ${columns ? "sm:grid-cols-2" : ""}`}>
         {items.map((item) => (
-          <li key={item} className="rounded-md border border-white/10 bg-slate-950/60 p-3">
+          <li key={item} className={`${insightCardClass} min-h-16 break-words`}>
             {item}
           </li>
         ))}
       </ul>
+    </section>
+  );
+}
+
+function TagList({ title, items }: { title: string; items: string[] }) {
+  if (!items.length) return null;
+  return (
+    <section className={insightSectionClass}>
+      <h3 className={insightHeadingClass}>{normalizeDisplayKey(title)}</h3>
+      <div className="mt-3 flex min-w-0 flex-wrap gap-2">
+        {items.map((tag) => (
+          <span key={tag} className="max-w-full rounded-md border border-white/10 bg-slate-950/70 px-2.5 py-1.5 text-xs leading-5 text-slate-300">
+            {tag}
+          </span>
+        ))}
+      </div>
     </section>
   );
 }
@@ -188,6 +286,7 @@ export function SummaryPanel({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [staleSummary, setStaleSummary] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [finalElapsedMs, setFinalElapsedMs] = useState<number | null>(null);
   const [language, setLanguage] = useState(initialLanguage);
@@ -233,6 +332,12 @@ export function SummaryPanel({
       summaryStartedAtRef.current = null;
     };
   }, [loading]);
+
+  useEffect(() => {
+    return () => {
+      cancelSpeechSynthesis();
+    };
+  }, []);
 
   async function generateSummary() {
     setFinalElapsedMs(null);
@@ -344,10 +449,18 @@ export function SummaryPanel({
 
   function readAloud() {
     if (!readText || typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    window.speechSynthesis.cancel();
+    cancelSpeechSynthesis();
     const utterance = new SpeechSynthesisUtterance(readText);
     utterance.lang = languageDetails(language).locale;
+    utterance.onend = () => setSpeaking(false);
+    utterance.onerror = () => setSpeaking(false);
+    setSpeaking(true);
     window.speechSynthesis.speak(utterance);
+  }
+
+  function stopSpeaking() {
+    cancelSpeechSynthesis();
+    setSpeaking(false);
   }
 
   function sourceQuery() {
@@ -414,7 +527,7 @@ export function SummaryPanel({
   const showStudyActions = Boolean(fileId || noteId);
 
   return (
-    <aside className="min-w-0 rounded-lg border border-white/10 bg-white/[0.04] p-4 sm:p-5">
+    <aside className="relative min-w-0 rounded-xl border border-white/10 bg-white/[0.04] p-4 sm:p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-sm font-semibold uppercase text-emerald-300">AI Summary</div>
@@ -520,36 +633,45 @@ export function SummaryPanel({
       ) : null}
 
       {summary ? (
-        <div className="mt-6 grid gap-5">
+        <div className="mt-6 grid min-w-0 gap-5">
           {normalizeSourceCitations(summary.source_citations).length ? (
-            <section>
-              <h3 className="text-sm font-semibold uppercase text-cyan-200">Sources</h3>
+            <section className={insightSectionClass}>
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-cyan-200">Sources</h3>
               <div className="mt-3">
                 <SourceCitationChips citations={normalizeSourceCitations(summary.source_citations)} />
               </div>
             </section>
           ) : null}
 
-          <section className="rounded-lg border border-cyan-300/20 bg-cyan-300/10 p-4">
-            <h3 className="text-sm font-semibold uppercase text-cyan-100">Short summary</h3>
-            <p className="mt-3 text-sm leading-6 text-slate-200">{summary.short_summary}</p>
+          <section className="min-w-0 rounded-lg border border-cyan-300/20 bg-cyan-300/10 p-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-cyan-100">Study Summary</h3>
+            <p className="mt-3 break-words text-sm leading-6 text-slate-200">{normalizeInsightItem(summary.short_summary)}</p>
           </section>
 
           {summary.module_overview ? (
-            <section className="rounded-lg border border-white/10 bg-slate-950/70 p-4">
-              <h3 className="text-sm font-semibold uppercase text-emerald-200">Module overview</h3>
-              <p className="mt-3 text-sm leading-6 text-slate-300">{summary.module_overview}</p>
+            <section className={insightCardClass}>
+              <h3 className={insightHeadingClass}>Module Overview</h3>
+              <p className="mt-3 break-words text-sm leading-6 text-slate-300">{normalizeInsightItem(summary.module_overview)}</p>
             </section>
           ) : null}
 
-          <SectionList title="Covered topics" items={stringList(summary.covered_topics)} />
+          <SectionList title="Important Concepts" items={stringList(summary.important_concepts)} columns />
+          <SectionList title="Study Areas" items={stringList(summary.covered_topics)} columns />
+          <TagList title="Suggested Tags" items={stringList(summary.suggested_tags)} />
+
+          {summary.suggested_next_step && normalizeInsightItem(summary.suggested_next_step) ? (
+            <section className="min-w-0 rounded-lg border border-emerald-300/20 bg-emerald-300/[0.07] p-4">
+              <h3 className={insightHeadingClass}>Suggested Next Step</h3>
+              <p className="mt-3 break-words text-sm leading-6 text-slate-300">{normalizeInsightItem(summary.suggested_next_step)}</p>
+            </section>
+          ) : null}
 
           {topicList(summary.topic_wise_summary).length ? (
-            <section>
-              <h3 className="text-sm font-semibold uppercase text-emerald-200">Topic-wise summary</h3>
+            <section className={insightSectionClass}>
+              <h3 className={insightHeadingClass}>Topic-Wise Summary</h3>
               <div className="mt-3 grid gap-3">
                 {topicList(summary.topic_wise_summary).map((topic) => (
-                  <article key={topic.topic} className="rounded-md border border-white/10 bg-slate-950/60 p-4">
+                  <article key={topic.topic} className={insightCardClass}>
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <h4 className="break-words font-semibold text-white">{topic.topic}</h4>
                       {summary.id ? (
@@ -578,34 +700,14 @@ export function SummaryPanel({
             </section>
           ) : null}
 
-          <SectionList title="Key points" items={stringList(summary.key_points)} />
-          <SectionList title="Exam focus points" items={stringList(summary.exam_focus_points)} />
-          <SectionList title="Memory lines" items={stringList(summary.memory_lines)} />
-          <SectionList title="Common mistakes" items={stringList(summary.common_mistakes)} />
-          <SectionList title="Action items" items={stringList(summary.action_items)} />
-          <SectionList title="Important concepts" items={stringList(summary.important_concepts)} />
+          <SectionList title="Key Points" items={stringList(summary.key_points)} />
+          <SectionList title="Exam Focus Points" items={stringList(summary.exam_focus_points)} />
+          <SectionList title="Memory Lines" items={stringList(summary.memory_lines)} />
+          <SectionList title="Common Mistakes" items={stringList(summary.common_mistakes)} />
+          <SectionList title="Action Items" items={stringList(summary.action_items)} />
 
-          {stringList(summary.suggested_tags).length ? (
-            <section>
-              <h3 className="text-sm font-semibold uppercase text-emerald-200">Suggested tags</h3>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {stringList(summary.suggested_tags).map((tag) => (
-                  <span key={tag} className="rounded-md border border-white/10 bg-slate-950/70 px-2 py-1 text-xs text-slate-300">
-                    {tag}
-                  </span>
-                ))}
-              </div>
-            </section>
-          ) : null}
-
-          {summary.suggested_next_step ? (
-            <section className="rounded-lg border border-white/10 bg-slate-950/70 p-4">
-              <h3 className="text-sm font-semibold uppercase text-emerald-200">Suggested next step</h3>
-              <p className="mt-3 text-sm leading-6 text-slate-300">{summary.suggested_next_step}</p>
-            </section>
-          ) : null}
-
-          <div className="grid gap-2 sm:grid-cols-2">
+          <div className="sticky bottom-0 z-10 -mx-4 mt-1 border-t border-white/10 bg-[#0b1220]/95 p-4 shadow-2xl shadow-black/30 backdrop-blur sm:-mx-5 sm:p-5">
+            <div className="grid gap-2 sm:grid-cols-2">
             <button
               type="button"
               onClick={() => void createNotes()}
@@ -615,8 +717,16 @@ export function SummaryPanel({
             >
               {notesLoading ? "Creating Notes..." : "Create Notes"}
             </button>
-            <button type="button" onClick={readAloud} className="min-h-11 rounded-md border border-white/15 bg-white/5 px-3 py-2.5 text-center text-sm font-semibold leading-5 text-white transition hover:bg-white/10">
-              Read Aloud
+            <button
+              type="button"
+              onClick={speaking ? stopSpeaking : readAloud}
+              className={`min-h-11 rounded-md border px-3 py-2.5 text-center text-sm font-semibold leading-5 transition ${
+                speaking
+                  ? "border-red-300/25 bg-red-300/[0.08] text-red-100 hover:bg-red-300/15"
+                  : "border-white/15 bg-white/5 text-white hover:bg-white/10"
+              }`}
+            >
+              {speaking ? "Stop Speaking" : "Read Aloud"}
             </button>
             <button type="button" onClick={goToQuiz} className="min-h-11 rounded-md border border-emerald-300/30 bg-emerald-300/10 px-3 py-2.5 text-center text-sm font-semibold leading-5 text-emerald-100 transition hover:bg-emerald-300/15">
               Generate Quiz
@@ -624,6 +734,7 @@ export function SummaryPanel({
             <button type="button" onClick={goToRevisionPlan} className="min-h-11 rounded-md border border-cyan-300/30 bg-cyan-300/10 px-3 py-2.5 text-center text-sm font-semibold leading-5 text-cyan-100 transition hover:bg-cyan-300/15">
               Create Revision Plan
             </button>
+            </div>
           </div>
         </div>
       ) : null}

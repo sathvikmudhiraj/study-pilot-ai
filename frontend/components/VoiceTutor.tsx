@@ -566,6 +566,16 @@ export function VoiceTutor({
     const controller = new AbortController();
     askAbortRef.current = controller;
 
+    // Client-side hard timeout (25s) slightly above server interactive budget (20s).
+    // If exceeded, abort the request and show a concise retry message.
+    const CLIENT_TIMEOUT_MS = 25_000;
+    const clientTimeoutId = window.setTimeout(() => {
+      if (askAbortRef.current === controller) {
+        controller.abort(new Error("Client timeout: request took too long"));
+        setNotice("Request timed out. Please try again or use a shorter question.");
+      }
+    }, CLIENT_TIMEOUT_MS);
+
     try {
       telemetryStartStage(requestId, "conversation_loading");
       const activeConversation = await ensureConversationForQuestion(displayQuestion);
@@ -586,6 +596,7 @@ export function VoiceTutor({
         signal: controller.signal,
       });
       telemetryEndStage(requestId, "api_request_start");
+      window.clearTimeout(clientTimeoutId);
 
       telemetryStartStage(requestId, "response_parsing");
       const data = await response.json();
@@ -661,10 +672,18 @@ export function VoiceTutor({
       void maybeAutoTitleConversation(activeConversation.id, displayQuestion);
       void touchConversationUpdatedAt(activeConversation.id);
     } catch (err) {
+      window.clearTimeout(clientTimeoutId);
       if (!isAbortError(err) && voiceTurnEpochRef.current === epoch) {
-        setError(err instanceof Error ? err.message : "AI request failed. Please try again.");
+        const message = err instanceof Error ? err.message : "AI request failed. Please try again.";
+        // If client timeout triggered, show a friendlier message.
+        if (message.includes("Client timeout")) {
+          setNotice("Request timed out. Please try again or use a shorter question.");
+        } else {
+          setError(message);
+        }
       }
     } finally {
+      window.clearTimeout(clientTimeoutId);
       if (askAbortRef.current === controller && voiceTurnEpochRef.current === epoch) {
         askAbortRef.current = null;
         setLoading(false);

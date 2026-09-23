@@ -115,6 +115,17 @@ async function parseGeminiResponse(response: Response, model: string) {
   const data = await response.json();
   const text = data?.candidates?.[0]?.content?.parts?.find((part: { text?: string }) => part.text)?.text;
   if (!text) throw new GeminiApiError("Gemini returned an empty response.", "empty", { model });
+
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[DEBUG] GEMINI raw response:", {
+      model,
+      rawLength: text.length,
+      rawPreview: text.slice(0, 500),
+      startsWithFence: text.trimStart().startsWith("```"),
+      leadingProse: text.trimStart()[0] !== "{",
+    });
+  }
+
   return text as string;
 }
 

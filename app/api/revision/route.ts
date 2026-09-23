@@ -105,6 +105,7 @@ async function aggregateStudyContext(
   supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>,
   userId: string,
   language: SupportedLanguageCode,
+  sourceFile?: RevisionSourceFile | null,
 ): Promise<StudyContext> {
   const empty: StudyContext = {
     files: [],
@@ -116,23 +117,36 @@ async function aggregateStudyContext(
   };
   if (!supabase) return empty;
 
+  const filesQuery = supabase
+    .from("files")
+    .select("file_name, content_type, extracted_text")
+    .eq("user_id", userId);
+  const notesQuery = supabase.from("notes").select("title, topic, raw_notes").eq("user_id", userId);
+  const summariesQuery = supabase
+    .from("ai_outputs")
+    .select(
+      "suggested_title, covered_topics, key_points, exam_focus_points, common_mistakes, memory_lines, action_items, important_concepts",
+    )
+    .eq("user_id", userId)
+    .eq("language_code", language)
+    .order("created_at", { ascending: false });
+  const quizzesQuery = supabase.from("quizzes").select("title, difficulty, questions").eq("user_id", userId).eq("language_code", language);
+
+  if (sourceFile) {
+    filesQuery.eq("id", sourceFile.id);
+    notesQuery.eq("file_id", sourceFile.id);
+    summariesQuery.eq("file_id", sourceFile.id).limit(5);
+    quizzesQuery.eq("file_id", sourceFile.id);
+  } else {
+    filesQuery.in("processing_status", ["completed", "extracted"]);
+    summariesQuery.limit(20);
+  }
+
   const [filesResult, notesResult, summariesResult, quizzesResult, attemptsResult] = await Promise.all([
-    supabase
-      .from("files")
-      .select("file_name, content_type, extracted_text")
-      .eq("user_id", userId)
-      .in("processing_status", ["completed", "extracted"]),
-    supabase.from("notes").select("title, topic, raw_notes").eq("user_id", userId),
-    supabase
-      .from("ai_outputs")
-      .select(
-        "suggested_title, covered_topics, key_points, exam_focus_points, common_mistakes, memory_lines, action_items, important_concepts",
-      )
-      .eq("user_id", userId)
-      .eq("language_code", language)
-      .order("created_at", { ascending: false })
-      .limit(20),
-    supabase.from("quizzes").select("title, difficulty, questions").eq("user_id", userId).eq("language_code", language),
+    filesQuery,
+    notesQuery,
+    summariesQuery,
+    quizzesQuery,
     supabase
       .from("quiz_attempts")
       .select("score, total_questions, percentage, weak_topics, strong_topics, topic_results, wrong_questions, created_at")
@@ -141,7 +155,10 @@ async function aggregateStudyContext(
       .limit(100),
   ]);
 
-  const files = (filesResult.data ?? []).map((f) => ({
+  const sourceRows = sourceFile && !(filesResult.data ?? []).length
+    ? [sourceFile]
+    : filesResult.data ?? [];
+  const files = sourceRows.map((f) => ({
     file_name: String(f.file_name ?? "Untitled"),
     content_type: f.content_type as string | null,
     extracted_text: revisionCoverageText(String(f.extracted_text ?? ""), String(f.file_name ?? "Untitled")),
@@ -209,11 +226,87 @@ type PlanRow = {
   updated_at: string;
 };
 
+type RevisionSourceFile = {
+  id: string;
+  file_name: string;
+  content_type: string | null;
+  extracted_text: string | null;
+  processing_status?: string | null;
+};
+
+type RevisionRequestBody = {
+  language?: SupportedLanguageCode;
+  fileId?: string;
+};
+
+function cleanUuid(value: unknown) {
+  const text = typeof value === "string" ? value.trim() : "";
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text) ? text : "";
+}
+
+function planSourceFileId(row: { plan?: unknown }) {
+  const plan = row.plan && typeof row.plan === "object" ? row.plan as Record<string, unknown> : null;
+  return typeof plan?.source_file_id === "string" ? plan.source_file_id : null;
+}
+
+async function findOwnedRevisionFile(
+  supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>,
+  userId: string,
+  fileId: string,
+): Promise<RevisionSourceFile | null> {
+  if (!supabase) return null;
+  const result = await supabase
+    .from("files")
+    .select("id, file_name, content_type, extracted_text, processing_status")
+    .eq("id", fileId)
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (result.error) throw result.error;
+  return result.data as RevisionSourceFile | null;
+}
+
+async function getExistingRevisionPlan(
+  supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>,
+  userId: string,
+  language: SupportedLanguageCode,
+  fileId: string | null,
+) {
+  if (!supabase) return null;
+
+  if (fileId) {
+    const result = await supabase
+      .from("revision_plans")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("language_code", language)
+      .contains("plan", { source_file_id: fileId })
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (result.error) throw result.error;
+    return result.data as PlanRow | null;
+  }
+
+  const result = await supabase
+    .from("revision_plans")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("language_code", language)
+    .order("created_at", { ascending: false })
+    .limit(20);
+
+  if (result.error) throw result.error;
+  return ((result.data ?? []) as PlanRow[]).find((row) => !planSourceFileId(row)) ?? null;
+}
+
 async function savePlan(
   supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>,
   userId: string,
   plan: Awaited<ReturnType<typeof generateRevisionPlan>>,
   language: SupportedLanguageCode,
+  sourceFile: RevisionSourceFile | null,
 ): Promise<PlanRow> {
   const payload = {
     user_id: userId,
@@ -222,7 +315,10 @@ async function savePlan(
     revise_first: plan.revise_first,
     pending_topics: plan.pending_topics,
     daily_plan: plan.daily_plan,
-    plan: plan.plan,
+    plan: {
+      ...plan.plan,
+      ...(sourceFile ? { source_file_id: sourceFile.id, source_file_name: sourceFile.file_name } : {}),
+    },
     starts_on: plan.starts_on,
     ends_on: plan.ends_on,
     language_code: language,
@@ -232,7 +328,8 @@ async function savePlan(
 
   // Try replacing any existing plan first (upsert semantics: one active plan
   // per user). If that fails with a missing column, try without new columns.
-  const existing = await supabase.from("revision_plans").select("id").eq("user_id", userId).eq("language_code", language).order("created_at", { ascending: false }).limit(1).maybeSingle();
+  const existingPlan = await getExistingRevisionPlan(supabase, userId, language, sourceFile?.id ?? null);
+  const existing = existingPlan ? { data: { id: existingPlan.id }, error: null } : { data: null, error: null };
 
   if (existing.data && !existing.error) {
     const result = await supabase.from("revision_plans").update(payload).eq("id", existing.data.id).eq("user_id", userId).select().single();
@@ -275,27 +372,31 @@ async function handleGet(request: Request) {
   if (!supabase) return apiError("Supabase is not configured.", 500);
   const requestedLanguage = new URL(request.url).searchParams.get("language");
   if (requestedLanguage && !isSupportedLanguageCode(requestedLanguage)) return apiError("Choose a supported language.", 400);
-  const language = requestedLanguage ?? user.preferredLanguage;
+  const language: SupportedLanguageCode = requestedLanguage && isSupportedLanguageCode(requestedLanguage)
+    ? requestedLanguage
+    : user.preferredLanguage;
+  const fileId = cleanUuid(new URL(request.url).searchParams.get("fileId"));
+  let sourceFile: RevisionSourceFile | null = null;
 
-  const result = await supabase
-    .from("revision_plans")
-    .select("*")
-    .eq("user_id", user.id)
-    .eq("language_code", language)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (result.error) {
-    devLog("fetch plan failed", { error: result.error.message });
-    return errorResponse("Could not load revision plan.", 500, { dbError: result.error.message });
+  if (fileId) {
+    sourceFile = await findOwnedRevisionFile(supabase, user.id, fileId);
+    if (!sourceFile) return apiError("File not found or you do not have access to it.", 404);
   }
 
-  if (!result.data) {
-    return NextResponse.json({ plan: null });
+  let plan: PlanRow | null = null;
+  try {
+    plan = await getExistingRevisionPlan(supabase, user.id, language, fileId || null);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not load revision plan.";
+    devLog("fetch plan failed", { error: message });
+    return errorResponse("Could not load revision plan.", 500, { dbError: message });
   }
 
-  return NextResponse.json({ plan: result.data });
+  if (!plan) {
+    return NextResponse.json({ plan: null, sourceFile });
+  }
+
+  return NextResponse.json({ plan, sourceFile });
 }
 
 // ---------------------------------------------------------------------------
@@ -310,7 +411,7 @@ async function handlePost(request: Request) {
 
   const supabase = await createServerSupabaseClient();
   if (!supabase) return apiError("Supabase is not configured.", 500);
-  let body: { language?: SupportedLanguageCode } = {};
+  let body: RevisionRequestBody = {};
   try {
     body = await request.json();
   } catch {
@@ -318,11 +419,31 @@ async function handlePost(request: Request) {
   }
   if (body.language !== undefined && !isSupportedLanguageCode(body.language)) return apiError("Choose a supported language.", 400);
   const language = body.language ?? user.preferredLanguage;
+  const fileId = cleanUuid(body.fileId);
+  let sourceFile: RevisionSourceFile | null = null;
 
-  devLog("request received", { userId: user.id });
+  // Create AbortController for request timeout (server-side budget: ~30s)
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s hard stop
+
+  if (fileId) {
+    sourceFile = await findOwnedRevisionFile(supabase, user.id, fileId);
+    if (!sourceFile) {
+      clearTimeout(timeoutId);
+      return apiError("File not found or you do not have access to it.", 404);
+    }
+
+    const existing = await getExistingRevisionPlan(supabase, user.id, language, fileId);
+    if (existing) {
+      clearTimeout(timeoutId);
+      return NextResponse.json({ plan: existing, sourceFile, reused: true });
+    }
+  }
+
+  devLog("request received", { userId: user.id, fileId: fileId || null });
 
   try {
-    const ctx = await aggregateStudyContext(supabase, user.id, language);
+    const ctx = await aggregateStudyContext(supabase, user.id, language, sourceFile);
 
     devLog("study context aggregated", {
       fileCount: ctx.files.length,
@@ -334,12 +455,16 @@ async function handlePost(request: Request) {
     });
 
     if (!ctx.files.length && !ctx.notes.length && !ctx.summaries.length) {
+      clearTimeout(timeoutId);
       return errorResponse("No study material found. Upload files or add notes before generating a revision plan.", 400);
     }
 
-    const plan = await generateRevisionPlan(ctx, language);
+    // Pass the AbortSignal to the AI generation for proper timeout propagation
+    const plan = await generateRevisionPlan(ctx, language, controller.signal);
 
-    const saved = await savePlan(supabase, user.id, plan, language);
+    clearTimeout(timeoutId);
+
+    const saved = await savePlan(supabase, user.id, plan, language, sourceFile);
 
     devLog("plan saved", { planId: saved.id, title: saved.title });
 
@@ -352,12 +477,29 @@ async function handlePost(request: Request) {
         revise_first: plan.revise_first,
         pending_topics: plan.pending_topics,
         daily_plan: plan.daily_plan,
-        plan: plan.plan,
+        plan: {
+          ...plan.plan,
+          ...(sourceFile ? { source_file_id: sourceFile.id, source_file_name: sourceFile.file_name } : {}),
+        },
         starts_on: plan.starts_on,
         ends_on: plan.ends_on,
       },
+      sourceFile,
+      reused: false,
     });
   } catch (error) {
+    clearTimeout(timeoutId);
+    
+    // Check if it was an abort/timeout
+    if (error instanceof Error && error.name === "AbortError") {
+      devLog("revision generation aborted due to timeout", { fileId: fileId || null });
+      return errorResponse(
+        "Revision plan generation timed out. Please try again.",
+        504,
+        { error: "timeout", fileId: fileId || null }
+      );
+    }
+    
     const normalized = normalizeError(error);
     devLog("plan generation failed", { error: normalized });
     return errorResponse(

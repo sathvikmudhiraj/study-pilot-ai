@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { LanguageSelector } from "./LanguageSelector";
 import type { SupportedLanguageCode } from "@/shared/languages";
 
@@ -188,41 +188,74 @@ function DayCard({ day }: { day: DayPlan }) {
 export function RevisionPlanPanel({
   initialPlan,
   preferredLanguage,
+  sourceFile = null,
 }: {
   initialPlan: RevisionPlan | null;
   preferredLanguage: SupportedLanguageCode;
+  sourceFile?: { id: string; file_name: string | null } | null;
 }) {
   const [plan, setPlan] = useState<RevisionPlan | null>(() => normalizePlan(initialPlan));
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(Boolean(sourceFile && !initialPlan));
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [language, setLanguage] = useState(preferredLanguage);
+  const autoRequestKeyRef = useRef("");
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const sourceFileName = sourceFile?.file_name?.trim() || "selected file";
+  const sourceFileId = sourceFile?.id ?? null;
 
   async function switchLanguage(nextLanguage: SupportedLanguageCode) {
     setLanguage(nextLanguage);
     setError("");
     setNotice("");
     try {
-      const response = await fetch(`/api/revision?language=${encodeURIComponent(nextLanguage)}`);
+      const query = new URLSearchParams({ language: nextLanguage });
+      if (sourceFileId) query.set("fileId", sourceFileId);
+      
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s frontend timeout
+      
+      const response = await fetch(`/api/revision?${query.toString()}`, {
+        signal: controller.signal,
+      });
+      
+      clearTimeout(timeoutId);
+      abortControllerRef.current = null;
+      
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Could not load this language version.");
       setPlan(normalizePlan(data.plan));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load this language version.");
+      if (err instanceof Error && err.name === "AbortError") {
+        setError("Request timed out. Please try again.");
+      } else {
+        setError(err instanceof Error ? err.message : "Could not load this language version.");
+      }
     }
   }
 
-  async function generate() {
+  const generate = useCallback(async () => {
     setLoading(true);
     setError("");
     setNotice("");
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    // Frontend timeout slightly above server budget (server: ~25-30s, frontend: 35s)
+    const timeoutId = setTimeout(() => controller.abort(), 35000);
 
     try {
       const response = await fetch("/api/revision", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ language }),
+        body: JSON.stringify({ language, ...(sourceFileId ? { fileId: sourceFileId } : {}) }),
+        signal: controller.signal,
       });
+      
+      clearTimeout(timeoutId);
+      abortControllerRef.current = null;
+      
       const data = await response.json();
 
       if (!response.ok) {
@@ -230,17 +263,44 @@ export function RevisionPlanPanel({
       }
 
       setPlan(normalizePlan(data.plan));
+      if (data.reused === true) {
+        setNotice(`Loaded the saved revision plan for ${sourceFileName}.`);
+      }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Could not generate revision plan.";
-      if (plan) {
-        setNotice(`Could not refresh the plan. Your saved plan is still shown. ${message}`);
+      clearTimeout(timeoutId);
+      abortControllerRef.current = null;
+      
+      if (err instanceof Error && err.name === "AbortError") {
+        setError("Generation timed out. Please try again.");
       } else {
-        setError(message);
+        const message = err instanceof Error ? err.message : "Could not generate revision plan.";
+        if (plan) {
+          setNotice(`Could not refresh the plan. Your saved plan is still shown. ${message}`);
+        } else {
+          setError(message);
+        }
       }
     } finally {
       setLoading(false);
     }
-  }
+  }, [language, plan, sourceFileId, sourceFileName]);
+
+  useEffect(() => {
+    if (!sourceFileId || plan || error) return;
+    const requestKey = `${sourceFileId}:${language}`;
+    if (autoRequestKeyRef.current === requestKey) return;
+    autoRequestKeyRef.current = requestKey;
+    void generate();
+  }, [sourceFileId, language, plan, error, generate]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
 
   return (
     <aside className="grid min-w-0 gap-5">
@@ -249,6 +309,7 @@ export function RevisionPlanPanel({
         <div className="min-w-0">
           <div className="text-sm font-semibold uppercase text-emerald-300">AI Revision Planner</div>
           <h2 className="mt-2 break-words text-xl font-bold text-white sm:text-2xl">{plan?.title || "Revision Plan"}</h2>
+          {sourceFile ? <p className="mt-1 text-sm text-cyan-200">From {sourceFileName}</p> : null}
           {plan?.starts_on && plan?.ends_on ? (
             <p className="mt-1 text-sm text-slate-400">
               {formatDate(plan.starts_on)} - {formatDate(plan.ends_on)}
@@ -273,7 +334,21 @@ export function RevisionPlanPanel({
 
       {/* Error */}
       {error ? (
-        <div className="rounded-lg border border-red-400/30 bg-red-400/10 p-4 text-sm leading-6 text-red-200">{error}</div>
+        <div className="rounded-lg border border-red-400/30 bg-red-400/10 p-4 text-sm leading-6 text-red-200">
+          <p>{error}</p>
+          {sourceFileId ? (
+            <button
+              type="button"
+              onClick={() => {
+                autoRequestKeyRef.current = "";
+                void generate();
+              }}
+              className="mt-3 rounded-md border border-red-200/30 bg-red-200/10 px-3 py-1.5 text-xs font-semibold text-red-100 hover:bg-red-200/15"
+            >
+              Retry for {sourceFileName}
+            </button>
+          ) : null}
+        </div>
       ) : null}
 
       {/* Notice */}
@@ -298,7 +373,7 @@ export function RevisionPlanPanel({
           role="status"
           aria-live="polite"
         >
-          Analyzing your study material and generating a revision plan...
+          {sourceFile ? `Creating revision plan from ${sourceFileName}...` : "Analyzing your study material and generating a revision plan..."}
         </div>
       ) : null}
 

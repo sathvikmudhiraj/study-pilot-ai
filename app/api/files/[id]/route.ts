@@ -19,6 +19,14 @@ function removeId(value: unknown, id: string) {
   return Array.isArray(value) ? value.filter((item) => item !== id) : [];
 }
 
+function previewStoragePath(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const preview = (value as Record<string, unknown>).preview;
+  if (!preview || typeof preview !== "object" || Array.isArray(preview)) return null;
+  const storagePath = (preview as Record<string, unknown>).storagePath;
+  return typeof storagePath === "string" && storagePath.trim() ? storagePath : null;
+}
+
 async function handleDelete(context: RouteContext) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
@@ -32,7 +40,7 @@ async function handleDelete(context: RouteContext) {
 
   const owned = await supabase
     .from("files")
-    .select("id, storage_path")
+    .select("id, storage_path, extracted_metadata")
     .eq("id", fileId)
     .eq("user_id", user.id)
     .maybeSingle();
@@ -78,8 +86,9 @@ async function handleDelete(context: RouteContext) {
     return apiError("Could not remove file references. Please try again.", 500);
   }
 
-  if (owned.data.storage_path) {
-    const storageDelete = await supabase.storage.from("study-files").remove([owned.data.storage_path]);
+  const storagePaths = [owned.data.storage_path, previewStoragePath(owned.data.extracted_metadata)].filter((item): item is string => Boolean(item));
+  if (storagePaths.length) {
+    const storageDelete = await supabase.storage.from("study-files").remove(storagePaths);
     if (storageDelete.error) return apiError("Could not remove the stored file. Please try again.", 502);
   }
 

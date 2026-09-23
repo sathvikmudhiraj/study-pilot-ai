@@ -49,13 +49,13 @@ AI_PROVIDER=auto
 AI_PROVIDER_TIMEOUT_MS=30000
 SUMMARY_AI_PROVIDER=auto
 SUMMARY_AI_TIMEOUT_MS=120000
-SUMMARY_NVIDIA_MODEL=nvidia/nemotron-3.5-lightning-30b-a3b
+SUMMARY_NVIDIA_MODEL=meta/llama-3.2-11b-vision-instruct
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-2.5-flash
 GEMINI_FALLBACK_MODEL=gemini-2.0-flash
 NVIDIA_API_KEY=
 NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
-NVIDIA_MODEL=nvidia/nemotron-3.5-lightning-30b-a3b
+NVIDIA_MODEL=meta/llama-3.2-11b-vision-instruct
 TAVILY_API_KEY=
 ```
 

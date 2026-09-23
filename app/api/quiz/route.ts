@@ -429,25 +429,39 @@ type QuizBody = {
 };
 
 // ---------------------------------------------------------------------------
-// GET — return the user's saved quizzes
+// GET — return the user's saved quizzes (optionally filtered by fileId)
 // ---------------------------------------------------------------------------
 
-async function handleGet() {
+async function handleGet(request: Request) {
   const user = await requireUser();
   if (!user) return apiError("Please log in first.", 401);
 
   const supabase = await createServerSupabaseClient();
   if (!supabase) return apiError("Supabase is not configured.", 500);
 
-  const result = await supabase
+  const url = new URL(request.url);
+  const fileId = url.searchParams.get("fileId");
+  const noteId = url.searchParams.get("noteId");
+  const summaryId = url.searchParams.get("summaryId");
+
+  let query = supabase
     .from("quizzes")
     .select("id, user_id, file_id, note_id, quiz_title, title, difficulty, questions, language_code, created_at, updated_at")
     .eq("user_id", user.id)
     .order("created_at", { ascending: false })
     .limit(20);
 
+  if (fileId) query = query.eq("file_id", fileId);
+  if (noteId) query = query.eq("note_id", noteId);
+  if (summaryId) {
+    // quizzes table doesn't have summary_id column, but we can filter by checking if the quiz was generated from a summary
+    // For now, we'll skip summaryId filtering since the column doesn't exist
+  }
+
+  const result = await query;
+
   if (result.error) {
-    devLog("fetch quizzes failed", { error: result.error.message });
+    devLog("fetch quizzes failed", { error: result.error.message, fileId, noteId });
     return errorResponse("Could not load saved quizzes.", 500, { dbError: result.error.message });
   }
 
@@ -556,7 +570,7 @@ async function handlePost(request: Request) {
 }
 
 export async function GET(request: Request) {
-  return withRequestObservability(request, "/api/quiz", async () => handleGet());
+  return withRequestObservability(request, "/api/quiz", async () => handleGet(request));
 }
 
 export async function POST(request: Request) {

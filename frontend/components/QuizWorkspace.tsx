@@ -191,6 +191,24 @@ function normalizeQuiz(raw: unknown): Quiz | null {
   };
 }
 
+async function readApiJson(response: Response): Promise<Record<string, unknown>> {
+  if (response.status === 204) return {};
+
+  const text = await response.text();
+  if (!text.trim()) return {};
+
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {
+      error: response.ok
+        ? "The server returned a response StudyPilot could not read."
+        : "The server returned an invalid error response. Please try again.",
+    };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Small presentational helpers
 // ---------------------------------------------------------------------------
@@ -571,14 +589,22 @@ export function QuizWorkspace({
   initialAnalytics,
   initialSource = null,
   preferredLanguage,
+  currentFileId = null,
 }: {
   savedQuizzes: unknown[];
   sources: QuizSources;
   initialAnalytics: QuizAnalytics;
   initialSource?: InitialSource;
   preferredLanguage: SupportedLanguageCode;
+  currentFileId?: string | null;
 }) {
   const normalizedSaved = useMemo(() => savedQuizzes.map(normalizeQuiz).filter((q): q is Quiz => Boolean(q)), [savedQuizzes]);
+
+  // Filter saved quizzes to only show ones for the current file when a file is selected
+  const filteredSavedQuizzes = useMemo(() => {
+    if (!currentFileId) return normalizedSaved;
+    return normalizedSaved.filter((quiz) => quiz.file_id === currentFileId);
+  }, [normalizedSaved, currentFileId]);
 
   const [mode, setMode] = useState<"picker" | "attempt" | "review">("picker");
   const [generating, setGenerating] = useState(false);
@@ -632,8 +658,8 @@ export function QuizWorkspace({
           })),
         }),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Could not save this quiz attempt.");
+      const data = await readApiJson(response);
+      if (!response.ok) throw new Error(String(data.error || "Could not save this quiz attempt."));
 
       setSavedAttempt(data.attempt as SavedAttempt);
       setActiveQuiz((current) => current ? { ...current, answer_key: normalizeAnswerKey(data.answer_key) } : current);
@@ -685,10 +711,10 @@ export function QuizWorkspace({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data = await response.json();
+      const data = await readApiJson(response);
 
       if (!response.ok) {
-        throw new Error(data.error || "Could not generate the quiz. Please try again.");
+        throw new Error(String(data.error || "Could not generate the quiz. Please try again."));
       }
 
       const quiz = normalizeQuiz(data.quiz);
@@ -712,7 +738,18 @@ export function QuizWorkspace({
           <QuizAnalyticsPanel analytics={analytics} />
 
           {error ? (
-            <div className="rounded-lg border border-red-400/30 bg-red-400/10 p-4 text-sm leading-6 text-red-200">{error}</div>
+            <div className="rounded-lg border border-red-400/30 bg-red-400/10 p-4 text-sm leading-6 text-red-200">
+              {error}
+              {currentFileId ? (
+                <button
+                  type="button"
+                  onClick={() => { setError(""); setGenerating(false); }}
+                  className="mt-3 rounded-md border border-emerald-300/30 bg-emerald-300/10 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-300/15"
+                >
+                  Dismiss & Retry
+                </button>
+              ) : null}
+            </div>
           ) : null}
 
           <SourcePicker sources={sources} onGenerate={handleGenerate} generating={generating} initialSource={initialSource} preferredLanguage={preferredLanguage} />
@@ -723,16 +760,17 @@ export function QuizWorkspace({
             </div>
           ) : null}
 
-          <section>
-            <h2 className="text-lg font-semibold text-white">Saved quizzes</h2>
-            <p className="mt-1 text-sm text-slate-400">Retake any quiz you have generated before.</p>
-            <div className="mt-4 grid gap-3">
-              {!normalizedSaved.length ? (
-                <div className="rounded-lg border border-dashed border-white/15 bg-white/[0.03] p-6 text-sm text-slate-400">
-                  No quizzes yet. Generate your first quiz above.
-                </div>
-              ) : (
-                normalizedSaved.map((quiz) => (
+{(error || generating) ? null : (
+            <section>
+              <h2 className="text-lg font-semibold text-white">Saved quizzes</h2>
+              <p className="mt-1 text-sm text-slate-400">Retake any quiz you have generated before.</p>
+              <div className="mt-4 grid gap-3">
+                {!filteredSavedQuizzes.length ? (
+                  <div className="rounded-lg border border-dashed border-white/15 bg-white/[0.03] p-6 text-sm text-slate-400">
+                    {currentFileId ? "No quizzes yet for this file. Generate your first quiz above." : "No quizzes yet. Generate your first quiz above."}
+                  </div>
+                ) : (
+                  filteredSavedQuizzes.map((quiz) => (
                   <article key={quiz.id} className="min-w-0 rounded-lg border border-white/10 bg-white/[0.04] p-4">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div className="min-w-0">
@@ -760,11 +798,12 @@ export function QuizWorkspace({
                     </div>
                   </article>
                 ))
-              )}
-            </div>
-          </section>
-        </>
-      ) : null}
+               )}
+             </div>
+           </section>
+          )}
+         </>
+       ) : null}
 
       {mode !== "picker" && activeQuiz ? (
         <>

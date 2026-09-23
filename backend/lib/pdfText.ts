@@ -8,6 +8,7 @@ export type PdfPageExtraction = {
   pageNumber: number;
   textLength: number;
   readable: boolean;
+  text: string;
 };
 
 export type PdfExtractionResult = {
@@ -115,12 +116,12 @@ async function extractWithPdfJs(buffer: Buffer): Promise<PdfExtractionResult> {
         const readable = Boolean(pageText);
 
         if (readable) readablePages.push(pageNumber);
-        pageExtractions.push({ pageNumber, textLength: pageText.length, readable });
+        pageExtractions.push({ pageNumber, textLength: pageText.length, readable, text: pageText });
         pageSections.push(`[Page ${pageNumber}]\n${pageText || "[No readable text detected]"}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : "page extraction failed";
         failedPages.push(pageNumber);
-        pageExtractions.push({ pageNumber, textLength: 0, readable: false });
+        pageExtractions.push({ pageNumber, textLength: 0, readable: false, text: "" });
         pageSections.push(`[Page ${pageNumber}]\n[Text extraction unavailable]`);
         devLog("page extraction failed", { extractor: "pdfjs", pageNumber, error: message });
       } finally {
@@ -160,6 +161,7 @@ async function extractWithPdfParse(buffer: Buffer): Promise<PdfExtractionResult>
         pageNumber: page.num,
         textLength: pageText.length,
         readable: Boolean(pageText),
+        text: pageText,
       };
     });
     const pageSections = parsed.pages.map((page) => {

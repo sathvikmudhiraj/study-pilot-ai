@@ -147,6 +147,27 @@ describe("quiz attempt route", () => {
     expect(attempts.insert).not.toHaveBeenCalled();
   });
 
+  it("returns JSON when a saved quiz cannot be graded", async () => {
+    const invalidQuestions = [
+      {
+        id: "q1",
+        type: "mcq",
+        topic: "Lifecycle audit",
+        question: "Which option is correct?",
+        options: ["A", "B"],
+      },
+    ];
+    const { client, attempts } = supabaseForQuiz({ data: { id: "quiz-1", file_id: "file-1", questions: invalidQuestions, answer_key: [] }, error: null });
+    mocks.createServerSupabaseClient.mockResolvedValue(client);
+
+    const response = await POST(request({ quizId: "quiz-1", fileId: "file-1", answers: [{ questionId: "q1", selectedAnswer: "1" }] }));
+    const body = await response.json();
+
+    expect(response.status).toBe(500);
+    expect(body.error).toMatch(/cannot be graded/i);
+    expect(attempts.insert).not.toHaveBeenCalled();
+  });
+
   it("grades normal submissions on the server and saves the verified result", async () => {
     const { client, attempts } = supabaseForQuiz({ data: { id: "quiz-1", file_id: "file-1", questions, answer_key: answerKey }, error: null });
     mocks.createServerSupabaseClient.mockResolvedValue(client);

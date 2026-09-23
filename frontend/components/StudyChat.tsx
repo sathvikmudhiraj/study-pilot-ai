@@ -106,6 +106,8 @@ type Answer = {
   fallback_notice?: string;
   source_chips?: SourceChip[];
   source_citations?: SourceCitationValue[];
+  found_in_notes?: boolean;
+  source_ids?: string[];
 };
 
 type SourceChip = {
@@ -320,6 +322,12 @@ const researchProgressCues = [
   "Searching sources",
   "Reviewing evidence",
   "Writing report",
+] as const;
+
+const chatProgressCues = [
+  "Finding the relevant part of your notes",
+  "Preparing your answer",
+  "Generating response",
 ] as const;
 
 function extensionOf(name: string) {
@@ -569,6 +577,13 @@ function normalizeAnswer(value: unknown, depth = 0): Answer {
     source_citations: normalizeSourceCitations(
       record.source_citations ?? record.sourceCitations,
     ),
+    found_in_notes:
+      typeof record.found_in_notes === "boolean"
+        ? record.found_in_notes
+        : typeof record.foundInNotes === "boolean"
+          ? record.foundInNotes
+          : undefined,
+    source_ids: arrayValue(record, "source_ids", "sourceIds", "citation_ids", "citationIds"),
   };
 }
 
@@ -1245,6 +1260,7 @@ export function StudyChat({
     useState<SupportedLanguageCode>(preferredLanguage);
   const [loadingMode, setLoadingMode] = useState<LoadingMode | null>(null);
   const [researchProgressIndex, setResearchProgressIndex] = useState(0);
+  const [chatProgressIndex, setChatProgressIndex] = useState(0);
   const [speakingId, setSpeakingId] = useState("");
   const [showScrollDown, setShowScrollDown] = useState(false);
   const mounted = useIsClient();
@@ -1492,6 +1508,15 @@ export function StudyChat({
   }, [loading, loadingMode]);
 
   useEffect(() => {
+    if (!loading || loadingMode === "deep_research" || loadingMode === "web_search" || loadingMode === "diagram") return;
+    const timers = [
+      window.setTimeout(() => setChatProgressIndex(1), 900),
+      window.setTimeout(() => setChatProgressIndex(2), 2_200),
+    ];
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [loading, loadingMode]);
+
+  useEffect(() => {
     const latest = latestConversationToRestore({
       requestedConversationId,
       handledRequestedConversationId: handledRequestedConversationIdRef.current,
@@ -1720,6 +1745,7 @@ export function StudyChat({
     setError("");
     setPendingRetry(null);
     setPendingDiagramRetry(null);
+    setChatProgressIndex(0);
     setLoading(true);
     setLoadingMode("diagram");
     markNearBottom();
@@ -2550,6 +2576,7 @@ export function StudyChat({
                 return (
                   <div
                     key={message.id}
+                    data-testid="chat-message"
                     className="flex animate-fade-in-up justify-end"
                   >
                     <div className="max-w-[85%] min-w-0">
@@ -2560,9 +2587,9 @@ export function StudyChat({
                       </div>
                       {message.attachments.length ? (
                         <div className="mt-1.5 flex flex-wrap justify-end gap-1.5">
-                          {message.attachments.map((attachment) => (
+                          {message.attachments.map((attachment, attachmentIndex) => (
                             <span
-                              key={`${attachment.type}:${attachment.id}`}
+                              key={`${attachment.type}:${attachment.id}:${attachmentIndex}`}
                               className="max-w-full truncate break-words rounded-md bg-slate-950/10 px-2 py-0.5 text-xs font-medium"
                               title={attachment.label}
                             >
@@ -2618,6 +2645,7 @@ export function StudyChat({
                 return (
                   <div
                     key={message.id}
+                    data-testid="chat-message"
                     className="flex animate-fade-in-up gap-3"
                   >
                     <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-violet-300/25 bg-violet-300/10 text-violet-200">
@@ -2668,6 +2696,7 @@ export function StudyChat({
                 return (
                   <div
                     key={message.id}
+                    data-testid="chat-message"
                     className="flex animate-fade-in-up gap-3"
                   >
                     <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-sky-300/25 bg-sky-300/10 text-sky-200">
@@ -2714,6 +2743,7 @@ export function StudyChat({
                 return (
                   <div
                     key={message.id}
+                    data-testid="chat-message"
                     className="flex animate-fade-in-up gap-3"
                   >
                     <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-pink-300/25 bg-pink-300/10 text-pink-200">
@@ -2750,7 +2780,7 @@ export function StudyChat({
               }
 
               return (
-                <div key={message.id} className="flex animate-fade-in-up gap-3">
+                <div key={message.id} data-testid="chat-message" className="flex animate-fade-in-up gap-3">
                   <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-emerald-400/20 bg-emerald-400/10 text-xs font-bold text-emerald-300">
                     SP
                   </div>
@@ -2878,8 +2908,8 @@ export function StudyChat({
                             : loadingMode === "diagram"
                               ? "Generating a grounded diagram…"
                               : loadingMode === LEARN_STEP_BY_STEP_MODE
-                                ? "Preparing the next learning step…"
-                                : "Thinking with your study context…"
+                                ? `${chatProgressCues[chatProgressIndex]}…`
+                                : `${chatProgressCues[chatProgressIndex]}…`
                         }
                       />
                     </div>
@@ -3019,9 +3049,9 @@ export function StudyChat({
 
             {attachments.length ? (
               <div className="mb-2 flex flex-wrap gap-1.5">
-                {attachments.map((attachment) => (
+                {attachments.map((attachment, attachmentIndex) => (
                   <button
-                    key={`${attachment.type}:${attachment.id}`}
+                    key={`${attachment.type}:${attachment.id}:${attachmentIndex}`}
                     type="button"
                     onClick={() => removeAttachment(attachment)}
                     disabled={composerDisabled || loading}
