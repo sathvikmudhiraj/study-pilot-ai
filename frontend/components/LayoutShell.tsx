@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useState, useEffect, useCallback, useRef, type ReactNode } from "react";
 import { useInactivityLock } from "@/frontend/lib/useInactivityLock";
 import { createBrowserSupabaseClient } from "@/frontend/lib/supabase/browser";
@@ -38,6 +38,11 @@ const navItems: NavItem[] = [
 ];
 
 const adminNavItem: NavItem = { label: "Admin", href: "/admin", icon: <IconAdmin size={18} /> };
+const ADMIN_ENTRY_ROUTE_KEY = "studypilot.adminEntryRoute";
+
+function isInternalStudyPilotRoute(route: string) {
+  return route.startsWith("/") && !route.startsWith("//") && !route.startsWith("/admin");
+}
 
 function NavItemLink({ item, active, onClick }: { item: NavItem; active: boolean; onClick?: () => void }) {
   return (
@@ -73,14 +78,20 @@ export function LayoutShell({
   onSignOut?: () => void;
 }) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const drawerRef = useRef<HTMLDivElement>(null);
 
   const activeHref = navItems.find((item) => pathname.startsWith(item.href))?.href ?? "";
+  const currentRoute = `${pathname}${searchParams.toString() ? `?${searchParams.toString()}` : ""}`;
 
   useInactivityLock();
 
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+  const rememberAdminEntryRoute = useCallback(() => {
+    if (!isInternalStudyPilotRoute(currentRoute)) return;
+    window.sessionStorage.setItem(ADMIN_ENTRY_ROUTE_KEY, currentRoute);
+  }, [currentRoute]);
   const signOut = useCallback(async () => {
     if (onSignOut) {
       onSignOut();
@@ -141,7 +152,7 @@ export function LayoutShell({
           {navItems.map((item) => (
             <NavItemLink key={item.href} item={item} active={activeHref === item.href} />
           ))}
-          {isAdmin ? <NavItemLink item={adminNavItem} active={activeHref === "/admin"} /> : null}
+          {isAdmin ? <NavItemLink item={adminNavItem} active={activeHref === "/admin"} onClick={rememberAdminEntryRoute} /> : null}
         </nav>
 
         {/* User info */}
@@ -200,7 +211,14 @@ export function LayoutShell({
                 <NavItemLink key={item.href} item={item} active={activeHref === item.href} onClick={closeDrawer} />
               ))}
               {isAdmin ? (
-                <NavItemLink item={adminNavItem} active={activeHref === "/admin"} onClick={closeDrawer} />
+                <NavItemLink
+                  item={adminNavItem}
+                  active={activeHref === "/admin"}
+                  onClick={() => {
+                    rememberAdminEntryRoute();
+                    closeDrawer();
+                  }}
+                />
               ) : null}
             </nav>
 

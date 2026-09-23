@@ -1,8 +1,14 @@
 import "server-only";
 
-import { generateAIText } from "./aiProvider";
-import { generateLocalizedText } from "./aiLanguage";
-import { canonicalTopicId, DEFAULT_LANGUAGE, type SupportedLanguageCode } from "@/shared/languages";
+import { generateAITextWithMetadata, type AIProviderResult } from "./aiProvider";
+import {
+  canonicalTopicId,
+  DEFAULT_LANGUAGE,
+  languageInstruction,
+  normalizeLanguageCode,
+  responseUsesExpectedScript,
+  type SupportedLanguageCode,
+} from "@/shared/languages";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -51,6 +57,7 @@ const MAX_QUESTIONS = 20;
 const MIN_OPTIONS = 2;
 const MAX_OPTIONS = 4;
 const MAX_TEXT_CHARS = 14000;
+const QUIZ_TIMEOUT_MESSAGE = "Quiz generation timed out. Please retry.";
 
 const VALID_DIFFICULTIES: QuizDifficulty[] = ["easy", "medium", "hard"];
 
@@ -61,6 +68,77 @@ const VALID_DIFFICULTIES: QuizDifficulty[] = ["easy", "medium", "hard"];
 function devLog(message: string, details?: Record<string, unknown>) {
   if (process.env.NODE_ENV === "production") return;
   console.log(`[aiQuiz] ${message}`, details ?? "");
+}
+
+type QuizProviderRun = {
+  text: string;
+  result: AIProviderResult;
+};
+
+function quizProviderFailureMessage(result: AIProviderResult | null) {
+  if (!result) return null;
+  if (result.responseMode !== "offline_fallback" && result.text.trim()) return null;
+
+  if (result.providerFailureCategory === "timeout") return QUIZ_TIMEOUT_MESSAGE;
+  if (result.providerFailureCategory === "empty") return "AI returned an empty quiz response. Please retry.";
+  if (result.providerFailureCategory === "quota") return "Free AI limit reached. Please try again later.";
+  if (result.providerFailureCategory === "busy") return "StudyPilot AI is busy right now. Please try again in a few seconds.";
+  if (result.providerFailureCategory === "auth") return "AI service authentication failed. Check your AI API key.";
+  if (result.providerFailureCategory === "config") return "AI service is not configured.";
+  if (result.providerFailureCategory === "cancelled") return "AI request was cancelled.";
+  if (result.providerFailureCategory) return "AI request failed. Please try again.";
+  if (!result.text.trim()) return "AI returned an empty quiz response. Please retry.";
+  return null;
+}
+
+function assertUsableQuizProviderRun(run: QuizProviderRun, stage: "quiz" | "repair") {
+  const failureMessage = quizProviderFailureMessage(run.result);
+  if (failureMessage) {
+    devLog(`AI ${stage} provider unavailable`, {
+      provider: run.result.provider,
+      model: run.result.model,
+      responseMode: run.result.responseMode,
+      providerFailureCategory: run.result.providerFailureCategory ?? null,
+      responseChars: run.text.length,
+      geminiLatencyMs: run.result.geminiLatencyMs ?? null,
+      nvidiaLatencyMs: run.result.nvidiaLatencyMs ?? null,
+      totalLatencyMs: run.result.totalLatencyMs,
+    });
+    throw new Error(failureMessage);
+  }
+}
+
+function shouldAttemptQuizJsonRepair(run: QuizProviderRun) {
+  return run.result.responseMode === "ai" && run.text.trim().length > 0;
+}
+
+async function generateLocalizedQuizProviderRun(
+  prompt: string,
+  language: SupportedLanguageCode,
+  generate: (prompt: string) => Promise<AIProviderResult>,
+): Promise<QuizProviderRun> {
+  const normalizedLanguage = normalizeLanguageCode(language);
+  const localizedPrompt = `${languageInstruction(normalizedLanguage)}\n\n${prompt}`;
+  let result = await generate(localizedPrompt);
+  let text = result.text;
+
+  if (result.responseMode !== "ai" || !text.trim() || responseUsesExpectedScript(text, normalizedLanguage)) {
+    return { text, result };
+  }
+
+  if (process.env.NODE_ENV !== "production") {
+    console.info("[aiLanguage] retrying response with stricter language instruction", {
+      language: normalizedLanguage,
+    });
+  }
+
+  result = await generate(`${languageInstruction(normalizedLanguage)}
+
+The previous response did not use the selected language. Rewrite the complete answer in the selected language. Preserve the exact JSON shape and English JSON keys.
+
+${prompt}`);
+  text = result.text;
+  return { text, result };
 }
 
 function truncate(text: string, max: number) {
@@ -393,15 +471,25 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
 STUDY MATERIAL:
 ${text}`;
 
-  const response = await generateLocalizedText(prompt, language, (localizedPrompt) =>
-    generateAIText(localizedPrompt, {
+  const quizRun = await generateLocalizedQuizProviderRun(prompt, language, (localizedPrompt) =>
+    generateAITextWithMetadata(localizedPrompt, {
       temperature: 0.4,
       maxOutputTokens: Math.min(1200 + count * 260, 5200),
       responseMimeType: "application/json",
     }),
   );
+  assertUsableQuizProviderRun(quizRun, "quiz");
+  const response = quizRun.text;
 
-  devLog("AI quiz response received", { rawLength: response.length });
+  devLog("AI quiz response received", {
+    rawLength: response.length,
+    provider: quizRun.result.provider,
+    model: quizRun.result.model,
+    responseMode: quizRun.result.responseMode,
+    providerFailureCategory: quizRun.result.providerFailureCategory ?? null,
+    geminiLatencyMs: quizRun.result.geminiLatencyMs ?? null,
+    nvidiaLatencyMs: quizRun.result.nvidiaLatencyMs ?? null,
+  });
 
   if (process.env.NODE_ENV !== "production") {
     console.log("[DEBUG] QUIZ raw AI response:", {
@@ -414,8 +502,11 @@ ${text}`;
 
   let parsed = tryParseJson(response);
   if (!parsed) {
+    if (!shouldAttemptQuizJsonRepair(quizRun)) {
+      throw new Error(QUIZ_TIMEOUT_MESSAGE);
+    }
     devLog("AI quiz JSON repair started", { rawLength: response.length });
-    const repairedResponse = await generateAIText(
+    const repairRun = await generateAITextWithMetadata(
       `Repair the quiz payload below into one complete, valid JSON object.
 Return JSON only, with no markdown or commentary. Preserve the original language and facts.
 The object must contain title, source_summary, difficulty, and a questions array.
@@ -431,10 +522,16 @@ ${response}`,
         responseMimeType: "application/json",
       },
     );
+    assertUsableQuizProviderRun({ text: repairRun.text, result: repairRun }, "repair");
+    const repairedResponse = repairRun.text;
     parsed = tryParseJson(repairedResponse);
     devLog("AI quiz JSON repair completed", {
       repairedLength: repairedResponse.length,
       parsed: Boolean(parsed),
+      provider: repairRun.provider,
+      model: repairRun.model,
+      responseMode: repairRun.responseMode,
+      providerFailureCategory: repairRun.providerFailureCategory ?? null,
     });
   }
   if (!parsed) {

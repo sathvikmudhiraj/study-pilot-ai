@@ -1,6 +1,15 @@
 import "server-only";
 
-import { generateSummaryAIText, isAiBusyError, isAiQuotaError, isAiTimeoutError } from "./aiProvider";
+import {
+  generateSummaryAIText,
+  generateSummaryAITextWithMetadata,
+  getAIProviderRuntimeInfo,
+  isAiBusyError,
+  isAiQuotaError,
+  isAiTimeoutError,
+  SUMMARY_TIMEOUT_MESSAGE,
+  type AIProviderResult,
+} from "./aiProvider";
 import { DOCUMENT_PROCESSING_BUDGETS, chunkDocument } from "./documentProcessing";
 import { sanitizeSummaryForDisplay } from "@/shared/summarySanitizer";
 import {
@@ -12,7 +21,13 @@ import {
 } from "./sourceCitations";
 import { STUDYPILOT_TUTOR_INSTRUCTION } from "./tutorPrompt";
 import { generateLocalizedText } from "./aiLanguage";
-import { DEFAULT_LANGUAGE, type SupportedLanguageCode } from "@/shared/languages";
+import {
+  DEFAULT_LANGUAGE,
+  languageInstruction,
+  normalizeLanguageCode,
+  responseUsesExpectedScript,
+  type SupportedLanguageCode,
+} from "@/shared/languages";
 
 export type TopicSummary = {
   topic: string;
@@ -72,6 +87,7 @@ export type SummarySourceContext = {
 const MAX_CHUNK_CHARS = 12000;
 const SUMMARY_CHUNK_TIMEOUT_MS = 24_000;
 const SUMMARY_CHUNK_CONCURRENCY = 3;
+const DIRECT_SINGLE_CHUNK_SUMMARY_MAX_CHARS = 6_500;
 
 // Synthesis token budget scales with module size so large multi-section
 // modules (e.g. CNS Module 1) are not squeezed into a tiny output and forced
@@ -82,6 +98,11 @@ const SYNTHESIS_TOKEN_PER_CHUNK = 500;
 // 14-topic CNS module synthesis is not starved into dropping early or late
 // topics from covered_topics / topic_wise_summary.
 const SYNTHESIS_TOKEN_MAX = 8192;
+
+type SummaryProviderRun = {
+  text: string;
+  result: AIProviderResult;
+};
 
 // When this many detected source topics are missing from Gemini's first
 // synthesis pass, run one targeted retry that explicitly names the gaps.
@@ -260,6 +281,72 @@ const CNS_TOPIC_HINT =
 function devLog(message: string, details?: Record<string, unknown>) {
   if (process.env.NODE_ENV === "production") return;
   console.log(`[aiSummary] ${message}`, details ?? "");
+}
+
+function summaryProviderFailureMessage(result: AIProviderResult | null) {
+  if (!result) return null;
+  if (result.responseMode !== "offline_fallback" && result.text.trim()) return null;
+
+  if (result.providerFailureCategory === "timeout") return SUMMARY_TIMEOUT_MESSAGE;
+  if (result.providerFailureCategory === "empty") return "AI returned an empty response. Please retry.";
+  if (result.providerFailureCategory === "quota") return "Free AI limit reached. Please try again later.";
+  if (result.providerFailureCategory === "busy") return "StudyPilot AI is busy right now. Please try again in a few seconds.";
+  if (result.providerFailureCategory === "auth") return "AI service authentication failed. Check your NVIDIA API key.";
+  if (result.providerFailureCategory === "config") return "AI service is not configured.";
+  if (result.providerFailureCategory === "cancelled") return "AI request was cancelled.";
+  if (result.providerFailureCategory) return "AI request failed. Please try again.";
+  if (!result.text.trim()) return "AI returned an empty response. Please retry.";
+  return null;
+}
+
+function assertUsableSummaryProviderRun(run: SummaryProviderRun, stage: "summary" | "repair") {
+  const failureMessage = summaryProviderFailureMessage(run.result);
+  if (failureMessage) {
+    devLog(`AI ${stage} provider unavailable`, {
+      provider: run.result.provider,
+      model: run.result.model,
+      responseMode: run.result.responseMode,
+      providerFailureCategory: run.result.providerFailureCategory ?? null,
+      responseChars: run.text.length,
+      geminiLatencyMs: run.result.geminiLatencyMs ?? null,
+      nvidiaLatencyMs: run.result.nvidiaLatencyMs ?? null,
+      totalLatencyMs: run.result.totalLatencyMs,
+    });
+    throw new Error(failureMessage);
+  }
+}
+
+function shouldAttemptSummaryJsonRepair(run: SummaryProviderRun) {
+  return run.result.responseMode === "ai" && run.text.trim().length > 0;
+}
+
+async function generateLocalizedSummaryProviderRun(
+  prompt: string,
+  language: SupportedLanguageCode,
+  generate: (prompt: string) => Promise<AIProviderResult>,
+): Promise<SummaryProviderRun> {
+  const normalizedLanguage = normalizeLanguageCode(language);
+  const localizedPrompt = `${languageInstruction(normalizedLanguage)}\n\n${prompt}`;
+  let result = await generate(localizedPrompt);
+  let text = result.text;
+
+  if (result.responseMode !== "ai" || !text.trim() || responseUsesExpectedScript(text, normalizedLanguage)) {
+    return { text, result };
+  }
+
+  if (process.env.NODE_ENV !== "production") {
+    console.info("[aiLanguage] retrying response with stricter language instruction", {
+      language: normalizedLanguage,
+    });
+  }
+
+  result = await generate(`${languageInstruction(normalizedLanguage)}
+
+The previous response did not use the selected language. Rewrite the complete answer in the selected language. Preserve the exact JSON shape and English JSON keys.
+
+${prompt}`);
+  text = result.text;
+  return { text, result };
 }
 
 export function chunkText(text: string) {
@@ -881,24 +968,45 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
 MATERIAL:
 ${text}`;
 
-  const response = await generateLocalizedText(prompt, language, (localizedPrompt) =>
-    generateSummaryAIText(localizedPrompt, {
+  const providerInfo = getAIProviderRuntimeInfo("summary");
+  console.info("[summary-provider-trace] configured_models", {
+    configuredProvider: providerInfo.configuredProvider,
+    geminiModel: providerInfo.primaryProvider === "gemini" ? providerInfo.primaryModel : process.env.GEMINI_MODEL || "gemini-2.5-flash",
+    nvidiaModel: providerInfo.primaryProvider === "nvidia" ? providerInfo.primaryModel : providerInfo.fallbackModel,
+    primaryProvider: providerInfo.primaryProvider,
+    primaryModel: providerInfo.primaryModel,
+    fallbackProvider: providerInfo.fallbackProvider,
+    fallbackModel: providerInfo.fallbackModel,
+  });
+  const summaryRun = await generateLocalizedSummaryProviderRun(prompt, language, (localizedPrompt) =>
+    generateSummaryAITextWithMetadata(localizedPrompt, {
       temperature: coverageReminder ? 0.3 : 0.2,
       maxOutputTokens,
       responseMimeType: "application/json",
       timeoutMs: SUMMARY_CHUNK_TIMEOUT_MS,
     }),
   );
+  assertUsableSummaryProviderRun(summaryRun, "summary");
+  const response = summaryRun.text;
   devLog("AI structured response received", {
     rawLength: response.length,
+    provider: summaryRun.result.provider,
+    model: summaryRun.result.model,
+    responseMode: summaryRun.result.responseMode,
+    providerFailureCategory: summaryRun.result.providerFailureCategory ?? null,
+    geminiLatencyMs: summaryRun.result.geminiLatencyMs ?? null,
+    nvidiaLatencyMs: summaryRun.result.nvidiaLatencyMs ?? null,
     sourceKind,
     maxOutputTokens,
     coverageRetry: Boolean(coverageReminder),
   });
   let parsed = parseSummaryJson(response);
   if (!parsed) {
+    if (!shouldAttemptSummaryJsonRepair(summaryRun)) {
+      throw new Error(SUMMARY_TIMEOUT_MESSAGE);
+    }
     devLog("AI summary JSON repair started", { rawLength: response.length });
-    const repairedResponse = await generateSummaryAIText(
+    const repairRun = await generateSummaryAITextWithMetadata(
       `Repair the summary payload below into one complete, valid JSON object.
 Return JSON only, with no markdown or commentary. Preserve the original language and facts.
 Use exactly these keys: suggested_title, short_summary, module_overview, covered_topics, key_points, topic_wise_summary, exam_focus_points, memory_lines, common_mistakes, important_concepts, action_items, suggested_tags, suggested_next_step.
@@ -914,13 +1022,19 @@ ${response}`,
         timeoutMs: SUMMARY_CHUNK_TIMEOUT_MS,
       },
     );
+    assertUsableSummaryProviderRun({ text: repairRun.text, result: repairRun }, "repair");
+    const repairedResponse = repairRun.text;
     parsed = parseSummaryJson(repairedResponse);
     devLog("AI summary JSON repair completed", {
       repairedLength: repairedResponse.length,
       parsed: Boolean(parsed),
+      provider: repairRun.provider,
+      model: repairRun.model,
+      responseMode: repairRun.responseMode,
+      providerFailureCategory: repairRun.providerFailureCategory ?? null,
     });
   }
-  if (!parsed) throw new Error("Gemini JSON parse failed.");
+  if (!parsed) throw new Error("Summary JSON parse failed.");
   // Do not apply the deterministic backstop here: the orchestrator measures
   // coverage first and only falls back to it if Gemini still misses topics.
   return parsed;
@@ -988,7 +1102,7 @@ export async function summarizeStudyText(
   const personalizationHint = source.personalizationHint ?? "";
   const language = source.language ?? DEFAULT_LANGUAGE;
 
-  if (chunks.length === 1) {
+  if (chunks.length === 1 && sourceTextLength <= DIRECT_SINGLE_CHUNK_SUMMARY_MAX_CHARS) {
     let summary = await generateStructuredSummary(chunks[0], "full-text", [], undefined, undefined, personalizationHint, language);
     const reminder = buildCoverageReminder(summary, [], chunks[0]);
     devLog("single-chunk coverage check", { missedCount: reminder ? 1 : 0, retry: Boolean(reminder) });

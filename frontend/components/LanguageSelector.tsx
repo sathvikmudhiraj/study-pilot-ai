@@ -120,7 +120,7 @@ export function LanguageSelector({
             id={listboxId}
             role="listbox"
             aria-label={label}
-            className="absolute bottom-full right-0 z-50 mb-2 max-h-72 w-max min-w-full overflow-y-auto rounded-xl border border-white/10 bg-[#080d18] p-1.5 shadow-2xl shadow-black/50 ring-1 ring-emerald-400/10"
+            className="absolute right-0 top-full z-50 mt-2 max-h-56 w-full min-w-full overflow-y-auto rounded-xl border border-white/10 bg-[#080d18] p-1.5 shadow-2xl shadow-black/50 ring-1 ring-emerald-400/10"
           >
             {SUPPORTED_LANGUAGES.map((language) => {
               const active = language.code === selectedLanguage.code;
@@ -131,13 +131,13 @@ export function LanguageSelector({
                   role="option"
                   aria-selected={active}
                   onClick={() => changeLanguage(language.code)}
-                  className={`flex w-full min-w-48 items-center justify-between gap-4 rounded-lg px-3 py-2 text-left text-sm transition ${
+                  className={`flex w-full min-w-0 items-center justify-between gap-3 rounded-lg px-3 py-2 text-left text-sm transition ${
                     active
                       ? "bg-emerald-400/15 text-emerald-100"
                       : "text-slate-300 hover:bg-white/10 hover:text-white"
                   }`}
                 >
-                  <span className="whitespace-nowrap">
+                  <span className="min-w-0 truncate">
                     {language.label}
                     {language.nativeLabel === language.label
                       ? ""

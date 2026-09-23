@@ -5,8 +5,10 @@ import { SummaryPanel } from "@/frontend/components/SummaryPanel";
 import { Badge } from "@/frontend/components/ui";
 import { IconChevronLeft, IconFileText } from "@/frontend/components/icons";
 import { getCurrentUser } from "@/backend/lib/auth";
+import { createAdminSupabaseClient } from "@/backend/lib/adminSupabase";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { generateAndStorePptxPreview, type PptxPreviewMetadata } from "@/backend/lib/pptxPreview";
+import { PdfPreviewFrame } from "@/frontend/components/PdfPreviewFrame";
 import { supabaseSetupMessage } from "@/frontend/lib/supabase/errors";
 import { isSupportedLanguageCode } from "@/shared/languages";
 
@@ -94,7 +96,6 @@ export default async function FileDetailPage({
   const supabase = await createServerSupabaseClient();
 
   let signedUrl: string | null = null;
-  let previewSignedUrl: string | null = null;
   let textPreviewLabel = "Extracted text";
   let previewError = "";
 
@@ -123,16 +124,39 @@ export default async function FileDetailPage({
     .eq("user_id", user.id)
     .maybeSingle();
 
-  const file = baseResult.data
+  let file = baseResult.data
     ? {
         ...baseResult.data,
         content_type: null as string | null,
         processing_notes: null as string[] | null,
       }
     : null;
-  const error = baseResult.error;
+  let error: { message: string } | null = baseResult.error;
+  let fileOwnerId = user.id;
+  let privilegedFileView = false;
 
-  if (file) {
+  if (!file && !error && user.role === "admin") {
+    const adminSupabase = createAdminSupabaseClient();
+    const adminResult = await adminSupabase
+      .from("files")
+      .select("id, user_id, file_name, file_type, mime_type, file_size, storage_path, processing_status, status, extracted_text, extracted_metadata, created_at, content_type, processing_notes")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (adminResult.error) {
+      error = { message: adminResult.error.message };
+    } else if (adminResult.data) {
+      file = {
+        ...(adminResult.data as typeof baseResult.data & { content_type?: string | null; processing_notes?: string[] | null }),
+        content_type: (adminResult.data as { content_type?: string | null }).content_type ?? null,
+        processing_notes: (adminResult.data as { processing_notes?: string[] | null }).processing_notes ?? null,
+      };
+      fileOwnerId = String((adminResult.data as { user_id: string }).user_id);
+      privilegedFileView = true;
+    }
+  }
+
+  if (file && !privilegedFileView) {
     const optional = await supabase
       .from("files")
       .select("content_type, processing_notes")
@@ -168,7 +192,10 @@ export default async function FileDetailPage({
     );
   }
 
-  if (file.storage_path) {
+  const isDirectPdf = file.content_type === "pdf" || file.mime_type === "application/pdf" || file.file_name.toLowerCase().endsWith(".pdf");
+  const isImage = file.content_type === "image" || Boolean(file.mime_type?.startsWith("image/"));
+
+  if (file.storage_path && isImage) {
     const signed = await supabase.storage.from("study-files").createSignedUrl(file.storage_path, 60 * 10);
     if (signed.error) {
       previewError = signed.error.message.includes("not found")
@@ -177,7 +204,7 @@ export default async function FileDetailPage({
     } else {
       signedUrl = signed.data.signedUrl;
     }
-  } else {
+  } else if (!file.storage_path) {
     previewError = "This file does not have a storage path.";
   }
 
@@ -192,7 +219,7 @@ export default async function FileDetailPage({
 
       const generated = await generateAndStorePptxPreview({
         supabase,
-        userId: user.id,
+        userId: fileOwnerId,
         fileId: file.id,
         fileName: file.file_name,
         pptxBuffer: Buffer.from(await download.data.arrayBuffer()),
@@ -202,7 +229,7 @@ export default async function FileDetailPage({
         .from("files")
         .update({ extracted_metadata: { ...metadata, preview: generated } })
         .eq("id", file.id)
-        .eq("user_id", user.id);
+        .eq("user_id", fileOwnerId);
       if (!updated.error) previewMetadata = generated;
     } catch {
       previewError = "PPTX visual preview conversion failed in this environment. Text preview is shown instead.";
@@ -221,20 +248,11 @@ export default async function FileDetailPage({
           },
         })
         .eq("id", file.id)
-        .eq("user_id", user.id);
+        .eq("user_id", fileOwnerId);
     }
   }
 
-  if (previewMetadata?.storagePath) {
-    const signedPreview = await supabase.storage.from("study-files").createSignedUrl(previewMetadata.storagePath, 60 * 10);
-    if (!signedPreview.error) {
-      previewSignedUrl = signedPreview.data.signedUrl;
-    } else if (isPptx) {
-      previewError = "The generated PPTX preview is not available. Text preview is shown instead.";
-    }
-  }
-
-  if (isPptx && !previewSignedUrl) {
+  if (isPptx && !previewMetadata?.storagePath) {
     textPreviewLabel = "Text preview";
   }
 
@@ -337,10 +355,10 @@ export default async function FileDetailPage({
               <div className="relative max-h-[70vh] min-h-[400px] overflow-auto p-4">
                 <Image src={signedUrl} alt={file.file_name} fill unoptimized className="object-contain p-4" />
               </div>
-            ) : previewSignedUrl ? (
-              <iframe src={`${previewSignedUrl}#toolbar=1&navpanes=0`} title={`${file.file_name} visual preview`} className="h-[70vh] min-h-[400px] w-full" />
-            ) : signedUrl && (file.content_type === "pdf" || file.mime_type === "application/pdf" || file.file_name.toLowerCase().endsWith(".pdf")) ? (
-              <iframe src={`${signedUrl}#toolbar=1&navpanes=0`} title={file.file_name} className="h-[70vh] min-h-[400px] w-full" />
+            ) : previewMetadata?.storagePath ? (
+              <PdfPreviewFrame fileId={file.id} title={`${file.file_name} visual preview`} variant="generated" />
+            ) : file.storage_path && isDirectPdf ? (
+              <PdfPreviewFrame fileId={file.id} title={file.file_name} />
             ) : file.extracted_text ? (
               <div className="max-h-[70vh] min-h-[400px] overflow-auto p-4 sm:p-5">
                 <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">{textPreviewLabel}</h2>

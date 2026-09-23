@@ -1,9 +1,11 @@
 "use client";
 
 import { useMemo, useSyncExternalStore } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
-import { IconAdmin, IconSignOut, IconActivity, IconFileText, IconBarChart, IconClipboardList, IconUsers } from "../icons";
+import { IconAdmin, IconSignOut, IconActivity, IconFileText, IconBarChart, IconClipboardList, IconUsers, IconChevronLeft } from "../icons";
+
+const ADMIN_ENTRY_ROUTE_KEY = "studypilot.adminEntryRoute";
 
 let adminClockTimestamp = 0;
 let adminClockInterval: number | null = null;
@@ -11,6 +13,10 @@ const adminClockListeners = new Set<() => void>();
 
 function isActiveAdminPath(pathname: string, href: string) {
   return href === "/admin" ? pathname === "/admin" : pathname === href || pathname.startsWith(`${href}/`);
+}
+
+function isInternalStudyPilotRoute(route: string | null): route is string {
+  return Boolean(route && route.startsWith("/") && !route.startsWith("//") && !route.startsWith("/admin"));
 }
 
 function publishAdminClockTick() {
@@ -71,16 +77,37 @@ function AdminHeaderClock() {
 
 export function AdminHeader({ userName }: { userName: string }) {
   const pathname = usePathname();
+  const router = useRouter();
 
   const signOut = async () => {
     await fetch("/api/auth/logout", { method: "POST" });
     window.location.assign("/");
   };
 
+  const backToStudyPilot = () => {
+    const entryRoute = window.sessionStorage.getItem(ADMIN_ENTRY_ROUTE_KEY);
+    if (pathname === "/admin" && isInternalStudyPilotRoute(entryRoute) && window.history.length > 1) {
+      router.back();
+      return;
+    }
+
+    const fallbackRoute = isInternalStudyPilotRoute(entryRoute) ? entryRoute : "/dashboard";
+    router.push(fallbackRoute);
+  };
+
   return (
     <header className="sticky top-0 z-10 border-b border-white/[0.06] bg-[#070b14]/80 px-4 py-3 backdrop-blur-xl md:px-6">
       <div className="flex min-w-0 items-center justify-between gap-4">
         <div className="flex items-center gap-3 min-w-0">
+          <button
+            type="button"
+            onClick={backToStudyPilot}
+            className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-xs font-semibold text-slate-300 transition hover:border-emerald-300/30 hover:bg-emerald-300/10 hover:text-emerald-100"
+          >
+            <IconChevronLeft size={15} />
+            <span className="hidden sm:inline">Back to StudyPilot</span>
+            <span className="sm:hidden">Back</span>
+          </button>
           <Link href="/admin" className="min-w-0 truncate text-sm font-bold text-white">
             Admin Portal
           </Link>

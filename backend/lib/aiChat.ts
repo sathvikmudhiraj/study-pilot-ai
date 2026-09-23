@@ -1,6 +1,6 @@
 import "server-only";
 
-import { generateAITextWithMetadata } from "./aiProvider";
+import { generateAITextWithMetadata, type AIProviderResult } from "./aiProvider";
 import { DEFAULT_LANGUAGE, languageInstruction, type SupportedLanguageCode } from "@/shared/languages";
 import { STUDYPILOT_TUTOR_INSTRUCTION } from "./tutorPrompt";
 
@@ -251,6 +251,17 @@ export type ChatAnswerWithMetadata = StructuredChatAnswer & {
   _providerMeta?: AIProviderMetadata;
 };
 
+function assertUsableChatResponse(result: AIProviderResult) {
+  if (result.responseMode === "ai" && result.text.trim()) return;
+  if (result.providerFailureCategory === "timeout") {
+    throw new Error("Chat answer timed out. Please retry.");
+  }
+  if (result.providerFailureCategory === "quota") {
+    throw new Error("Free AI limit reached. Please try again later.");
+  }
+  throw new Error("AI service could not answer right now. Please retry.");
+}
+
 export async function answerStudyQuestion({
   question,
   context,
@@ -338,6 +349,7 @@ ${question}`;
     maxAttempts: 1,
   });
   devLog("AI chat response received", { rawLength: result.text.length, provider: result.provider, fallbackUsed: result.fallbackUsed });
+  assertUsableChatResponse(result);
 
   let parsed: StructuredChatAnswer | null = null;
   let providerMeta: AIProviderMetadata | undefined;
@@ -455,6 +467,7 @@ ${question}`;
     maxAttempts: 1,
   });
   devLog("Learn Step by Step response received", { rawLength: result.text.length, provider: result.provider, fallbackUsed: result.fallbackUsed });
+  assertUsableChatResponse(result);
 
   if (process.env.NODE_ENV !== "production") {
     console.log("[DEBUG] LEARN_STEP raw AI response:", {

@@ -57,6 +57,16 @@ function limitedText(value: unknown, maxLength: number) {
   return textValue(value).slice(0, maxLength).trim();
 }
 
+function cleanDisplayedWebText(value: unknown, maxLength: number) {
+  const cleaned = textValue(value)
+    .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
+    .replace(/<\/?svg\b[^>]*>/gi, " ")
+    .replace(/\bsvg\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned.slice(0, maxLength).trim();
+}
+
 function parseIpv4(hostname: string) {
   const parts = hostname.split(".");
   if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/.test(part))) return null;
@@ -123,9 +133,9 @@ function normalizeCitation(value: unknown): WebCitation | null {
   if (!record) return null;
 
   const id = limitedText(record.id, 120);
-  const sourceName = limitedText(record.source_name, 300);
+  const sourceName = cleanDisplayedWebText(record.source_name, 180);
   const url = safeWebUrl(record.url);
-  const domain = limitedText(record.domain, 255);
+  const domain = cleanDisplayedWebText(record.domain, 120);
   const locatorStart = Number(record.locator_start);
 
   if (
@@ -141,8 +151,8 @@ function normalizeCitation(value: unknown): WebCitation | null {
     return null;
   }
 
-  const publishedAt = limitedText(record.published_at, 80);
-  const snippet = limitedText(record.snippet, 1_200);
+  const publishedAt = cleanDisplayedWebText(record.published_at, 80);
+  const snippet = cleanDisplayedWebText(record.snippet, 280);
   return {
     id,
     source_type: "web",
@@ -199,11 +209,11 @@ function normalizeWebSearchAnswer(value: unknown): WebSearchAnswer | null {
   const record = recordValue(root.answer) ?? recordValue(root.result) ?? root;
 
   const query = textValue(record.query);
-  const conciseAnswer = textValue(record.concise_answer);
+  const conciseAnswer = cleanDisplayedWebText(record.concise_answer, 1_600);
   const searchedAt = textValue(record.searched_at);
   if (!query || !conciseAnswer || !searchedAt || !Array.isArray(record.web_citations)) return null;
 
-  const webCitations = normalizeCitations(record.web_citations, 12);
+  const webCitations = normalizeCitations(record.web_citations, 3);
   if (!webCitations.length) return null;
 
   return {

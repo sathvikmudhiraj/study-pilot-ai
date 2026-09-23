@@ -293,15 +293,6 @@ export function RevisionPlanPanel({
     void generate();
   }, [sourceFileId, language, plan, error, generate]);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      }
-    };
-  }, []);
-
   return (
     <aside className="grid min-w-0 gap-5">
       {/* Header */}

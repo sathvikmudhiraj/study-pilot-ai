@@ -3078,7 +3078,7 @@ export function StudyChat({
                     ref={menuRef}
                     role="menu"
                     aria-label="Attach options"
-                    className="fixed inset-x-0 bottom-0 z-50 max-h-[55vh] overflow-y-auto rounded-t-2xl border-t border-white/10 bg-slate-950 p-2 shadow-2xl shadow-black/50 sm:absolute sm:bottom-[calc(100%+0.5rem)] sm:left-0 sm:inset-x-auto sm:w-72 sm:max-h-none sm:rounded-2xl sm:border sm:border-white/10 sm:p-1.5"
+                    className="fixed inset-x-0 bottom-0 z-50 max-h-[55vh] overflow-y-auto rounded-t-2xl border-t border-white/10 bg-slate-950 p-2 shadow-2xl shadow-black/50 sm:absolute sm:bottom-[calc(100%+0.5rem)] sm:left-0 sm:inset-x-auto sm:w-72 sm:max-h-[50dvh] sm:rounded-2xl sm:border sm:border-white/10 sm:p-1.5"
                   >
                     <div className="mb-1 flex items-center justify-between px-1 pt-1 sm:hidden">
                       <span className="text-xs font-semibold text-slate-300">

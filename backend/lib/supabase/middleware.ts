@@ -28,9 +28,14 @@ const SECURITY_HEADERS: Array<[string, string]> = [
   ["Permissions-Policy", "camera=(), geolocation=(), payment=(), usb=(), microphone=(self)"],
 ];
 
-function withSecurityHeaders(response: NextResponse) {
+function isPdfPreviewRoute(pathname: string) {
+  return /^\/api\/files\/[^/]+\/preview\/?$/.test(pathname);
+}
+
+function withSecurityHeaders(response: NextResponse, request?: NextRequest) {
+  const allowSameOriginFrame = request ? isPdfPreviewRoute(request.nextUrl.pathname) : false;
   for (const [name, value] of SECURITY_HEADERS) {
-    response.headers.set(name, value);
+    response.headers.set(name, allowSameOriginFrame && name === "X-Frame-Options" ? "SAMEORIGIN" : value);
   }
   return response;
 }
@@ -82,11 +87,12 @@ export async function updateSession(request: NextRequest) {
   if (!isSameOriginMutation(request)) {
     return withSecurityHeaders(
       NextResponse.json({ error: "Cross-site API requests are not allowed." }, { status: 403 }),
+      request,
     );
   }
 
   if (!hasSupabaseEnv()) {
-    return withSecurityHeaders(response);
+    return withSecurityHeaders(response, request);
   }
 
   const isProtected = PROTECTED_PREFIXES.some(
@@ -96,7 +102,7 @@ export async function updateSession(request: NextRequest) {
   // Public pages perform their own optional session lookup when they need it.
   // Avoid a network request in the proxy for every landing/auth page visit.
   if (!isProtected) {
-    return withSecurityHeaders(response);
+    return withSecurityHeaders(response, request);
   }
 
   const { url, anonKey } = getSupabaseEnv();
@@ -123,8 +129,8 @@ export async function updateSession(request: NextRequest) {
     redirectUrl.pathname = "/auth";
     redirectUrl.search = "";
     redirectUrl.searchParams.set("next", returnPath);
-    return withSecurityHeaders(NextResponse.redirect(redirectUrl));
+    return withSecurityHeaders(NextResponse.redirect(redirectUrl), request);
   }
 
-  return withSecurityHeaders(response);
+  return withSecurityHeaders(response, request);
 }

@@ -71,7 +71,7 @@ const DEFAULT_REVISION_TIMEOUT_MS = 25000;
 const DEFAULT_NVIDIA_TIMEOUT_MS = 180_000;
 const DEFAULT_NVIDIA_MODEL = "meta/llama-3.2-11b-vision-instruct";
 const TIMEOUT_MESSAGE = "AI is taking longer than expected. Try fewer questions or switch to faster model.";
-export const SUMMARY_TIMEOUT_MESSAGE = "Summary generation is taking longer than expected. Please retry or use a faster AI model.";
+export const SUMMARY_TIMEOUT_MESSAGE = "Summary generation timed out. Please retry.";
 const REVISION_TIMEOUT_MESSAGE = "Revision plan generation timed out. Please try again.";
 
 const GEMINI_COOLDOWN_MS = 30_000;
@@ -398,6 +398,16 @@ async function askNvidia(
     timeoutMs,
     responseMimeType: generationConfig.responseMimeType ?? "text/plain",
   });
+  if (runtime.profile === "summary") {
+    console.info("[summary-provider-trace] nvidia.request_started", {
+      provider: "nvidia",
+      model,
+      startedAt: new Date(startedAt).toISOString(),
+      timeoutMs,
+      maxTokens,
+      responseMimeType: generationConfig.responseMimeType ?? "text/plain",
+    });
+  }
 
   while (true) {
     const remainingTimeoutMs = timeoutMs - (Date.now() - startedAt);
@@ -434,6 +444,16 @@ async function askNvidia(
         body: JSON.stringify(requestBody),
         signal: controller.signal,
       });
+      if (runtime.profile === "summary") {
+        console.info("[summary-provider-trace] nvidia.http_response", {
+          provider: "nvidia",
+          model,
+          status: response.status,
+          ok: response.ok,
+          timeToFirstResponseMs: Date.now() - startedAt,
+          retryCount,
+        });
+      }
 
       clearTimeout(timeout);
       generationConfig.signal?.removeEventListener("abort", onExternalAbort);
@@ -446,10 +466,30 @@ async function askNvidia(
           durationMs: Date.now() - startedAt,
           retryCount,
         });
-        return await parseNvidiaResponse(response);
+        const parsed = await parseNvidiaResponse(response);
+        if (runtime.profile === "summary") {
+          console.info("[summary-provider-trace] nvidia.parsed_output", {
+            provider: "nvidia",
+            model,
+            responseLength: parsed.length,
+            totalDurationMs: Date.now() - startedAt,
+            retryCount,
+          });
+        }
+        return parsed;
       }
 
       const raw = await response.text();
+      if (runtime.profile === "summary") {
+        console.info("[summary-provider-trace] nvidia.error_body", {
+          provider: "nvidia",
+          model,
+          status: response.status,
+          bodyLength: raw.length,
+          totalDurationMs: Date.now() - startedAt,
+          retryCount,
+        });
+      }
       const kind = classifyProviderError(response.status, raw);
 
       if (kind === "busy") {
@@ -546,9 +586,40 @@ async function askNvidia(
 
       if (error instanceof Error && error.name === "AbortError") {
         if (generationConfig.signal?.aborted) {
+          if (runtime.profile === "summary") {
+            console.info("[summary-provider-trace] nvidia.request_aborted", {
+              provider: "nvidia",
+              model,
+              source: "outer_signal",
+              durationMs: Date.now() - startedAt,
+              retryCount,
+            });
+          }
           throw new AIProviderError("AI request was cancelled.", "cancelled", "nvidia");
         }
-        if (!timedOut) throw new AIProviderError("NVIDIA AI request failed. Please try again.", "request", "nvidia");
+        if (!timedOut) {
+          if (runtime.profile === "summary") {
+            console.info("[summary-provider-trace] nvidia.request_aborted", {
+              provider: "nvidia",
+              model,
+              source: "http_client_abort",
+              durationMs: Date.now() - startedAt,
+              retryCount,
+            });
+          }
+          throw new AIProviderError("NVIDIA AI request failed. Please try again.", "request", "nvidia");
+        }
+        if (runtime.profile === "summary") {
+          console.info("[summary-provider-trace] nvidia.request_timeout", {
+            provider: "nvidia",
+            model,
+            source: "provider_wrapper_abort_controller",
+            durationMs: Date.now() - startedAt,
+            timeoutMs,
+            retryCount,
+            bodyArrived: false,
+          });
+        }
         throw new AIProviderError(runtime.timeoutMessage, "timeout", "nvidia");
       }
       throw error;
