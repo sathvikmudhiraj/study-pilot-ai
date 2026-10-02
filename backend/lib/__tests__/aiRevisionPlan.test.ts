@@ -97,14 +97,16 @@ describe("generateRevisionPlan", () => {
     aiMocks.generateRevisionAITextWithMetadata.mockResolvedValue(providerResult(planJson()));
   });
 
-  it("passes the revision runtime timeout so revision generation cannot fall into the long NVIDIA default", async () => {
+  it("bounds the interactive revision call across primary and fallback providers", async () => {
     await generateRevisionPlan(context, "en");
 
     expect(aiMocks.generateRevisionAITextWithMetadata).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({
         responseMimeType: "application/json",
-        timeoutMs: 25_000,
+        timeoutMs: 30_000,
+        primaryTimeoutMs: 18_000,
+        fallbackTimeoutMs: 12_000,
       }),
     );
   });
@@ -222,7 +224,7 @@ describe("generateRevisionPlan", () => {
     expect(plan.title).toBe("NVIDIA Plan");
   });
 
-  it("classifies empty offline fallback as provider unavailable without repair", async () => {
+  it("uses source-grounded local revision when provider output is empty without repair", async () => {
     aiMocks.generateRevisionAITextWithMetadata.mockResolvedValueOnce({
       ...providerResult("", "nvidia"),
       responseMode: "offline_fallback",
@@ -230,7 +232,10 @@ describe("generateRevisionPlan", () => {
       offlineFallbackUsed: true,
     });
 
-    await expect(generateRevisionPlan(context, "en")).rejects.toThrow("timed out");
+    const plan = await generateRevisionPlan(context, "en");
+    expect(plan.daily_plan).toHaveLength(7);
+    expect(plan.important_topics.join(" ")).toMatch(/operating systems/i);
     expect(aiMocks.generateRevisionAITextWithMetadata).toHaveBeenCalledTimes(1);
+    expect(aiMocks.generateAITextWithMetadata).not.toHaveBeenCalled();
   });
 });

@@ -21,6 +21,7 @@ import { generateAndStorePptxPreview, type PptxPreviewMetadata } from "./pptxPre
 import { sanitizeSummaryForDisplay } from "@/shared/summarySanitizer";
 import { DEFAULT_LANGUAGE, isSupportedLanguageCode, type SupportedLanguageCode } from "@/shared/languages";
 import { recordMonitoringEvent } from "./monitoring";
+import { hasCompletePageCoverage } from "@/shared/fileExtractionCoverage";
 
 type WorkerRunResult = {
   claimed: number;
@@ -35,6 +36,8 @@ type FileRow = {
   mime_type: string | null;
   storage_path: string | null;
   extracted_text?: string | null;
+  extracted_metadata?: Record<string, unknown> | null;
+  processing_status?: string | null;
 };
 
 function devLog(message: string, details?: Record<string, unknown>) {
@@ -129,6 +132,25 @@ async function processPdfExtractionJob(job: BackgroundJobRow) {
     });
     await clearExtractionProgress(file.id, file.user_id);
     throw new Error(processed.extractionFailure?.message ?? "No readable text found during background extraction.");
+  }
+
+  if (processed.extractionFailure || !hasCompletePageCoverage(processed.pageMetadata)) {
+    await updateFile(file.id, file.user_id, {
+      extracted_text: processed.extractedText,
+      processing_status: "failed",
+      status: "failed",
+      processing_notes: [
+        ...processed.processingNotes,
+        processed.extractionFailure?.message ?? "Some PDF pages could not be extracted.",
+      ],
+      extracted_metadata: {
+        ...(processed.documentMetadata ?? {}),
+        ...(processed.pageMetadata ?? {}),
+        extractionValidated: false,
+        processedBy: "background-worker",
+      },
+    });
+    throw new Error(processed.extractionFailure?.message ?? "Full PDF page extraction is incomplete.");
   }
 
   const coverage = isCnsFile(file.file_name, processed.extractedText)
@@ -277,7 +299,7 @@ async function processSummaryGenerationJob(job: BackgroundJobRow) {
   if (job.file_id) {
     const result = await supabase
       .from("files")
-      .select("id, user_id, file_name, extracted_text")
+      .select("id, user_id, file_name, extracted_text, extracted_metadata, processing_status")
       .eq("id", job.file_id)
       .eq("user_id", job.user_id)
       .maybeSingle();
@@ -287,6 +309,12 @@ async function processSummaryGenerationJob(job: BackgroundJobRow) {
     sourceName = file.file_name;
     sourceText = String(file.extracted_text ?? "").trim();
     if (!sourceText) throw new Error("No extracted text found for summary job.");
+    const extractionMetadata = result.data?.extracted_metadata as Record<string, unknown> | null;
+    const coverage = validateCnsExtractionCoverage(sourceText, file.file_name);
+    if (file.processing_status === "extracting" || extractionMetadata?.extractionValidated === false ||
+        !hasCompletePageCoverage(extractionMetadata) || (coverage.required && !coverage.valid)) {
+      throw new Error("Complete file extraction before generating a summary.");
+    }
   } else if (job.note_id) {
     const result = await supabase
       .from("notes")

@@ -317,7 +317,7 @@ describe("studyMaterial vision extraction", () => {
   });
 
   describe("resume support", () => {
-    it("should skip already completed pages on resume", async () => {
+    it("re-extracts unreadable pages on resume when prior page text was not persisted", async () => {
       setupPdfDocumentMock(3);
       const mockExtractions = [
         { pageNumber: 1, textLength: 500, readable: true },
@@ -337,7 +337,7 @@ describe("studyMaterial vision extraction", () => {
         extractor: "pdfjs",
       });
 
-      (askGeminiWithInlineData as any).mockResolvedValue("[Page 3]\nVision content 3");
+      (askGeminiWithInlineData as any).mockResolvedValue("[Page 2]\nVision content 2\n\n[Page 3]\nVision content 3");
 
       const resumeProgress = {
         stage: "vision-processing" as const,
@@ -351,7 +351,7 @@ describe("studyMaterial vision extraction", () => {
           { startPage: 1, endPage: 1, extractor: "native", success: true },
           { startPage: 2, endPage: 2, extractor: "gemini-vision", success: true },
         ],
-        failedPages: [],
+        failedPages: [3],
         partialFailures: [],
       };
 
@@ -364,7 +364,9 @@ describe("studyMaterial vision extraction", () => {
       });
 
       expect(result.pageMetadata?.nativePagesSucceeded).toBe(1);
-      expect(result.pageMetadata?.visionPagesAttempted).toBe(1);
+      expect(result.pageMetadata?.visionPagesAttempted).toBe(2);
+      expect(result.pageMetadata?.extractedPageCount).toBe(3);
+      expect(result.pageMetadata?.failedPages).toEqual([]);
       expect(result.pageMetadata?.readablePages).toContain(1);
       expect(result.pageMetadata?.readablePages).toContain(2);
       expect(result.pageMetadata?.readablePages).toContain(3);

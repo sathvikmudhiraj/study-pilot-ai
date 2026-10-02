@@ -124,9 +124,12 @@ export function findVoiceLanguage(code: string | undefined | null): VoiceLanguag
 // ---------------------------------------------------------------------------
 
 /** Picks the best available SpeechSynthesis voice for a locale, or null. */
-export function pickVoiceForLocale(locale: string): SpeechSynthesisVoice | null {
+export function pickVoiceForLocale(
+  locale: string,
+  availableVoices?: SpeechSynthesisVoice[],
+): SpeechSynthesisVoice | null {
   if (!isSpeechSynthesisSupported()) return null;
-  const voices = window.speechSynthesis?.getVoices?.() ?? [];
+  const voices = availableVoices ?? window.speechSynthesis?.getVoices?.() ?? [];
   if (!voices.length || !locale) return null;
 
   const langPrefix = locale.toLowerCase().split("-")[0];

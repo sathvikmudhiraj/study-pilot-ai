@@ -85,7 +85,7 @@ type GeneratedStudyNote = {
   common_mistakes: string[];
 };
 
-export type StudyNoteGenerationErrorCode = "empty_source" | "invalid_response" | "content_too_large";
+export type StudyNoteGenerationErrorCode = "empty_source" | "invalid_response" | "content_too_large" | "provider_unavailable";
 
 export class StudyNoteGenerationError extends Error {
   code: StudyNoteGenerationErrorCode;
@@ -672,6 +672,12 @@ END_STUDYPILOT_SOURCE`;
   const response = isSupportedLanguageCode(source.language)
     ? await generateLocalizedText(prompt, source.language, generate)
     : await generate(prompt);
+  if (!response.trim()) {
+    throw new StudyNoteGenerationError(
+      "Notes generation could not get a complete AI response. Please retry.",
+      "provider_unavailable",
+    );
+  }
   const generated = parseGeneratedNoteJson(response);
   if (!generated) {
     throw new StudyNoteGenerationError(

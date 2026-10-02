@@ -68,13 +68,15 @@ export function isTrustedMutationOrigin(origin: string, requestOrigin: string) {
   }
 }
 
-function isSameOriginMutation(request: NextRequest) {
+export function isSameOriginMutation(request: NextRequest) {
   if (!request.nextUrl.pathname.startsWith("/api/")) return true;
   if (!MUTATING_METHODS.has(request.method.toUpperCase())) return true;
 
   const origin = request.headers.get("origin");
   if (origin) {
-    return isTrustedMutationOrigin(origin, request.nextUrl.origin);
+    const host = request.headers.get("host");
+    const requestOrigin = host ? `${request.nextUrl.protocol}//${host}` : request.nextUrl.origin;
+    return isTrustedMutationOrigin(origin, requestOrigin);
   }
 
   const fetchSite = request.headers.get("sec-fetch-site");

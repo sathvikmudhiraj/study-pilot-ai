@@ -5,6 +5,7 @@ import { buildReviewAnswerKey, findUnknownAnswerQuestionIds, normalizeSubmittedA
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { buildLearnerProfile, buildRevisionRecommendations } from "@/backend/lib/learnerProfile";
 import { withRequestObservability } from "@/backend/lib/observability";
+import { recordQuizLearningEvidence } from "@/backend/lib/learningMemory";
 
 export const runtime = "nodejs";
 
@@ -183,6 +184,20 @@ async function handlePost(request: Request) {
       answerKey: quizResult.data.answer_key,
     });
 
+    let learningMemory = null;
+    try {
+      learningMemory = await recordQuizLearningEvidence(supabase, {
+        userId: user.id,
+        attemptId: saved.data.id,
+        quizId,
+        fileId: quizResult.data.file_id ?? null,
+        topicResults: graded.topic_results,
+        wrongQuestions: graded.wrong_questions,
+      });
+    } catch (error) {
+      console.error("[learning-memory] Could not record quiz evidence", error);
+    }
+
     try {
       const analytics = await loadAnalytics(supabase, user.id);
       const learnerProfile = await loadLearnerProfile(supabase, user.id);
@@ -192,10 +207,11 @@ async function handlePost(request: Request) {
         answer_key: answerKey,
         analytics,
         learnerProfile,
+        learningMemory,
         revisionRecommendations: buildRevisionRecommendations(learnerProfile),
       });
     } catch {
-      return NextResponse.json({ ...gradeResponse, attempt, answer_key: answerKey, analytics: null });
+      return NextResponse.json({ ...gradeResponse, attempt, answer_key: answerKey, analytics: null, learningMemory });
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Could not save this quiz attempt.";

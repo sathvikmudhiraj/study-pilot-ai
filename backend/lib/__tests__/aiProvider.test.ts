@@ -10,7 +10,7 @@ vi.mock("../gemini", () => ({
 }));
 vi.mock("../observability", () => ({ logProviderTelemetry: vi.fn() }));
 
-import { generateAITextWithMetadata } from "../aiProvider";
+import { generateAITextWithMetadata, getAIProviderRuntimeInfo } from "../aiProvider";
 import { askGemini } from "../gemini";
 
 describe("NVIDIA request budget", () => {
@@ -26,7 +26,15 @@ describe("NVIDIA request budget", () => {
     vi.unstubAllGlobals();
   });
 
-  it("treats a caller timeout as the total budget across 429 retries", async () => {
+  it("uses the configured text model instead of NVIDIA_MODEL for text generation", () => {
+    vi.stubEnv("AI_PROVIDER", "auto");
+    vi.stubEnv("NVIDIA_MODEL", "meta/llama-3.2-11b-vision-instruct");
+    vi.stubEnv("NVIDIA_TEXT_MODEL", "nvidia/nemotron-3-super-120b-a12b");
+
+    expect(getAIProviderRuntimeInfo("default").fallbackModel).toBe("nvidia/nemotron-3-super-120b-a12b");
+  });
+
+  it("does not retry NVIDIA 429 responses inside the bounded fallback window", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response("rate limited", {
         status: 429,
@@ -39,7 +47,7 @@ describe("NVIDIA request budget", () => {
 
     expect(result.offlineFallbackUsed).toBe(true);
     expect(result.text).toBe("");
-    expect(result.providerFailureCategory).toBe("timeout");
+    expect(result.providerFailureCategory).toBe("quota");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   }, 10_000);
 

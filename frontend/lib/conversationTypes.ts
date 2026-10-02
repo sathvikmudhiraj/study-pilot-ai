@@ -14,8 +14,20 @@ export type Conversation = {
   active_file_ids: string[] | null;
   active_note_ids: string[] | null;
   language_code?: import("@/shared/languages").SupportedLanguageCode;
+  draft_text?: string;
+  draft_version?: number;
+  study_state?: import("@/shared/studyState").ConversationStudyState;
   created_at: string;
   updated_at: string;
+};
+
+export type ConversationSearchResult = {
+  conversation_id: string;
+  title: string | null;
+  updated_at: string;
+  match_kind: "title" | "message";
+  snippet: string;
+  rank: number;
 };
 
 export type ConversationMessage = {

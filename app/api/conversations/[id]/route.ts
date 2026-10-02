@@ -3,6 +3,7 @@ import { requireUser } from "@/backend/lib/auth";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { withRequestObservability } from "@/backend/lib/observability";
 import { isSupportedLanguageCode } from "@/shared/languages";
+import { sanitizeStudyStatePatch, type ConversationStudyState } from "@/shared/studyState";
 
 export const runtime = "nodejs";
 
@@ -19,7 +20,7 @@ const MAX_NOTE_IDS = 8;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const CONVERSATION_SELECT =
-  "id, title, pinned, context_mode, active_file_ids, active_note_ids, language_code, created_at, updated_at";
+  "id, title, pinned, context_mode, active_file_ids, active_note_ids, language_code, draft_text, draft_version, study_state, created_at, updated_at";
 const LEGACY_CONVERSATION_SELECT = "id, title, created_at";
 
 // ---------------------------------------------------------------------------
@@ -45,6 +46,9 @@ function isMissingOptionalConversationColumn(error: unknown) {
       lower.includes("context_mode") ||
       lower.includes("active_file_ids") ||
       lower.includes("active_note_ids") ||
+      lower.includes("draft_text") ||
+      lower.includes("draft_version") ||
+      lower.includes("study_state") ||
       lower.includes("updated_at")
     )
   );
@@ -59,6 +63,9 @@ function withDefaultLanguage<T extends Record<string, unknown>>(row: T | null) {
         active_file_ids: row.active_file_ids ?? [],
         active_note_ids: row.active_note_ids ?? [],
         language_code: row.language_code ?? "en",
+        draft_text: row.draft_text ?? "",
+        draft_version: row.draft_version ?? 0,
+        study_state: row.study_state ?? {},
         updated_at: row.updated_at ?? row.created_at,
       }
     : null;
@@ -243,6 +250,17 @@ async function handlePatch(request: Request, { params }: RouteContext) {
       }
     }
 
+    if ("study_state" in body || "studyState" in body) {
+      const patch = sanitizeStudyStatePatch(body.study_state ?? body.studyState);
+      if (!patch) return apiError("study_state is invalid.", 400);
+      const previous = existing.study_state && typeof existing.study_state === "object"
+        ? existing.study_state as ConversationStudyState
+        : {};
+      updates.study_state = Object.fromEntries(
+        Object.entries({ ...previous, ...patch }).filter(([, value]) => value !== undefined),
+      );
+    }
+
     if (!Object.keys(updates).length) {
       return apiError("Provide at least one field to update.", 400);
     }
@@ -267,6 +285,7 @@ async function handlePatch(request: Request, { params }: RouteContext) {
       delete legacyUpdates.context_mode;
       delete legacyUpdates.active_file_ids;
       delete legacyUpdates.active_note_ids;
+      delete legacyUpdates.study_state;
       if (!Object.keys(legacyUpdates).length) {
         return NextResponse.json({ conversation: existing });
       }
@@ -310,6 +329,18 @@ async function handleDelete({ params }: RouteContext) {
     // Verify ownership before deleting.
     const existing = await requireOwnedConversation(supabase, user.id, id);
     if (!existing) return apiError("Conversation not found.", 404);
+
+    const assets = await supabase
+      .from("generated_images")
+      .select("storage_path")
+      .eq("conversation_id", id)
+      .eq("user_id", user.id);
+    if (assets.error) throw assets.error;
+    const storagePaths = (assets.data ?? []).map((asset) => asset.storage_path).filter(Boolean);
+    if (storagePaths.length) {
+      const removed = await supabase.storage.from("generated-images").remove(storagePaths);
+      if (removed.error) throw removed.error;
+    }
 
     const { error } = await supabase
       .from("conversations")

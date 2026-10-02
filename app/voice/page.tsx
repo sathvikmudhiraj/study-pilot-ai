@@ -62,7 +62,7 @@ export default async function VoicePage({ searchParams }: VoicePageProps) {
       const [conversationResult, messagesResult] = await Promise.all([
         supabase
           .from("conversations")
-          .select("id, title, pinned, context_mode, active_file_ids, active_note_ids, language_code, created_at, updated_at")
+          .select("id, title, pinned, context_mode, active_file_ids, active_note_ids, language_code, draft_text, draft_version, study_state, created_at, updated_at")
           .eq("id", requestedConversationId)
           .eq("user_id", user.id)
           .maybeSingle(),
@@ -71,8 +71,9 @@ export default async function VoicePage({ searchParams }: VoicePageProps) {
           .select("id, question, answer, related_file_ids, related_note_ids, conversation_id, created_at")
           .eq("user_id", user.id)
           .eq("conversation_id", requestedConversationId)
-          .order("created_at", { ascending: true })
-          .limit(100),
+          .order("created_at", { ascending: false })
+          .order("id", { ascending: false })
+          .limit(60),
       ]);
 
       if (conversationResult.error) {
@@ -84,30 +85,26 @@ export default async function VoicePage({ searchParams }: VoicePageProps) {
         if (messagesResult.error) {
           conversationError = supabaseSetupMessage(messagesResult.error.message);
         } else {
-          messages = messagesResult.data ?? [];
+          messages = [...(messagesResult.data ?? [])].reverse();
         }
       }
     }
   }
 
-  const recentFile = (filesResult.data ?? [])[0] ?? null;
-
   const setupError = filesResult.error || notesResult.error;
 
-  // Pull the most recent file so explicit commands like "explain this file"
-  // still have a default attachment. Normal questions do not inherit it.
   const selectedCommandFileId = Array.isArray(conversation?.active_file_ids) && conversation.active_file_ids.length > 0
     ? conversation.active_file_ids[0]
-    : recentFile?.id ?? null;
+    : null;
   const selectedCommandFileName = selectedCommandFileId
-    ? (filesResult.data ?? []).find((file) => file.id === selectedCommandFileId)?.file_name ?? recentFile?.file_name ?? null
+    ? (filesResult.data ?? []).find((file) => file.id === selectedCommandFileId)?.file_name ?? null
     : null;
 
   return (
     <AppShell>
       <PageHeader
         title="Voice tutor"
-        description="Ask questions or say a command hands-free. Voice input runs only in your browser when you tap Start listening, and answers can be read aloud in your chosen language."
+        description="Ask questions or say a command hands-free. Use manual Start listening or enable Jarvis mode for continuous turns; answers can be read aloud in your chosen language."
       />
 
       {setupError ? (

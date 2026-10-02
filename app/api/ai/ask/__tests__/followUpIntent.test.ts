@@ -18,7 +18,7 @@ vi.mock("../route", async () => {
   };
 });
 
-import { isContinuationIntent, classifyIntent, buildFollowUpQuestion, isContextTransformFollowUp, requestedFollowUpCount } from "../route";
+import { isBroadFileQuestion, isContinuationIntent, classifyIntent, buildFollowUpQuestion, extractGeneratedQuestions, isContextTransformFollowUp, requestedFollowUpCount } from "../route";
 
 describe("Follow-up intent resolution", () => {
   beforeEach(() => {
@@ -26,7 +26,31 @@ describe("Follow-up intent resolution", () => {
     mocks.requireUser.mockResolvedValue({ id: "user-1", preferredLanguage: "en" });
   });
 
+  it("rejects viva-themed prose that contains no actual question batch", () => {
+    expect(extractGeneratedQuestions({
+      short_answer: "Viva questions on SQL set operators.",
+      simple_explanation: "This material covers common oral-exam concepts.",
+      step_by_step: [],
+    })).toEqual([]);
+    expect(extractGeneratedQuestions({
+      step_by_step: ["1. What is UNION?", "2. What is INTERSECT?", "3. What is EXCEPT?"],
+    })).toHaveLength(3);
+  });
+
+  it("keeps the previous topic when any supported language is requested", () => {
+    expect(isContextTransformFollowUp("Hindi mein samjhao")).toBe(true);
+    expect(buildFollowUpQuestion("Explain deadlocks", "explain", true, {
+      transform: "language",
+      transformLanguage: "hi",
+    })).toMatch(/deadlocks.*Hindi.*same selected study material/i);
+  });
+
   describe("isContinuationIntent", () => {
+    it("recognizes natural continuation without matching a new topic", () => {
+      expect(isContinuationIntent("tell me more")).toBe(true);
+      expect(isContinuationIntent("okay tell me more")).toBe(true);
+      expect(isContinuationIntent("tell me more about pointers")).toBe(false);
+    });
     it("detects 'next' as continuation", () => {
       expect(isContinuationIntent("next")).toBe(true);
       expect(isContinuationIntent("next ")).toBe(true);
@@ -66,6 +90,14 @@ describe("Follow-up intent resolution", () => {
       expect(isContinuationIntent("explain next")).toBe(false);
       expect(isContinuationIntent("hello")).toBe(false);
     });
+  });
+
+  it("treats source-wide study actions as broad without broadening a named topic", () => {
+    for (const question of ["Generate viva questions", "Generate a short practice quiz with questions and answers from my study material.", "Create a revision plan from my study material, ordered by priority for exam preparation."]) {
+      expect(isBroadFileQuestion(question)).toBe(true);
+    }
+    expect(isBroadFileQuestion("Generate viva questions about C language")).toBe(false);
+    expect(isBroadFileQuestion("Explain what is C language")).toBe(false);
   });
 
   describe("context transform follow-ups", () => {
@@ -144,6 +176,17 @@ describe("Follow-up intent resolution", () => {
   });
 
   describe("buildFollowUpQuestion", () => {
+    it("keeps the previous topic while changing style or language", () => {
+      expect(buildFollowUpQuestion("Explain SLR parsing", "explain", true, { transform: "simple" })).toMatch(/SLR parsing.*beginner-friendly/i);
+      expect(buildFollowUpQuestion("Explain SLR parsing", "explain", true, { transform: "telugu" })).toMatch(/SLR parsing.*Telugu/i);
+      expect(buildFollowUpQuestion("Explain SLR parsing", "explain", true, { transform: "english" })).toMatch(/SLR parsing.*English/i);
+    });
+
+    it("recognizes short Telugu-English style follow-ups", () => {
+      for (const phrase of ["simple ga cheppu", "Telugu lo simple ga cheppu", "English lo cheppu", "short ga cheppu", "detail ga cheppu"]) {
+        expect(isContextTransformFollowUp(phrase)).toBe(true);
+      }
+    });
     it("builds exam question continuation", () => {
       const result = buildFollowUpQuestion("Generate exam questions", "exam_questions", true);
       expect(result).toContain("Generate exam questions");

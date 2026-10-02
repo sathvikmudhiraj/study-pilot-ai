@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   activeContextLabel,
   type Conversation,
@@ -68,6 +69,12 @@ import {
 import { WebCitationList } from "./WebCitationList";
 import { DeepResearchReport as DeepResearchReportView } from "./DeepResearchReport";
 import { DiagramPreview } from "./DiagramPreview";
+import { GeneratedImagePreview } from "./GeneratedImagePreview";
+import {
+  normalizeGeneratedImage,
+  runImageGeneration,
+  type GeneratedImageResult,
+} from "@/frontend/lib/generatedImage";
 import { VoiceOrb, type VoiceOrbState } from "./voice/VoiceOrb";
 import { StudyNoteEditor } from "./StudyNoteEditor";
 import {
@@ -86,6 +93,21 @@ import {
   IconZap,
 } from "./icons";
 import type { SupportedLanguageCode } from "@/shared/languages";
+import { requestedStudyLanguage } from "@/shared/studyIntent";
+import { measureIntent } from "@/frontend/lib/intentTiming";
+import { splitSpeechText } from "@/frontend/lib/speech/voicePlayback";
+import {
+  inferJarvisTask,
+  inferJarvisTopic,
+  matchJarvisFiles,
+  resolveJarvisControlIntent,
+  type JarvisSessionState,
+  type JarvisTask,
+  type JarvisToolCall,
+} from "@/frontend/lib/speech/jarvisAgent";
+import { detectSpokenLanguage, voiceLocale } from "@/shared/voiceLanguage";
+import { createConversationResult, readConversationResult, withConversationResult } from "@/shared/conversationResults";
+import type { LearningState } from "@/shared/learningMemory";
 
 // ---------------------------------------------------------------------------
 // Answer shape (mirrors the StudyPilot chat API response)
@@ -108,6 +130,12 @@ type Answer = {
   source_citations?: SourceCitationValue[];
   // Legacy source chips, rendered only when structured citations are absent.
   source_chips?: { id?: string; label: string; type: string }[];
+  voice_turn?: {
+    kind: "web_search" | "deep_research" | "diagram" | "generated_image" | "system";
+    payload?: unknown;
+    text?: string;
+  };
+  conversation_result?: unknown;
 };
 
 type Turn = {
@@ -123,6 +151,8 @@ type Turn = {
   diagram?: DiagramResult;
   diagramRequest?: DiagramRequest;
   diagramPrompt?: string;
+  generatedImage?: GeneratedImageResult;
+  imagePrompt?: string;
   text?: string;
 };
 
@@ -146,19 +176,11 @@ type NoteOption = {
 // ---------------------------------------------------------------------------
 
 function answerToSpokenText(answer: Answer): string {
-  return [
-    answer.short_answer,
-    answer.simple_explanation,
-    ...(answer.step_by_step ?? []),
-    answer.example,
-    answer.memory_line,
-    answer.common_mistake,
-    answer.exam_viva_answer,
-    answer.practice_question,
-    answer.next_step,
-  ]
-    .filter(Boolean)
-    .join(". ");
+  const short = answer.short_answer?.trim() ?? "";
+  const explanation = answer.simple_explanation?.trim() ?? "";
+  const distinctExplanation = explanation && (!short || !explanation.toLowerCase().includes(short.toLowerCase())) ? explanation : "";
+  const main = [short, distinctExplanation, ...(answer.step_by_step ?? []).slice(0, 5)].filter(Boolean);
+  return (main.length ? main : [answer.exam_viva_answer, answer.next_step].filter(Boolean)).join(". ");
 }
 
 function stripUrlsForSpeech(text: string): string {
@@ -264,27 +286,120 @@ function normalizeAnswer(value: unknown): Answer {
     source_chips: Array.isArray(record.source_chips ?? record.sourceChips)
       ? (record.source_chips ?? record.sourceChips) as Answer["source_chips"]
       : undefined,
+    voice_turn: record.voice_turn && typeof record.voice_turn === "object"
+      ? record.voice_turn as Answer["voice_turn"]
+      : undefined,
   };
 }
 
 function recordToTurns(message: ConversationMessage): Turn[] {
+  const answer = normalizeAnswer(message.answer);
+  const persistedResult = readConversationResult(message.answer);
+  const voiceTurn = persistedResult
+    ? { kind: persistedResult.kind, payload: persistedResult.payload, text: persistedResult.text }
+    : answer.voice_turn;
+  const assistant: Turn = {
+    id: `${message.id}-assistant`,
+    role: "assistant",
+    answer,
+    answerId: message.id,
+  };
+  if (voiceTurn?.kind === "web_search" && voiceTurn.payload) {
+    assistant.answer = undefined;
+    assistant.webSearch = voiceTurn.payload as WebSearchAnswer;
+    assistant.webQuery = assistant.webSearch.query;
+  } else if (voiceTurn?.kind === "deep_research" && voiceTurn.payload) {
+    assistant.answer = undefined;
+    assistant.researchReport = voiceTurn.payload as DeepResearchReportValue;
+    assistant.researchQuery = assistant.researchReport.research_question;
+  } else if (voiceTurn?.kind === "diagram" && voiceTurn.payload) {
+    const diagramPayload = voiceTurn.payload as {
+      diagram?: DiagramResult;
+    };
+    assistant.answer = undefined;
+    assistant.diagram = diagramPayload.diagram ?? voiceTurn.payload as DiagramResult;
+    assistant.diagramPrompt = message.question;
+  } else if (voiceTurn?.kind === "generated_image" && voiceTurn.payload) {
+    const image = normalizeGeneratedImage(voiceTurn.payload);
+    if (image) {
+      assistant.answer = undefined;
+      assistant.generatedImage = image;
+      assistant.imagePrompt = message.question;
+    }
+  } else if (voiceTurn?.kind === "system") {
+    assistant.answer = undefined;
+    assistant.role = "system";
+    assistant.text = voiceTurn.text ?? answer.short_answer;
+  }
   return [
     {
       id: `${message.id}-user`,
       role: "user",
       question: message.question,
     },
-    {
-      id: `${message.id}-assistant`,
-      role: "assistant",
-      answer: normalizeAnswer(message.answer),
-      answerId: message.id,
-    },
+    assistant,
   ];
 }
 
 function conversationDisplayTitle(conversation: Conversation | null): string {
   return conversation?.title?.trim() || "New chat";
+}
+
+function initialJarvisContext(messages: ConversationMessage[]): {
+  topic: string;
+  task: JarvisTask;
+  assistantIntent: string;
+  artifact: JarvisSessionState["currentArtifact"];
+  toolCalls: JarvisToolCall[];
+} {
+  let topic = "";
+  let task: JarvisTask = "idle";
+  let assistantIntent = "";
+  let artifact: JarvisSessionState["currentArtifact"] = null;
+
+  const toolCalls = messages.flatMap((message): JarvisToolCall[] => {
+    const normalized = normalizeAnswer(message.answer);
+    const persisted = readConversationResult(message.answer);
+    const voiceTurn = persisted ? { kind: persisted.kind } : normalized.voice_turn;
+    const tool = voiceTurn?.kind === "web_search"
+      ? "web_search"
+      : voiceTurn?.kind === "deep_research"
+        ? "deep_research"
+        : voiceTurn?.kind === "diagram"
+          ? "diagram"
+          : voiceTurn?.kind === "generated_image"
+            ? "image"
+          : null;
+    return tool ? [{ id: `restored-${message.id}`, tool, status: "success", createdAt: message.created_at }] : [];
+  }).slice(-6);
+
+  for (const message of [...messages].reverse()) {
+    const normalized = normalizeAnswer(message.answer);
+    const persisted = readConversationResult(message.answer);
+    const voiceTurn = persisted ? { kind: persisted.kind } : normalized.voice_turn;
+    if (!artifact) {
+      if (voiceTurn?.kind === "diagram") artifact = "diagram";
+      else if (voiceTurn?.kind === "generated_image") artifact = "image";
+      else if (voiceTurn?.kind === "web_search") artifact = "web";
+      else if (voiceTurn?.kind === "deep_research") artifact = "research";
+      else if (!voiceTurn && message.answer) artifact = "answer";
+    }
+    if (!assistantIntent && artifact) assistantIntent = artifact;
+
+    const control = resolveJarvisControlIntent(message.question);
+    if (control) continue;
+    const inferredTask = inferJarvisTask(message.question);
+    if (task === "idle") task = inferredTask;
+    if (!topic && (inferredTask === "ask" || inferredTask === "explain")) {
+      const inferredTopic = inferJarvisTopic(message.question);
+      if (inferredTopic && !["this", "this topic", "next", "continue"].includes(inferredTopic.toLocaleLowerCase())) {
+        topic = inferredTopic;
+      }
+    }
+    if (topic && task !== "idle" && artifact) break;
+  }
+
+  return { topic, task, assistantIntent, artifact, toolCalls };
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -326,7 +441,27 @@ export function VoiceTutor({
   notes?: NoteOption[];
   preferredLanguage: SupportedLanguageCode;
 }) {
+  const router = useRouter();
+  const restoredAgentContext = initialJarvisContext(initialMessages);
+  const persistedStudyState = initialConversation?.study_state ?? {};
   const [language, setLanguage] = useState<string>(initialConversation?.language_code ?? preferredLanguage);
+  const [detectedLanguage, setDetectedLanguage] = useState<SupportedLanguageCode>(
+    initialConversation?.language_code ?? preferredLanguage,
+  );
+  const [jarvisMode, setJarvisMode] = useState(false);
+  const [jarvisPaused, setJarvisPaused] = useState(false);
+  const [activeSubject, setActiveSubject] = useState(
+    persistedStudyState.active_subject ?? initialFileName?.replace(/\.[^.]+$/u, "") ?? "",
+  );
+  const [activeTopic, setActiveTopic] = useState(persistedStudyState.active_topic ?? restoredAgentContext.topic);
+  const [activeTask, setActiveTask] = useState<JarvisTask>((persistedStudyState.active_task as JarvisTask | undefined) ?? restoredAgentContext.task);
+  const [lastAssistantIntent, setLastAssistantIntent] = useState(persistedStudyState.last_meaningful_intent ?? restoredAgentContext.assistantIntent);
+  const [recentToolCalls, setRecentToolCalls] = useState<JarvisToolCall[]>(restoredAgentContext.toolCalls);
+  const [currentArtifact, setCurrentArtifact] = useState<JarvisSessionState["currentArtifact"]>(restoredAgentContext.artifact);
+  const [currentArtifactId, setCurrentArtifactId] = useState(
+    persistedStudyState.current_artifact_id ?? persistedStudyState.last_artifact_id ?? "",
+  );
+  const [learningStates, setLearningStates] = useState<LearningState[]>([]);
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState("");
   const [turns, setTurns] = useState<Turn[]>(() => initialMessages.flatMap((message) => recordToTurns(message)));
@@ -346,9 +481,21 @@ export function VoiceTutor({
   const [notice, setNotice] = useState(initialConversationError ?? "");
   const [conversation, setConversation] = useState<Conversation | null>(initialConversation ?? null);
   const [conversationId, setConversationId] = useState<string | null>(initialConversation?.id ?? null);
-  const [contextMode, setContextMode] = useState<ContextMode>(initialConversation?.context_mode ?? "general");
-  const [activeFileIds, setActiveFileIds] = useState<string[]>(initialConversation?.active_file_ids ?? []);
+  const inheritedFileIds = initialConversation?.active_file_ids?.length
+    ? initialConversation.active_file_ids
+    : initialFileId
+      ? [initialFileId]
+      : [];
+  const [contextMode, setContextMode] = useState<ContextMode>(
+    initialConversation?.context_mode ?? (inheritedFileIds.length ? "file" : "general"),
+  );
+  const [activeFileIds, setActiveFileIds] = useState<string[]>(inheritedFileIds);
   const [activeNoteIds, setActiveNoteIds] = useState<string[]>(initialConversation?.active_note_ids ?? []);
+  const contextModeRef = useRef<ContextMode>(
+    initialConversation?.context_mode ?? (inheritedFileIds.length ? "file" : "general"),
+  );
+  const activeFileIdsRef = useRef<string[]>(inheritedFileIds);
+  const activeNoteIdsRef = useRef<string[]>(initialConversation?.active_note_ids ?? []);
 
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const silenceTimerRef = useRef<RecordingSilenceTimer | null>(null);
@@ -358,6 +505,11 @@ export function VoiceTutor({
   const researchAbortRef = useRef<AbortController | null>(null);
   const diagramAbortRef = useRef<AbortController | null>(null);
   const lastSpokenTextRef = useRef<string>("");
+  const speechRunRef = useRef(0);
+  const jarvisModeRef = useRef(false);
+  const jarvisPausedRef = useRef(false);
+  const detectedLanguageRef = useRef<SupportedLanguageCode>(initialConversation?.language_code ?? preferredLanguage);
+  const autoListenTimerRef = useRef<number | null>(null);
   const turnCounterRef = useRef(0);
   // Voice-turn epoch: every accepted final transcript or new AI request
   // bumps this. Async callbacks capture the epoch at issue time and refuse
@@ -377,6 +529,8 @@ export function VoiceTutor({
     new Set(initialConversation?.title ? [initialConversation.id] : []),
   );
   const requestIdRef = useRef<string>("");
+  const contextRevisionRef = useRef(0);
+  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
 
   const recognitionSupported = useSyncExternalStore(
     noopSubscribe,
@@ -389,7 +543,15 @@ export function VoiceTutor({
     () => false,
   );
 
-  const activeLanguage = useMemo(() => findVoiceLanguage(language), [language]);
+  const selectedVoiceLanguage = useMemo(() => findVoiceLanguage(language), [language]);
+  const activeLanguage = useMemo(
+    () => selectedVoiceLanguage.code === "auto" ? findVoiceLanguage(detectedLanguage) : selectedVoiceLanguage,
+    [detectedLanguage, selectedVoiceLanguage],
+  );
+  const autoLanguage = selectedVoiceLanguage.code === "auto";
+  const effectiveLanguageCode: SupportedLanguageCode = activeLanguage.code === "auto"
+    ? detectedLanguage
+    : activeLanguage.code;
   const fileNamesById = useMemo(() => {
     const map = new Map<string, string>();
     for (const file of files) map.set(file.id, file.file_name);
@@ -409,8 +571,8 @@ export function VoiceTutor({
     [activeFileIds, activeNoteIds, fileNamesById, noteNamesById],
   );
   const activeContextText = activeContextLabel(contextMode, activeContextNames);
-  const contextFileForCommands =
-    (contextMode === "file" || contextMode === "image" ? activeFileIds[0] : null) ?? initialFileId ?? null;
+  const activeFileId = contextMode === "file" || contextMode === "image" ? activeFileIds[0] ?? null : null;
+  const contextFileForCommands = activeFileId;
   const contextFileNameForCommands =
     (contextFileForCommands ? fileNamesById.get(contextFileForCommands) : null) ?? initialFileName ?? null;
   const studyFileIds =
@@ -421,6 +583,10 @@ export function VoiceTutor({
   // Stop any active recognition/synthesis when the component unmounts.
   useEffect(() => {
     return () => {
+      if (autoListenTimerRef.current !== null) {
+        window.clearTimeout(autoListenTimerRef.current);
+        autoListenTimerRef.current = null;
+      }
       if (silenceTimerRef.current !== null) {
         silenceTimerRef.current.dispose();
         silenceTimerRef.current = null;
@@ -437,6 +603,7 @@ export function VoiceTutor({
       }
       if (isSpeechSynthesisSupported()) {
         try {
+          speechRunRef.current += 1;
           window.speechSynthesis.cancel();
         } catch {
           // Ignore cancel errors on unmount.
@@ -454,6 +621,15 @@ export function VoiceTutor({
   }, []);
 
   useEffect(() => {
+    if (!isSpeechSynthesisSupported()) return;
+    const synthesis = window.speechSynthesis;
+    const refreshVoices = () => setAvailableVoices(synthesis.getVoices?.() ?? []);
+    refreshVoices();
+    synthesis.addEventListener?.("voiceschanged", refreshVoices);
+    return () => synthesis.removeEventListener?.("voiceschanged", refreshVoices);
+  }, []);
+
+  useEffect(() => {
     if (!researching) return;
     const timers = [
       window.setTimeout(() => setResearchProgressIndex(1), 1_500),
@@ -463,9 +639,64 @@ export function VoiceTutor({
     return () => timers.forEach((timer) => window.clearTimeout(timer));
   }, [researching]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    const query = new URLSearchParams({ limit: "8" });
+    if (activeTopic) query.set("topic", activeTopic);
+    else if (activeFileId) query.set("fileId", activeFileId);
+    void fetch(`/api/learning-memory?${query.toString()}`, { signal: controller.signal })
+      .then(async (response) => response.ok ? response.json() : null)
+      .then((data) => {
+        if (Array.isArray(data?.states)) setLearningStates(data.states as LearningState[]);
+      })
+      .catch((error) => {
+        if (!(error instanceof DOMException && error.name === "AbortError")) setLearningStates([]);
+      });
+    return () => controller.abort();
+  }, [activeFileId, activeTopic, turns]);
+
+  useEffect(() => {
+    if (!conversationId) return;
+    const lastGeneratedImageId = [...turns].reverse().find((turn) => turn.generatedImage?.id)?.generatedImage?.id;
+    const timer = window.setTimeout(() => {
+      void patchConversation(conversationId, {
+        studyState: {
+          active_topic: activeTopic,
+          active_subject: activeSubject,
+          active_task: activeTask,
+          active_mode: jarvisMode ? "jarvis" : "manual",
+          preferred_language: preferredLanguage,
+          detected_language: detectedLanguage,
+          voice_preference: availableVoices.find((voice) => voice.lang.toLowerCase().startsWith(activeLanguage.speechLocale.slice(0, 2).toLowerCase()))?.name,
+          last_meaningful_intent: lastAssistantIntent,
+          current_artifact_id: currentArtifactId || lastGeneratedImageId,
+          last_artifact_id: lastGeneratedImageId,
+          last_artifact_kind: currentArtifact ?? undefined,
+          generated_asset_ids: turns.flatMap((turn) => turn.generatedImage?.id ? [turn.generatedImage.id] : []).slice(-20),
+        },
+      }).then((result) => {
+        if (result.ok) setConversation((current) => current?.id === result.conversation.id ? result.conversation : current);
+      });
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [activeLanguage.speechLocale, activeSubject, activeTask, activeTopic, availableVoices, conversationId, currentArtifact, currentArtifactId, detectedLanguage, jarvisMode, lastAssistantIntent, preferredLanguage, turns]);
+
   function nextTurnId(prefix: string): string {
     turnCounterRef.current += 1;
     return `${prefix}-${turnCounterRef.current}`;
+  }
+
+  function beginToolCall(tool: string): string {
+    const id = nextTurnId(`tool-${tool}`);
+    setRecentToolCalls((current) => [
+      ...current.slice(-5),
+      { id, tool, status: "running", createdAt: new Date().toISOString() },
+    ]);
+    return id;
+  }
+
+  function finishToolCall(id: string, status: JarvisToolCall["status"]) {
+    setRecentToolCalls((current) => current.map((call) => call.id === id ? { ...call, status } : call));
   }
 
   // Normalize a final transcript the same way voiceCommands.normalize does,
@@ -508,20 +739,37 @@ export function VoiceTutor({
     const title = shortTitleFromQuestion(question);
     const result = await createConversation({
       title: title ?? undefined,
-      contextMode: "general",
-      activeFileIds: [],
-      activeNoteIds: [],
-      language: activeLanguage.code === "auto" ? preferredLanguage : activeLanguage.code,
+      contextMode: contextModeRef.current,
+      activeFileIds: activeFileIdsRef.current,
+      activeNoteIds: activeNoteIdsRef.current,
+      language: effectiveLanguageCode,
+      studyState: {
+        active_topic: activeTopic,
+        active_subject: activeSubject,
+        active_task: activeTask,
+        active_mode: jarvisMode ? "jarvis" : "manual",
+        preferred_language: preferredLanguage,
+        detected_language: detectedLanguage,
+        last_meaningful_intent: lastAssistantIntent,
+        current_artifact_id: currentArtifactId || undefined,
+        last_artifact_kind: currentArtifact ?? undefined,
+      },
     });
     if (!result.ok) throw new Error(result.message);
 
-    setConversation(result.conversation);
+    const conversationWithCurrentContext: Conversation = {
+      ...result.conversation,
+      context_mode: contextModeRef.current,
+      active_file_ids: activeFileIdsRef.current,
+      active_note_ids: activeNoteIdsRef.current,
+    };
+    setConversation(conversationWithCurrentContext);
     setConversationId(result.conversation.id);
-    setContextMode(result.conversation.context_mode);
-    setActiveFileIds(result.conversation.active_file_ids ?? []);
-    setActiveNoteIds(result.conversation.active_note_ids ?? []);
+    setContextMode(contextModeRef.current);
+    setActiveFileIds(activeFileIdsRef.current);
+    setActiveNoteIds(activeNoteIdsRef.current);
     if (title) titledConversationIdsRef.current.add(result.conversation.id);
-    return result.conversation;
+    return conversationWithCurrentContext;
   }
 
   async function maybeAutoTitleConversation(id: string | null, question: string) {
@@ -543,12 +791,66 @@ export function VoiceTutor({
     if (result.ok) setConversation(result.conversation);
   }
 
+  async function changeActiveFile(fileId: string) {
+    const contextRevision = ++contextRevisionRef.current;
+    const previousFileId = activeFileIdsRef.current[0] ?? "";
+    const nextFileIds = fileId ? [fileId] : [];
+    const nextMode: ContextMode = fileId ? "file" : "general";
+    contextModeRef.current = nextMode;
+    activeFileIdsRef.current = nextFileIds;
+    activeNoteIdsRef.current = [];
+    if (fileId !== previousFileId) {
+      setActiveSubject(fileId ? (fileNamesById.get(fileId) ?? "").replace(/\.[^.]+$/u, "") : "");
+      setActiveTopic("");
+      setActiveTask("idle");
+      setCurrentArtifact(null);
+    }
+    setContextMode(nextMode);
+    setActiveFileIds(nextFileIds);
+    setActiveNoteIds([]);
+    setNotice(fileId ? `Using ${fileNamesById.get(fileId) ?? "selected file"}.` : "No active file selected.");
+    if (!conversationId) return;
+    const result = await patchConversation(conversationId, {
+      contextMode: nextMode,
+      activeFileIds: nextFileIds,
+      activeNoteIds: [],
+      studyState: fileId !== previousFileId
+        ? { active_subject: fileId ? (fileNamesById.get(fileId) ?? "").replace(/\.[^.]+$/u, "") : "", active_topic: "", active_task: "idle", current_artifact_id: "", last_artifact_kind: "" }
+        : undefined,
+    });
+    if (result.ok) {
+      if (contextRevision === contextRevisionRef.current) setConversation(result.conversation);
+    } else {
+      setError(result.message);
+    }
+  }
+
+  async function persistVoiceTurn(question: string, answer: Answer) {
+    const activeConversation = await ensureConversationForQuestion(question);
+    const response = await fetch(`/api/conversations/${encodeURIComponent(activeConversation.id)}/messages`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question,
+        answer,
+        related_file_ids: activeFileIdsRef.current,
+        related_note_ids: activeNoteIdsRef.current,
+      }),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(payload.error || "Could not save this Voice Tutor turn.");
+    }
+    return (await response.json()) as { message: ConversationMessage };
+  }
+
   // -------------------------------------------------------------------------
   // Ask the existing StudyPilot chat API (declared before the mic handler so
   // there is no forward reference)
   // -------------------------------------------------------------------------
 
-  async function askStudyPilot(displayQuestion: string) {
+  async function askStudyPilot(displayQuestion: string, studyQuestion = displayQuestion) {
     setError("");
     setNotice("");
     const requestId = requestIdRef.current;
@@ -559,9 +861,17 @@ export function VoiceTutor({
     // active controller (if any) before issuing the new one.
     const epoch = invalidateVoiceTurnEpoch();
     abortActiveAskRequest();
+    const toolCallId = beginToolCall("ask");
 
     setLoading(true);
     setTurns((current) => [...current, { id: nextTurnId("user"), role: "user", question: displayQuestion }]);
+    const requestedLanguage = requestedStudyLanguage(displayQuestion);
+    const answerLanguage: SupportedLanguageCode = requestedLanguage ?? effectiveLanguageCode;
+    if (requestedLanguage && requestedLanguage !== activeLanguage.code) {
+      detectedLanguageRef.current = requestedLanguage;
+      setDetectedLanguage(requestedLanguage);
+      setLanguage(requestedLanguage);
+    }
 
     const controller = new AbortController();
     askAbortRef.current = controller;
@@ -579,6 +889,7 @@ export function VoiceTutor({
     try {
       telemetryStartStage(requestId, "conversation_loading");
       const activeConversation = await ensureConversationForQuestion(displayQuestion);
+      if (requestedLanguage) void patchConversation(activeConversation.id, { language: requestedLanguage });
       telemetryEndStage(requestId, "conversation_loading");
 
       telemetryStartStage(requestId, "api_request_start");
@@ -586,12 +897,11 @@ export function VoiceTutor({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          question: displayQuestion,
-          fileIds: studyFileIds,
-          noteIds: studyNoteIds,
+          question: studyQuestion,
+          fileIds: activeFileIdsRef.current,
+          noteIds: activeNoteIdsRef.current,
           conversationId: activeConversation.id,
-          deferPersistence: true,
-          language: activeLanguage.code === "auto" ? preferredLanguage : activeLanguage.code,
+          language: answerLanguage,
         }),
         signal: controller.signal,
       });
@@ -618,7 +928,10 @@ export function VoiceTutor({
       // stop-activity call followed by a new turn behaves correctly.
       const stillActive =
         askAbortRef.current === controller && voiceTurnEpochRef.current === epoch;
-      if (!stillActive) return;
+      if (!stillActive) {
+        finishToolCall(toolCallId, "cancelled");
+        return;
+      }
 
       const answer = normalizeAnswer({
         ...(data.chat?.answer ?? {}),
@@ -634,6 +947,7 @@ export function VoiceTutor({
       // the epoch during the await before the stale check above ran. The
       // controller check above already short-circuits the common case.
       if (askAbortRef.current !== controller || voiceTurnEpochRef.current !== epoch) {
+        finishToolCall(toolCallId, "cancelled");
         return;
       }
 
@@ -667,11 +981,15 @@ export function VoiceTutor({
       endTelemetryInFinally = false;
 
       const spokenAnswer = stripUrlsForSpeech(answerToSpokenText(answer));
-      if (spokenAnswer) speakText(spokenAnswer);
+      setCurrentArtifact("answer");
+      setLastAssistantIntent("answer");
+      finishToolCall(toolCallId, "success");
+      if (spokenAnswer) speakText(spokenAnswer, voiceLocale(answerLanguage));
 
       void maybeAutoTitleConversation(activeConversation.id, displayQuestion);
       void touchConversationUpdatedAt(activeConversation.id);
     } catch (err) {
+      finishToolCall(toolCallId, isAbortError(err) ? "cancelled" : "failed");
       window.clearTimeout(clientTimeoutId);
       if (!isAbortError(err) && voiceTurnEpochRef.current === epoch) {
         const message = err instanceof Error ? err.message : "AI request failed. Please try again.";
@@ -695,6 +1013,7 @@ export function VoiceTutor({
   }
 
   async function searchWeb(displayQuestion: string, query: string) {
+    const toolCallId = beginToolCall("web_search");
     searchAbortRef.current?.abort();
     const controller = new AbortController();
     searchAbortRef.current = controller;
@@ -710,10 +1029,15 @@ export function VoiceTutor({
 
     try {
       const result = await runWebSearch(query, { signal: controller.signal });
+      const saved = await persistVoiceTurn(displayQuestion, withConversationResult(
+        { short_answer: result.concise_answer },
+        createConversationResult("web_search", result, { title: result.query, status: "completed", provenance: { file_ids: activeFileIdsRef.current, language: effectiveLanguageCode } }),
+      ));
+      loadedAssistantIdsRef.current.add(saved.message.id);
       setTurns((current) => [
         ...current,
         {
-          id: nextTurnId("web"),
+          id: `${saved.message.id}-assistant`,
           role: "assistant",
           webSearch: result,
           webQuery: query,
@@ -721,8 +1045,12 @@ export function VoiceTutor({
       ]);
 
       const spokenAnswer = stripUrlsForSpeech(result.concise_answer);
+      setCurrentArtifact("web");
+      setLastAssistantIntent("web_search");
+      finishToolCall(toolCallId, "success");
       if (spokenAnswer) speakText(spokenAnswer);
     } catch (caught) {
+      finishToolCall(toolCallId, isAbortError(caught) ? "cancelled" : "failed");
       if (!isAbortError(caught)) {
         setError(caught instanceof Error ? caught.message : "Web search failed. Please try again.");
       }
@@ -748,6 +1076,7 @@ export function VoiceTutor({
   }
 
   async function researchDeeply(displayQuestion: string, query: string) {
+    const toolCallId = beginToolCall("deep_research");
     researchAbortRef.current?.abort();
     const controller = new AbortController();
     researchAbortRef.current = controller;
@@ -764,10 +1093,15 @@ export function VoiceTutor({
 
     try {
       const report = await runDeepResearch(query, { signal: controller.signal });
+      const saved = await persistVoiceTurn(displayQuestion, withConversationResult(
+        { short_answer: report.executive_summary },
+        createConversationResult("deep_research", report, { title: report.research_question, status: "completed", provenance: { file_ids: activeFileIdsRef.current, language: effectiveLanguageCode } }),
+      ));
+      loadedAssistantIdsRef.current.add(saved.message.id);
       setTurns((current) => [
         ...current,
         {
-          id: nextTurnId("research"),
+          id: `${saved.message.id}-assistant`,
           role: "assistant",
           researchReport: report,
           researchQuery: query,
@@ -775,8 +1109,12 @@ export function VoiceTutor({
       ]);
 
       const spokenSummary = stripUrlsForSpeech(report.executive_summary);
+      setCurrentArtifact("research");
+      setLastAssistantIntent("deep_research");
+      finishToolCall(toolCallId, "success");
       if (spokenSummary) speakText(spokenSummary);
     } catch (caught) {
+      finishToolCall(toolCallId, isAbortError(caught) ? "cancelled" : "failed");
       if (!isAbortError(caught)) {
         setError(caught instanceof Error ? caught.message : "Deep research failed. Please try again.");
       }
@@ -804,6 +1142,7 @@ export function VoiceTutor({
   }
 
   async function generateDiagram(displayQuestion: string, request: DiagramRequest, sourceLabel: string) {
+    const toolCallId = beginToolCall("diagram");
     diagramAbortRef.current?.abort();
     const controller = new AbortController();
     diagramAbortRef.current = controller;
@@ -819,10 +1158,15 @@ export function VoiceTutor({
 
     try {
       const diagram = await runDiagramGeneration(request, { signal: controller.signal });
+      const saved = await persistVoiceTurn(displayQuestion, withConversationResult(
+        { short_answer: diagram.explanation },
+        createConversationResult("diagram", { diagram, request, sourceLabel }, { artifact_id: diagram.id, title: diagram.title, status: "completed", provenance: { file_ids: activeFileIdsRef.current, language: effectiveLanguageCode } }),
+      ));
+      loadedAssistantIdsRef.current.add(saved.message.id);
       setTurns((current) => [
         ...current,
         {
-          id: nextTurnId("diagram"),
+          id: `${saved.message.id}-assistant`,
           role: "assistant",
           diagram,
           diagramRequest: request,
@@ -831,11 +1175,70 @@ export function VoiceTutor({
       ]);
 
       const spokenExplanation = stripUrlsForSpeech(diagram.explanation);
+      setCurrentArtifact("diagram");
+      setCurrentArtifactId(diagram.id ?? saved.message.id);
+      setLastAssistantIntent("diagram");
+      finishToolCall(toolCallId, "success");
       if (spokenExplanation) speakText(spokenExplanation);
     } catch (caught) {
+      finishToolCall(toolCallId, isAbortError(caught) ? "cancelled" : "failed");
       if (!isAbortError(caught)) {
         setError(caught instanceof Error ? caught.message : "Diagram generation failed. Please try again.");
       }
+    } finally {
+      if (diagramAbortRef.current === controller) {
+        diagramAbortRef.current = null;
+        setVisualizing(false);
+        setActiveDiagramPrompt("");
+      }
+    }
+  }
+
+  async function generateStudyImage(displayQuestion: string, topic: string) {
+    const cleanTopic = topic.trim();
+    if (!cleanTopic) {
+      const message = "Name a topic before generating an image.";
+      setNotice(message);
+      await appendPersistedSystemExchange(displayQuestion, message);
+      return;
+    }
+
+    const toolCallId = beginToolCall("image");
+    diagramAbortRef.current?.abort();
+    const controller = new AbortController();
+    diagramAbortRef.current = controller;
+    setError("");
+    setNotice("");
+    setVisualizing(true);
+    setActiveDiagramPrompt(cleanTopic);
+    setTurns((current) => [...current, { id: nextTurnId("user"), role: "user", question: displayQuestion }]);
+
+    try {
+      const activeConversation = await ensureConversationForQuestion(displayQuestion);
+      const result = await runImageGeneration({
+        prompt: displayQuestion,
+        topic: cleanTopic,
+        conversationId: activeConversation.id,
+        fileId: activeFileIdsRef.current[0],
+        language: activeLanguage.code,
+      }, { signal: controller.signal });
+      const assistantId = result.messageId ?? nextTurnId("image-assistant");
+      if (result.messageId) loadedAssistantIdsRef.current.add(result.messageId);
+      setTurns((current) => [...current, {
+        id: `${assistantId}-assistant`,
+        role: "assistant",
+        generatedImage: result.image,
+        imagePrompt: displayQuestion,
+      }]);
+      setActiveTopic(cleanTopic);
+      setCurrentArtifact("image");
+      setCurrentArtifactId(result.image.id);
+      setLastAssistantIntent("image");
+      finishToolCall(toolCallId, "success");
+      speakText(result.image.explanation);
+    } catch (caught) {
+      finishToolCall(toolCallId, isAbortError(caught) ? "cancelled" : "failed");
+      if (!isAbortError(caught)) setError(caught instanceof Error ? caught.message : "Image generation failed. Please try again.");
     } finally {
       if (diagramAbortRef.current === controller) {
         diagramAbortRef.current = null;
@@ -896,12 +1299,35 @@ export function VoiceTutor({
     }
   }
 
-  function addSystemTurn(text: string) {
+  function addSystemTurn(text: string, question = "Voice Tutor") {
     setTurns((current) => [...current, { id: nextTurnId("system"), role: "system", text }]);
+    void persistVoiceTurn(question, withConversationResult(
+      { short_answer: text },
+      createConversationResult("system", undefined, { text, status: "completed" }),
+    )).then(({ message }) => loadedAssistantIdsRef.current.add(message.id)).catch((error) => {
+      setNotice(error instanceof Error ? error.message : "Could not save this Voice Tutor turn.");
+    });
+  }
+
+  async function appendPersistedSystemExchange(question: string, text: string) {
+    setTurns((current) => [
+      ...current,
+      { id: nextTurnId("user"), role: "user", question },
+      { id: nextTurnId("system"), role: "system", text },
+    ]);
+    try {
+      const { message } = await persistVoiceTurn(question, withConversationResult(
+        { short_answer: text },
+        createConversationResult("system", undefined, { text, status: "completed" }),
+      ));
+      loadedAssistantIdsRef.current.add(message.id);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not save this Voice Tutor turn.");
+    }
   }
 
   function selectedNotesLanguage() {
-    return activeLanguage.code === "auto" ? preferredLanguage : activeLanguage.code;
+    return effectiveLanguageCode;
   }
 
   function latestAnswerTurn() {
@@ -1061,6 +1487,7 @@ export function VoiceTutor({
       payload.fileId = contextFileForCommands;
     }
 
+    const toolCallId = beginToolCall("notes");
     setNotesLoading(true);
     setError("");
     setNotice("");
@@ -1077,8 +1504,12 @@ export function VoiceTutor({
       if (!generatedDraft) throw new Error("StudyPilot returned an invalid notes preview.");
 
       setNoteDraft(adaptStudyNoteRow(generatedDraft));
+      setCurrentArtifact("notes");
+      setLastAssistantIntent("notes");
+      finishToolCall(toolCallId, "success");
       addSystemTurn("Your editable notes preview is ready. Review it before saving or downloading.");
     } catch (caught) {
+      finishToolCall(toolCallId, "failed");
       const message = caught instanceof Error ? caught.message : "Could not create a notes preview.";
       setNotice(message);
       addSystemTurn(message);
@@ -1153,20 +1584,154 @@ export function VoiceTutor({
 
   // Resolve recognized text -> command, navigation, or free-form question.
   async function handleSpokenText(spoken: string) {
-    const resolved = resolveVoiceCommand(spoken);
+    if (autoLanguage) {
+      const decision = detectSpokenLanguage(spoken, detectedLanguageRef.current);
+      if (decision.language && decision.confidence >= 0.7) {
+        detectedLanguageRef.current = decision.language;
+        setDetectedLanguage(decision.language);
+        if (conversationId) void patchConversation(conversationId, { language: decision.language });
+      }
+    }
+
+    const controlIntent = resolveJarvisControlIntent(spoken);
+    if (controlIntent?.kind === "change_language") {
+      detectedLanguageRef.current = controlIntent.language;
+      setDetectedLanguage(controlIntent.language);
+      setLanguage(controlIntent.language);
+      if (conversationId) void patchConversation(conversationId, { language: controlIntent.language });
+      const hasContext = Boolean(activeTopic || turns.some((turn) => turn.role === "assistant"));
+      if (hasContext) {
+        await askStudyPilot(spoken, spoken);
+      } else {
+        const message = `I will continue in ${findVoiceLanguage(controlIntent.language).label}.`;
+        await appendPersistedSystemExchange(spoken, message);
+        speakText(message, voiceLocale(controlIntent.language));
+      }
+      return;
+    }
+
+    if (controlIntent?.kind === "select_file") {
+      const matches = matchJarvisFiles(files, controlIntent.query);
+      if (matches.length !== 1) {
+        const message = matches.length > 1
+          ? `I found more than one matching file: ${matches.slice(0, 4).map((file) => file.file_name).join(", ")}. Please choose one from Active study file.`
+          : `I could not find a file matching "${controlIntent.query}". Please choose one from Active study file.`;
+        await appendPersistedSystemExchange(spoken, message);
+        speakText(message);
+        return;
+      }
+      await changeActiveFile(matches[0].id);
+      const message = `Using ${matches[0].file_name}.`;
+      await appendPersistedSystemExchange(spoken, message);
+      speakText(message);
+      return;
+    }
+
+    if (controlIntent?.kind === "pause") {
+      jarvisPausedRef.current = true;
+      setJarvisPaused(true);
+      stopSpeaking();
+      const message = "Jarvis mode paused. Your conversation and study context are preserved.";
+      await appendPersistedSystemExchange(spoken, message);
+      return;
+    }
+
+    if (controlIntent?.kind === "resume") {
+      jarvisPausedRef.current = false;
+      setJarvisPaused(false);
+      const message = "Jarvis mode resumed with your saved study context.";
+      await appendPersistedSystemExchange(spoken, message);
+      speakText(message);
+      return;
+    }
+
+    if (controlIntent?.kind === "stop") {
+      stopSpeaking();
+      stopActiveRequest();
+      await appendPersistedSystemExchange(spoken, "Current Voice Tutor activity stopped.");
+      return;
+    }
+
+    if (controlIntent?.kind === "save_result") {
+      const message = currentArtifact
+        ? `The current ${currentArtifact} is already saved in this conversation.`
+        : "There is no current result to save yet.";
+      await appendPersistedSystemExchange(spoken, message);
+      speakText(message);
+      return;
+    }
+
+    if (controlIntent?.kind === "show_source") {
+      const latestCitedAnswer = [...turns].reverse().find((turn) => turn.answer?.source_citations?.length);
+      const citations = normalizeSourceCitations(latestCitedAnswer?.answer?.source_citations);
+      const message = citations.length
+        ? `Current sources: ${citations.map((citation) => {
+            const locator = citation.locator_type && citation.locator_start !== undefined
+              ? `, ${citation.locator_type} ${citation.locator_start}`
+              : "";
+            return `${citation.source_name}${locator}`;
+          }).join("; ")}.`
+        : "The current result does not include saved source citations.";
+      await appendPersistedSystemExchange(spoken, message);
+      speakText(message);
+      return;
+    }
+
+    if (controlIntent?.kind === "repeat") {
+      await appendPersistedSystemExchange(spoken, "Repeating the latest answer.");
+      replay();
+      return;
+    }
+
+    if (controlIntent?.kind === "follow_up") {
+      setActiveTask((current) => current === "idle" ? "ask" : current);
+      await askStudyPilot(spoken, spoken);
+      return;
+    }
+
+    if (controlIntent?.kind === "generate_image") {
+      setActiveTask("image");
+      const subject = controlIntent.topic || activeTopic || latestRealUserTopic();
+      await generateStudyImage(spoken, subject);
+      return;
+    }
+
+    if (currentArtifact === "image" && /\b(?:explain|describe) (?:this|the current) image\b/iu.test(spoken)) {
+      const imageTopic = activeTopic || latestRealUserTopic();
+      await askStudyPilot(spoken, imageTopic
+        ? `Explain the current generated study image about ${imageTopic}, using the saved conversation context.`
+        : "Explain the current generated study image using the saved conversation context.");
+      return;
+    }
+
+    const lastAssistant = [...turns].reverse().find((turn) => turn.role === "assistant");
+    const lastWebQuery = lastAssistant?.webSearch
+      ? lastAssistant.webQuery ?? lastAssistant.webSearch.query
+      : undefined;
+    const resolved = measureIntent("studypilot.voice.intent", () => resolveVoiceCommand(spoken, { lastWebQuery }));
 
     if (resolved.kind === "blocked") {
-      setTurns((current) => [...current, { id: nextTurnId("system"), role: "system", text: resolved.message }]);
+      await appendPersistedSystemExchange(spoken, resolved.message);
+      return;
+    }
+
+    if (resolved.kind === "command" && resolved.outcome.kind === "study_workflow") {
+      setActiveTask(resolved.outcome.workflow);
+      if (!contextFileForCommands) {
+        const message = "Select an uploaded file before generating a quiz or revision plan.";
+        await appendPersistedSystemExchange(spoken, message);
+        return;
+      }
+      const destination = resolved.outcome.workflow === "quiz" ? "/quiz" : "/revision";
+      const query = new URLSearchParams({ fileId: contextFileForCommands, autoGenerate: "1" });
+      await appendPersistedSystemExchange(spoken, resolved.outcome.message);
+      router.push(`${destination}?${query.toString()}`);
       return;
     }
 
     if (resolved.kind === "command" && resolved.outcome.kind === "navigate") {
       const destination = resolved.outcome.href;
-      setTurns((current) => [
-        ...current,
-        { id: nextTurnId("user"), role: "user", question: spoken },
-        { id: nextTurnId("system"), role: "system", text: resolved.outcome.message },
-      ]);
+      await appendPersistedSystemExchange(spoken, resolved.outcome.message);
       // Brief delay so the user sees the confirmation before navigation.
       window.setTimeout(() => {
         window.location.href = destination;
@@ -1185,60 +1750,56 @@ export function VoiceTutor({
       abortActiveAskRequest();
 
       const { reply } = resolved.outcome;
-      setTurns((current) => [
-        ...current,
-        { id: nextTurnId("user"), role: "user", question: spoken },
-        { id: nextTurnId("system"), role: "system", text: reply },
-      ]);
+      await appendPersistedSystemExchange(spoken, reply);
       if (synthesisSupported) speakText(reply);
       return;
     }
 
     // A documented "ask" command resolves to a fixed study question.
     if (resolved.kind === "command" && resolved.outcome.kind === "ask") {
-      await askStudyPilot(spoken);
+      setActiveTask(inferJarvisTask(spoken));
+      await askStudyPilot(spoken, resolved.outcome.question);
       return;
     }
 
     if (resolved.kind === "command" && resolved.outcome.kind === "web_search") {
+      setActiveTask("web_search");
       let query = resolved.outcome.query.trim();
       if (isContextualWebQuery(query)) query = latestRealUserTopic();
 
       if (!hasMeaningfulQuery(query)) {
         const message = "Please name a topic to search for. I do not have an earlier question to use yet.";
         setNotice(message);
-        setTurns((current) => [
-          ...current,
-          { id: nextTurnId("user"), role: "user", question: spoken },
-          { id: nextTurnId("system"), role: "system", text: message },
-        ]);
+        await appendPersistedSystemExchange(spoken, message);
         return;
       }
 
+      setActiveTopic(query);
       await searchWeb(spoken, query);
       return;
     }
 
     if (resolved.kind === "command" && resolved.outcome.kind === "deep_research") {
+      setActiveTask("deep_research");
       let query = resolved.outcome.query.trim();
       if (isContextualResearchQuery(query)) query = latestRealUserTopic();
 
       if (!hasMeaningfulQuery(query)) {
         const message = "Please name a focused topic to research. I do not have an earlier topic to use yet.";
         setNotice(message);
-        setTurns((current) => [
-          ...current,
-          { id: nextTurnId("user"), role: "user", question: spoken },
-          { id: nextTurnId("system"), role: "system", text: message },
-        ]);
+        await appendPersistedSystemExchange(spoken, message);
         return;
       }
 
+      setActiveTopic(query);
       await researchDeeply(spoken, query);
       return;
     }
 
     if (resolved.kind === "command" && resolved.outcome.kind === "diagram") {
+      setActiveTask("diagram");
+      setCurrentArtifact("diagram");
+      if (resolved.outcome.topic?.trim()) setActiveTopic(resolved.outcome.topic.trim());
       const diagramSource = resolveDiagramRequest({
         diagramType: resolved.outcome.diagramType,
         source: resolved.outcome.source,
@@ -1247,11 +1808,7 @@ export function VoiceTutor({
 
       if ("error" in diagramSource) {
         setNotice(diagramSource.error);
-        setTurns((current) => [
-          ...current,
-          { id: nextTurnId("user"), role: "user", question: spoken },
-          { id: nextTurnId("system"), role: "system", text: diagramSource.error },
-        ]);
+        await appendPersistedSystemExchange(spoken, diagramSource.error);
         return;
       }
 
@@ -1260,11 +1817,9 @@ export function VoiceTutor({
     }
 
     if (resolved.kind === "command" && resolved.outcome.kind === "notes") {
-      setTurns((current) => [
-        ...current,
-        { id: nextTurnId("user"), role: "user", question: spoken },
-        { id: nextTurnId("system"), role: "system", text: resolved.outcome.message },
-      ]);
+      setActiveTask("notes");
+      setCurrentArtifact("notes");
+      await appendPersistedSystemExchange(spoken, resolved.outcome.message);
 
       if (resolved.outcome.action === "create") {
         await prepareNotesPreview(resolved.outcome.source ?? "auto", resolved.outcome.style ?? "standard");
@@ -1279,7 +1834,20 @@ export function VoiceTutor({
     // Anything else is a free-form study question -> chat API as-is.
     if (resolved.kind === "question") {
       const freeQuestion = resolved.question.trim();
-      if (freeQuestion) await askStudyPilot(spoken);
+      if (freeQuestion) {
+        const task = inferJarvisTask(freeQuestion);
+        const topic = inferJarvisTopic(freeQuestion);
+        setActiveTask(task);
+        if (topic && !["next", "continue", "this", "this topic"].includes(topic.toLocaleLowerCase())) {
+          setActiveTopic(topic);
+        }
+        const referencesCurrent = /\b(?:this|that|same|current|previous)\b/iu.test(freeQuestion);
+        const topicDependentTask = task === "viva" || task === "exam_questions" || task === "explain" || task === "notes";
+        const resolvedQuestion = activeTopic && (referencesCurrent || topicDependentTask)
+          ? `${freeQuestion}\nResolve the current reference as topic "${activeTopic}"${currentArtifact ? ` and current ${currentArtifact} artifact${currentArtifactId ? ` ${currentArtifactId}` : ""}` : ""}. Keep the selected file context.`
+          : freeQuestion;
+        await askStudyPilot(spoken, resolvedQuestion);
+      }
     }
   }
 
@@ -1295,12 +1863,6 @@ export function VoiceTutor({
   }
 
   function stopListening() {
-    clearSilenceTimer();
-    recognitionCleanupRef.current?.();
-    recognitionCleanupRef.current = null;
-    // Invalidate this recognition session so a duplicate/late onend cannot
-    // dispatch handleSpokenText after a manual stop.
-    recognitionSessionRef.current = null;
     const active = recognitionRef.current;
     if (active) {
       try {
@@ -1309,17 +1871,52 @@ export function VoiceTutor({
         // Ignore stop errors; the recognition may already have ended.
       }
     }
-    recognitionRef.current = null;
-    setListening(false);
   }
 
-  function startListening() {
+  function cancelListening() {
+    const active = recognitionRef.current;
+    recognitionCleanupRef.current?.();
+    recognitionCleanupRef.current = null;
+    recognitionRef.current = null;
+    recognitionSessionRef.current = null;
+    clearSilenceTimer();
+    setListening(false);
+    setInterim("");
+    if (active) {
+      try {
+        active.abort();
+      } catch {
+        // The browser may already have closed this recognition session.
+      }
+    }
+  }
+
+  function setJarvisEnabled(enabled: boolean) {
+    jarvisModeRef.current = enabled;
+    jarvisPausedRef.current = false;
+    setJarvisMode(enabled);
+    setJarvisPaused(false);
+    if (!enabled) cancelListening();
+  }
+
+  function toggleJarvisPause() {
+    const nextPaused = !jarvisPausedRef.current;
+    jarvisPausedRef.current = nextPaused;
+    setJarvisPaused(nextPaused);
+    if (nextPaused) {
+      cancelListening();
+      stopSpeaking();
+    }
+  }
+
+  function startListening(options: { bargeIn?: boolean } = {}) {
+    const bargeIn = options.bargeIn === true;
     const currentRequestId = telemetryStartRequest();
     requestIdRef.current = currentRequestId;
     setError("");
     setNotice("");
 
-    if (speaking) {
+    if (speaking && !bargeIn) {
       stopSpeaking();
     }
 
@@ -1335,16 +1932,14 @@ export function VoiceTutor({
     }
 
     // Never more than one recognition session at a time (no always-listening).
-    if (recognitionRef.current) {
-      stopListening();
-    }
+    if (recognitionRef.current) return;
 
     setInterim("");
 
     const recognition = new SpeechRecognition();
     // Chrome is more reliable with an explicit locale. Auto follows the
     // browser language instead of assigning an empty SpeechRecognition lang.
-    recognition.lang = activeLanguage.recognitionLocale || window.navigator.language || "en-US";
+    recognition.lang = activeLanguage.recognitionLocale || voiceLocale(detectedLanguageRef.current) || window.navigator.language || "en-US";
     recognition.interimResults = true;
     recognition.continuous = true;
     recognition.maxAlternatives = 1;
@@ -1363,8 +1958,10 @@ export function VoiceTutor({
 
     let finalTranscript = "";
     let latestTranscript = "";
+    let latestInterimTranscript = "";
     let recognitionHadError = false;
     let hasDispatchedFinal = false;
+    let interruptedSpeech = false;
 
     const silenceTimer = new RecordingSilenceTimer({
       silenceMs: VOICE_RECORDING_SILENCE_MS,
@@ -1435,6 +2032,11 @@ export function VoiceTutor({
         }
       }
       latestTranscript = [finalTranscript, interimText].filter(Boolean).join(" ").trim();
+      latestInterimTranscript = interimText.trim();
+      if (bargeIn && latestTranscript && !interruptedSpeech) {
+        interruptedSpeech = true;
+        stopSpeaking();
+      }
       // Interim transcripts are shown live but never persisted — only the
       // final transcript is dispatched onend.
       setInterim(latestTranscript);
@@ -1447,13 +2049,13 @@ export function VoiceTutor({
       const code = event.error ?? "";
       if (code === "not-allowed" || code === "service-not-allowed") {
         setError("Microphone access was blocked. Allow microphone permission in your browser, then try again.");
-      } else if (code === "no-speech") {
+      } else if (code === "no-speech" && !jarvisModeRef.current) {
         setError("I did not hear anything. Tap Start listening and speak again.");
       } else if (code === "audio-capture") {
         setError("No microphone was found. Connect a microphone and try again.");
       } else if (code === "network") {
         setError("Speech recognition failed because of a network issue. Check your connection and try again.");
-      } else {
+      } else if (!(jarvisModeRef.current && (code === "aborted" || code === "no-speech"))) {
         setError("Speech recognition stopped. Please try again.");
       }
       setListening(false);
@@ -1487,7 +2089,7 @@ export function VoiceTutor({
       }
       hasDispatchedFinal = true;
 
-      const spoken = finalTranscript.trim();
+      const spoken = finalTranscript.trim() || latestInterimTranscript.trim() || latestTranscript.trim();
       setInterim("");
       if (spoken) {
         telemetryEndStage(currentRequestId, "final_transcript");
@@ -1501,7 +2103,7 @@ export function VoiceTutor({
           handled.add(dedupKey);
           void handleSpokenText(spoken);
         }
-      } else {
+      } else if (!jarvisModeRef.current) {
         setError("I did not catch that. Tap Start listening and try again.");
       }
     };
@@ -1522,43 +2124,61 @@ export function VoiceTutor({
   // Speech synthesis: read aloud / replay / stop speaking
   // -------------------------------------------------------------------------
 
-  function speakText(text: string) {
+  function speakText(text: string, localeOverride?: string) {
     if (!isSpeechSynthesisSupported()) {
       setError("Read aloud is not supported in this browser.");
       return;
     }
     if (!text.trim()) return;
 
+    const chunks = splitSpeechText(text);
+    if (!chunks.length) return;
     const requestId = requestIdRef.current;
     telemetryStartStage(requestId, "tts_start");
+    speechRunRef.current += 1;
+    const run = speechRunRef.current;
     window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    const voice = pickVoiceForLocale(activeLanguage.speechLocale);
-    if (voice) {
-      utterance.voice = voice;
-      utterance.lang = voice.lang;
-    } else if (activeLanguage.speechLocale) {
-      utterance.lang = activeLanguage.speechLocale;
-    }
-    utterance.onend = () => setSpeaking(false);
-    utterance.onerror = () => setSpeaking(false);
+    const locale = /[\u0c00-\u0c7f]/u.test(text) ? "te-IN" : localeOverride ?? activeLanguage.speechLocale;
     lastSpokenTextRef.current = text;
     setHasSpokenText(true);
     setSpeaking(true);
-    window.speechSynthesis.speak(utterance);
+
+    const speakChunk = (index: number) => {
+      if (speechRunRef.current !== run) return;
+      if (index >= chunks.length) {
+        setSpeaking(false);
+        return;
+      }
+      const utterance = new SpeechSynthesisUtterance(chunks[index]);
+      const voice = pickVoiceForLocale(locale, availableVoices);
+      if (voice && (!locale || voice.lang.toLowerCase().startsWith(locale.slice(0, 2).toLowerCase()))) {
+        utterance.voice = voice;
+        utterance.lang = voice.lang;
+      } else if (locale) {
+        utterance.lang = locale;
+      }
+      utterance.onend = () => speakChunk(index + 1);
+      utterance.onerror = () => {
+        if (speechRunRef.current === run) setSpeaking(false);
+      };
+      window.speechSynthesis.speak(utterance);
+    };
+    speakChunk(0);
     telemetryEndStage(requestId, "tts_start");
   }
 
   function readAloud() {
     const lastAnswer = [...turns]
       .reverse()
-      .find((turn) => turn.role === "assistant" && (turn.answer || turn.webSearch || turn.researchReport || turn.diagram));
+      .find((turn) => turn.role === "assistant" && (turn.answer || turn.webSearch || turn.researchReport || turn.diagram || turn.generatedImage));
     if (!lastAnswer) {
       setNotice("There is no answer to read aloud yet. Ask a question first.");
       return;
     }
     if (lastAnswer.diagram) {
       speakText(stripUrlsForSpeech(lastAnswer.diagram.explanation));
+    } else if (lastAnswer.generatedImage) {
+      speakText(lastAnswer.generatedImage.explanation);
     } else if (lastAnswer.researchReport) {
       speakText(stripUrlsForSpeech(lastAnswer.researchReport.executive_summary));
     } else if (lastAnswer.webSearch) {
@@ -1581,6 +2201,7 @@ export function VoiceTutor({
   }
 
   function stopSpeaking() {
+    speechRunRef.current += 1;
     if (isSpeechSynthesisSupported()) {
       window.speechSynthesis.cancel();
     }
@@ -1595,7 +2216,7 @@ export function VoiceTutor({
   const ttsBlocked = !synthesisSupported;
   const lastSpeakableAssistant = [...turns]
     .reverse()
-    .find((turn) => turn.role === "assistant" && (turn.answer || turn.webSearch || turn.researchReport || turn.diagram));
+    .find((turn) => turn.role === "assistant" && (turn.answer || turn.webSearch || turn.researchReport || turn.diagram || turn.generatedImage));
   const lastStudyAssistant = [...turns].reverse().find((turn) => turn.role === "assistant" && turn.answer);
 
   // Orb visual state is driven by real recognition, search, AI, and speech work.
@@ -1617,6 +2238,8 @@ export function VoiceTutor({
 
   const stateLabel = error
     ? "Error"
+    : jarvisMode && jarvisPaused
+      ? "Paused"
     : listening
       ? "Listening"
       : visualizing
@@ -1635,6 +2258,8 @@ export function VoiceTutor({
 
   const stateSublabel = error
     ? "Something went wrong. Try again."
+    : jarvisMode && jarvisPaused
+      ? "Resume Jarvis mode when you are ready."
     : listening
       ? "Speak now, then tap Stop listening."
       : visualizing
@@ -1657,17 +2282,105 @@ export function VoiceTutor({
   const activeStage = listening ? 1 : working ? 2 : speaking ? 3 : 0;
   const microphoneLabel = micBlocked ? "Unavailable" : listening ? "Listening" : "Ready";
   const controlButtonClass = "inline-flex h-11 min-w-0 items-center justify-center gap-2 rounded-md border border-white/12 bg-[#080f1e]/80 px-3 text-sm font-semibold text-slate-200 transition hover:border-emerald-300/25 hover:bg-white/[0.07] hover:text-white disabled:cursor-not-allowed disabled:opacity-40";
+  const currentCitations = useMemo(() => {
+    const citedTurn = [...turns].reverse().find((turn) => turn.answer?.source_citations?.length);
+    return normalizeSourceCitations(citedTurn?.answer?.source_citations).slice(0, 4);
+  }, [turns]);
+
+  const agentSessionState = useMemo<JarvisSessionState>(() => {
+    const latestUserTurn = [...turns].reverse().find((turn) => turn.role === "user" && turn.question?.trim());
+    return {
+      conversationId,
+      activeFileIds,
+      activeFileNames: activeFileIds.map((id) => fileNamesById.get(id) ?? "File"),
+      activeSubject,
+      activeTopic,
+      activeSubtopic: persistedStudyState.active_subtopic ?? "",
+      activeTask,
+      activeMode: jarvisMode ? "jarvis" : "manual",
+      preferredLanguage,
+      detectedLanguage,
+      voicePreference: availableVoices.find((voice) => voice.lang.toLowerCase().startsWith(activeLanguage.speechLocale.slice(0, 2).toLowerCase()))?.name ?? null,
+      lastMeaningfulUserIntent: latestUserTurn?.question ?? "",
+      lastAssistantIntent,
+      recentToolCalls,
+      generatedAssetIds: turns.flatMap((turn) => turn.generatedImage?.id ? [turn.generatedImage.id] : []),
+      currentArtifactId: currentArtifactId || null,
+      currentArtifact,
+      lastQuizId: persistedStudyState.last_quiz_id ?? null,
+      lastRevisionPlanId: persistedStudyState.last_revision_plan_id ?? null,
+      unfinishedTask: persistedStudyState.unfinished_task ?? null,
+      learningContext: learningStates.map((state) => ({ topic: state.topic, status: state.status, revisionStatus: state.revision_status })),
+      followUpState: "none",
+    };
+  }, [activeFileIds, activeLanguage.speechLocale, activeSubject, activeTask, activeTopic, availableVoices, conversationId, currentArtifact, currentArtifactId, detectedLanguage, fileNamesById, jarvisMode, lastAssistantIntent, learningStates, persistedStudyState.active_subtopic, persistedStudyState.last_quiz_id, persistedStudyState.last_revision_plan_id, persistedStudyState.unfinished_task, preferredLanguage, recentToolCalls, turns]);
+
+  useEffect(() => {
+    jarvisModeRef.current = jarvisMode;
+    jarvisPausedRef.current = jarvisPaused;
+    if (autoListenTimerRef.current !== null) {
+      window.clearTimeout(autoListenTimerRef.current);
+      autoListenTimerRef.current = null;
+    }
+    if (!jarvisMode || jarvisPaused || micBlocked || error || listening || working) return;
+
+    autoListenTimerRef.current = window.setTimeout(() => {
+      autoListenTimerRef.current = null;
+      if (!jarvisModeRef.current || jarvisPausedRef.current || recognitionRef.current) return;
+      startListening({ bargeIn: speaking });
+    }, speaking ? 250 : 450);
+
+    return () => {
+      if (autoListenTimerRef.current !== null) {
+        window.clearTimeout(autoListenTimerRef.current);
+        autoListenTimerRef.current = null;
+      }
+    };
+  }, [error, jarvisMode, jarvisPaused, listening, micBlocked, speaking, working]);
 
   return (
     <div className="grid gap-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="inline-flex min-w-0 items-center gap-2 self-start rounded-md border border-white/10 bg-[#09111f]/80 px-3 py-2 text-xs text-slate-400">
-          <IconFileText size={15} className="shrink-0 text-slate-300" />
-          <span className="shrink-0">Active context</span>
-          <span className="truncate font-semibold text-emerald-300">{activeContextText}</span>
+        <div className="flex min-w-0 flex-col gap-2 self-stretch sm:flex-row sm:items-center">
+          <div className="inline-flex min-w-0 items-center gap-2 rounded-md border border-white/10 bg-[#09111f]/80 px-3 py-2 text-xs text-slate-400">
+            <IconFileText size={15} className="shrink-0 text-slate-300" />
+            <span className="shrink-0">Active context</span>
+            <span className="truncate font-semibold text-emerald-300">{activeContextText}</span>
+          </div>
+          <label className="min-w-0">
+            <span className="sr-only">Active study file</span>
+            <select
+              aria-label="Active study file"
+              value={activeFileId ?? ""}
+              onChange={(event) => void changeActiveFile(event.target.value)}
+              disabled={working || listening}
+              className="h-9 w-full min-w-0 rounded-md border border-white/12 bg-[#080f1e] px-3 text-xs text-slate-100 outline-none transition focus:border-emerald-300 disabled:opacity-50 sm:w-64"
+            >
+              <option value="">No active file</option>
+              {files.map((file) => <option key={file.id} value={file.id}>{file.file_name}</option>)}
+            </select>
+          </label>
         </div>
 
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={jarvisMode}
+            onClick={() => setJarvisEnabled(!jarvisMode)}
+            className={`inline-flex h-9 items-center justify-center gap-2 rounded-md border px-3 text-xs font-semibold transition ${jarvisMode ? "border-emerald-300/40 bg-emerald-300/15 text-emerald-100" : "border-white/12 bg-[#080f1e] text-slate-300 hover:border-emerald-300/25"}`}
+          >
+            <IconZap size={14} /> Jarvis {jarvisMode ? "On" : "Off"}
+          </button>
+          {jarvisMode ? (
+            <button
+              type="button"
+              onClick={toggleJarvisPause}
+              className="inline-flex h-9 items-center justify-center rounded-md border border-white/12 bg-[#080f1e] px-3 text-xs font-semibold text-slate-200 hover:border-emerald-300/25"
+            >
+              {jarvisPaused ? "Resume" : "Pause"}
+            </button>
+          ) : null}
           {conversationId ? (
             <Link
               href={`/chat?conversationId=${encodeURIComponent(conversationId)}`}
@@ -1753,6 +2466,8 @@ export function VoiceTutor({
                   const value = event.target.value;
                   setLanguage(value);
                   if (conversationId && value !== "auto") {
+                    detectedLanguageRef.current = value as SupportedLanguageCode;
+                    setDetectedLanguage(value as SupportedLanguageCode);
                     void patchConversation(conversationId, { language: value as SupportedLanguageCode });
                   }
                 }}
@@ -1771,7 +2486,7 @@ export function VoiceTutor({
       <section className="grid gap-2 rounded-lg border border-white/10 bg-[#09111f]/80 p-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <button
           type="button"
-          onClick={startListening}
+          onClick={() => startListening()}
           disabled={working || listening || micBlocked}
           className="inline-flex h-11 min-w-0 items-center justify-center gap-2 rounded-md bg-emerald-400 px-3 text-sm font-bold text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-45"
         >
@@ -1811,7 +2526,7 @@ export function VoiceTutor({
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-sky-300/20 bg-sky-300/[0.06] px-4 py-3 text-sm text-sky-100">
           <span className="inline-flex items-center gap-2">
             {visualizing ? <IconImage size={16} /> : searching ? <IconSearch size={16} /> : <IconBrain size={16} />}
-            {visualizing ? "Diagram generation is running" : researching ? "Deep research is running" : "Web search is running"}
+            {visualizing ? (activeTask === "image" ? "Image generation is running" : "Diagram generation is running") : researching ? "Deep research is running" : "Web search is running"}
           </span>
           <button
             type="button"
@@ -1850,7 +2565,8 @@ export function VoiceTutor({
         />
       ) : null}
 
-      {/* Conversation */}
+      {/* Conversation and its shared Jarvis context */}
+      <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_280px]">
       <section className="overflow-hidden rounded-lg border border-white/10 bg-[#09111f]/60">
         <header className="flex items-center justify-between gap-3 border-b border-white/8 px-4 py-3">
           <div className="flex items-center gap-2">
@@ -1871,7 +2587,7 @@ export function VoiceTutor({
           </div>
         ) : null}
 
-        {turns.map((turn) => {
+        {turns.map((turn, turnIndex) => {
           if (turn.role === "user") {
             return (
               <article key={turn.id} className="ml-auto max-w-[92%] rounded-2xl rounded-br-md bg-emerald-400 px-4 py-3 text-slate-950 shadow-xl shadow-emerald-950/20 sm:max-w-[80%]">
@@ -1883,6 +2599,22 @@ export function VoiceTutor({
             return (
               <article key={turn.id} className="max-w-[92%] rounded-2xl rounded-bl-md border border-sky-300/25 bg-sky-300/10 px-4 py-3 text-sky-100 shadow-xl shadow-black/15 sm:max-w-[88%]">
                 <p className="break-words text-sm leading-6">{turn.text}</p>
+              </article>
+            );
+          }
+          if (turn.generatedImage) {
+            const image = turn.generatedImage;
+            return (
+              <article key={turn.id} className="max-w-[100%] rounded-2xl rounded-bl-md border border-emerald-300/20 bg-emerald-300/[0.035] p-4 shadow-xl shadow-black/15 sm:max-w-[96%] sm:p-5">
+                <div className="mb-4 flex flex-wrap items-center gap-2">
+                  <span className="rounded-full border border-emerald-300/25 bg-emerald-300/10 px-2 py-0.5 text-[10px] font-bold uppercase text-emerald-200">Generated image</span>
+                  <span className="break-words text-xs text-slate-400">Voice request: {turn.imagePrompt ?? image.prompt}</span>
+                </div>
+                <GeneratedImagePreview
+                  image={image}
+                  onRegenerate={() => void generateStudyImage(turn.imagePrompt ?? `Generate an image for ${image.prompt}`, image.prompt)}
+                  regenerating={visualizing && activeTask === "image"}
+                />
               </article>
             );
           }
@@ -1962,6 +2694,16 @@ export function VoiceTutor({
           const citations = normalizeSourceCitations(answer.source_citations);
           const hasCitations = citations.length > 0;
           const hasLegacyChips = !hasCitations && !!answer.source_chips?.length;
+          const previousTurn = turns[turnIndex - 1];
+          const previousQuestion = previousTurn?.role === "user" ? previousTurn.question ?? "" : "";
+          const conversational = !/^(?:give|generate|make|create|summari[sz]e|list|show)\b/i.test(previousQuestion);
+          const shortAnswer = answer.short_answer?.trim() ?? "";
+          const explanation = answer.simple_explanation?.trim() ?? "";
+          const conversationalExplanation = shortAnswer && explanation.startsWith(shortAnswer)
+            ? explanation.slice(shortAnswer.length).trim()
+            : explanation;
+          const firstStep = answer.step_by_step?.[0] ?? "";
+          const explanationIncludesSteps = Boolean(firstStep && explanation.includes(firstStep));
           return (
             <article key={turn.id} className="max-w-[96%] rounded-2xl rounded-bl-md border border-white/10 bg-white/[0.045] p-4 shadow-xl shadow-black/15 sm:max-w-[92%] sm:p-5">
               {answer.response_mode === "offline_fallback" ? (
@@ -1971,23 +2713,39 @@ export function VoiceTutor({
                 </div>
               ) : null}
               <div className="grid gap-3">
-                <Section title="Short Answer">{answer.short_answer}</Section>
-                <Section title="Simple Explanation">{answer.simple_explanation}</Section>
-                {answer.step_by_step?.length ? (
-                  <Section title="Step-by-Step">
-                    <ol className="grid list-decimal gap-2 pl-4">
-                      {answer.step_by_step.map((step) => (
-                        <li key={step}>{step}</li>
-                      ))}
-                    </ol>
-                  </Section>
-                ) : null}
-                <Section title="Example">{answer.example}</Section>
-                <Section title="Memory Line">{answer.memory_line}</Section>
-                <Section title="Common Mistake">{answer.common_mistake}</Section>
-                <Section title="Exam/Viva Answer">{answer.exam_viva_answer}</Section>
-                <Section title="Practice Question">{answer.practice_question}</Section>
-                <Section title="Next Step">{answer.next_step}</Section>
+                {conversational ? (
+                  <>
+                    {answer.short_answer ? <p className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-100">{answer.short_answer}</p> : null}
+                    {conversationalExplanation ? (
+                      <p className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-300">{conversationalExplanation}</p>
+                    ) : null}
+                    {answer.step_by_step?.length && !explanationIncludesSteps ? (
+                      <ul className="grid list-disc gap-1 pl-4 text-sm leading-6 text-slate-300">
+                        {answer.step_by_step.map((step) => <li key={step}>{step}</li>)}
+                      </ul>
+                    ) : null}
+                    {answer.example ? <p className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-300">{answer.example}</p> : null}
+                    {answer.next_step ? <p className="whitespace-pre-wrap break-words text-xs leading-5 text-slate-400">{answer.next_step}</p> : null}
+                  </>
+                ) : (
+                  <>
+                    <Section title="Short Answer">{answer.short_answer}</Section>
+                    <Section title="Simple Explanation">{answer.simple_explanation}</Section>
+                    {answer.step_by_step?.length ? (
+                      <Section title="Step-by-Step">
+                        <ol className="grid list-decimal gap-2 pl-4">
+                          {answer.step_by_step.map((step) => <li key={step}>{step}</li>)}
+                        </ol>
+                      </Section>
+                    ) : null}
+                    <Section title="Example">{answer.example}</Section>
+                    <Section title="Memory Line">{answer.memory_line}</Section>
+                    <Section title="Common Mistake">{answer.common_mistake}</Section>
+                    <Section title="Exam/Viva Answer">{answer.exam_viva_answer}</Section>
+                    <Section title="Practice Question">{answer.practice_question}</Section>
+                    <Section title="Next Step">{answer.next_step}</Section>
+                  </>
+                )}
               </div>
 
               {/* Verified sources: structured citations preferred, legacy chips only when absent. */}
@@ -2046,6 +2804,84 @@ export function VoiceTutor({
         ) : null}
         </div>
       </section>
+
+      <aside aria-label="Jarvis context" className="grid gap-4 rounded-lg border border-white/10 bg-[#09111f]/60 p-4 xl:sticky xl:top-4">
+        <div>
+          <p className="text-xs font-semibold uppercase text-emerald-300">Current context</p>
+          <dl className="mt-3 grid gap-3 text-xs">
+            <div><dt className="text-slate-500">Active file</dt><dd className="mt-1 break-words font-medium text-slate-200">{agentSessionState.activeFileNames.join(", ") || "None selected"}</dd></div>
+            <div><dt className="text-slate-500">Subject</dt><dd className="mt-1 break-words font-medium text-slate-200">{activeSubject || "Not established"}</dd></div>
+            <div><dt className="text-slate-500">Topic</dt><dd className="mt-1 break-words font-medium text-slate-200">{agentSessionState.activeTopic || "Not established"}</dd></div>
+            <div><dt className="text-slate-500">Task</dt><dd className="mt-1 capitalize text-slate-200">{agentSessionState.activeTask.replaceAll("_", " ")}</dd></div>
+            <div><dt className="text-slate-500">Language</dt><dd className="mt-1 text-slate-200">{findVoiceLanguage(agentSessionState.detectedLanguage).label}{autoLanguage ? " (auto)" : ""}</dd></div>
+            <div><dt className="text-slate-500">Artifact</dt><dd className="mt-1 capitalize text-slate-200">{currentArtifact?.replaceAll("_", " ") || "None"}</dd></div>
+          </dl>
+        </div>
+
+        <div className="border-t border-white/8 pt-3">
+          <p className="text-xs font-semibold uppercase text-slate-400">Sources</p>
+          {currentCitations.length ? (
+            <ul className="mt-2 grid gap-1.5 text-xs text-slate-300">
+              {currentCitations.map((citation) => <li key={citation.id} className="break-words">{citation.source_name}</li>)}
+            </ul>
+          ) : <p className="mt-2 text-xs text-slate-500">No citations on the current answer.</p>}
+        </div>
+
+        {recentToolCalls.length ? (
+          <div className="border-t border-white/8 pt-3">
+            <p className="text-xs font-semibold uppercase text-slate-400">Recent tools</p>
+            <div className="mt-2 grid gap-2">
+              {recentToolCalls.slice(-3).reverse().map((call) => (
+                <div key={call.id} className="flex items-center justify-between gap-2 text-xs">
+                  <span className="truncate capitalize text-slate-300">{call.tool.replaceAll("_", " ")}</span>
+                  <span className={call.status === "success" ? "text-emerald-300" : call.status === "failed" ? "text-red-300" : "text-sky-300"}>{call.status}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        <div className="border-t border-white/8 pt-3">
+          <p className="text-xs font-semibold uppercase text-slate-400">Learning evidence</p>
+          {learningStates.length ? (
+            <div className="mt-2 grid gap-2">
+              {learningStates.slice(0, 4).map((state) => (
+                <div key={state.id} className="rounded-md border border-white/8 bg-white/[0.03] p-2 text-xs">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="min-w-0 break-words font-medium text-slate-200">{state.topic}</span>
+                    <span className={state.status === "NEEDS_REVISION" ? "shrink-0 text-amber-300" : "shrink-0 text-emerald-300"}>
+                      {state.status.replaceAll("_", " ").toLowerCase()}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-slate-500">
+                    {state.quiz_attempts
+                      ? `${state.correct_count} correct, ${state.incorrect_count} incorrect from ${state.quiz_attempts} topic quiz attempt${state.quiz_attempts === 1 ? "" : "s"}.`
+                      : "Saved from explicit study activity."}
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : <p className="mt-2 text-xs text-slate-500">No recorded learning evidence for this context yet.</p>}
+        </div>
+
+        <div className="border-t border-white/8 pt-3">
+          <p className="text-xs font-semibold uppercase text-slate-400">Suggested actions</p>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            {["Explain further", "Generate quiz", "Viva questions", "Create revision plan", "Create notes", "Generate diagram"].map((action) => (
+              <button
+                key={action}
+                type="button"
+                onClick={() => void handleSpokenText(action)}
+                disabled={working}
+                className="min-h-9 rounded-md border border-white/10 bg-white/[0.04] px-2 py-1.5 text-left text-[11px] font-medium leading-4 text-slate-300 transition hover:border-emerald-300/25 hover:text-white disabled:opacity-40"
+              >
+                {action}
+              </button>
+            ))}
+          </div>
+        </div>
+      </aside>
+      </div>
 
       {/* Command reference */}
       <div className="rounded-lg border border-white/10 bg-white/[0.04] p-5">

@@ -11,6 +11,9 @@ import { generateAndStorePptxPreview, type PptxPreviewMetadata } from "@/backend
 import { PdfPreviewFrame } from "@/frontend/components/PdfPreviewFrame";
 import { supabaseSetupMessage } from "@/frontend/lib/supabase/errors";
 import { isSupportedLanguageCode } from "@/shared/languages";
+import { isPlaceholderSummary, type SummarySanitizable } from "@/shared/summarySanitizer";
+import { validateCnsExtractionCoverage } from "@/backend/lib/aiSummary";
+import { hasCompletePageCoverage } from "@/shared/fileExtractionCoverage";
 
 export const dynamic = "force-dynamic";
 
@@ -119,7 +122,7 @@ export default async function FileDetailPage({
 
   const baseResult = await supabase
     .from("files")
-    .select("id, user_id, file_name, file_type, mime_type, file_size, storage_path, processing_status, status, extracted_text, extracted_metadata, created_at")
+    .select("id, user_id, file_name, file_type, mime_type, file_size, storage_path, processing_status, status, extracted_text, extracted_metadata, created_at, updated_at")
     .eq("id", id)
     .eq("user_id", user.id)
     .maybeSingle();
@@ -139,7 +142,7 @@ export default async function FileDetailPage({
     const adminSupabase = createAdminSupabaseClient();
     const adminResult = await adminSupabase
       .from("files")
-      .select("id, user_id, file_name, file_type, mime_type, file_size, storage_path, processing_status, status, extracted_text, extracted_metadata, created_at, content_type, processing_notes")
+      .select("id, user_id, file_name, file_type, mime_type, file_size, storage_path, processing_status, status, extracted_text, extracted_metadata, created_at, updated_at, content_type, processing_notes")
       .eq("id", id)
       .maybeSingle();
 
@@ -290,8 +293,51 @@ export default async function FileDetailPage({
       Object.assign(summary, optionalSummary.data);
     }
   }
-  const processingNotes = cleanProcessingNotes(file.processing_notes);
+  const pageCoverageComplete = hasCompletePageCoverage(file.extracted_metadata);
+  const processingNotes = cleanProcessingNotes(file.processing_notes)
+    .filter((note) => pageCoverageComplete || !note.toLowerCase().includes("coverage validated successfully"));
+  if (!pageCoverageComplete && isRecord(file.extracted_metadata)) {
+    const total = file.extracted_metadata.totalPages;
+    const extracted = file.extracted_metadata.extractedPageCount;
+    if (typeof total === "number" && typeof extracted === "number") {
+      processingNotes.push(`Full PDF extraction is incomplete: ${total - extracted} of ${total} pages are missing.`);
+    }
+  }
   const canCreateStudyActions = Boolean((file.extracted_text ?? "").trim() || summary);
+  const extractedText = (file.extracted_text ?? "").trim();
+  const coverage = validateCnsExtractionCoverage(extractedText, file.file_name);
+  const extractionReady = extractedText.length >= 40 &&
+    (!coverage.required || coverage.valid) &&
+    (!isRecord(file.extracted_metadata) || file.extracted_metadata.extractionValidated !== false) &&
+    pageCoverageComplete &&
+    file.processing_status !== "extracting" && file.status !== "extracting";
+  const summaryGenerating = file.processing_status === "summarizing" || file.status === "summarizing";
+  const summaryLockStale = summaryGenerating && Boolean(file.updated_at) &&
+    // This dynamic server page evaluates lock age once per request.
+    // eslint-disable-next-line react-hooks/purity
+    Date.now() - new Date(file.updated_at).getTime() > 150_000;
+
+  // Determine extraction status
+  const extractionStatus = extractionReady
+    ? "completed"
+    : file.processing_status === "extracting" || file.status === "extracting"
+    ? "extracting"
+    : extractedText || (isRecord(file.extracted_metadata) && file.extracted_metadata.extractionValidated === false)
+    ? "incomplete"
+    : "pending";
+
+  // Determine summary status
+  const summaryStatus = !extractionReady && (extractedText || (isRecord(file.extracted_metadata) && file.extracted_metadata.extractionValidated === false))
+    ? "failed"
+    : summary
+    ? isPlaceholderSummary(summary as SummarySanitizable)
+      ? "placeholder"
+      : "ready"
+    : summaryGenerating && !summaryLockStale && extractionReady
+    ? "generating"
+    : file.processing_status === "failed" || file.status === "failed" || summaryLockStale
+    ? "failed"
+    : "pending";
 
   return (
     <AppShell>
@@ -305,9 +351,14 @@ export default async function FileDetailPage({
           <h1 className="mt-3 break-words text-2xl font-bold tracking-tight text-white sm:text-3xl animate-fade-in-up">{file.file_name}</h1>
           <p className="mt-2 text-slate-400">Study material preview and processing details.</p>
         </div>
-        <Badge variant={file.processing_status === "uploaded" ? "emerald" : "amber"} className="shrink-0">
-          {file.processing_status ?? file.status ?? "uploaded"}
-        </Badge>
+        <div className="flex items-center gap-2 shrink-0">
+          <Badge variant={extractionStatus === "completed" ? "emerald" : extractionStatus === "extracting" ? "amber" : "default"}>
+            Extraction: {extractionStatus === "completed" ? "Completed" : extractionStatus === "extracting" ? "Extracting..." : extractionStatus === "incomplete" ? "Incomplete" : "Pending"}
+          </Badge>
+          <Badge variant={summaryStatus === "ready" ? "emerald" : summaryStatus === "generating" ? "amber" : summaryStatus === "placeholder" ? "amber" : "default"}>
+            Summary: {summaryStatus === "ready" ? "Ready" : summaryStatus === "generating" ? "Generating..." : summaryStatus === "placeholder" ? "Placeholder" : summaryStatus === "failed" ? "Failed" : "Pending"}
+          </Badge>
+        </div>
       </div>
 
       {/* Split view: preview left, summary right */}
@@ -319,7 +370,8 @@ export default async function FileDetailPage({
               ["Type", file.content_type ?? file.file_type ?? file.mime_type ?? "Study file"],
               ["Size", formatSize(file.file_size)],
               ["Uploaded", new Date(file.created_at).toLocaleDateString()],
-              ["Status", file.processing_status ?? file.status ?? "uploaded"],
+              ["Extraction", extractionStatus === "completed" ? "Completed" : extractionStatus === "extracting" ? "Extracting..." : extractionStatus === "incomplete" ? "Incomplete" : "Pending"],
+              ["Summary", summaryStatus === "ready" ? "Ready" : summaryStatus === "generating" ? "Generating..." : summaryStatus === "placeholder" ? "Placeholder (regenerate)" : summaryStatus === "failed" ? "Failed" : "Pending"],
             ].map(([label, value]) => (
               <div key={label} className="min-w-0 rounded-lg border border-white/[0.06] bg-slate-950/50 p-3">
                 <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</div>
@@ -398,10 +450,12 @@ export default async function FileDetailPage({
             reflects a freshly-uploaded file's null summary correctly.
           */}
           <SummaryPanel
-            key={`file-${file.id}-summary-${language}-${summary?.id ?? "none"}`}
+            key={`file-${file.id}-summary-${language}-${summary?.id ?? "none"}-${file.updated_at ?? ""}`}
             fileId={file.id}
             initialSummary={summary ?? null}
             canCreateStudyActions={canCreateStudyActions}
+            extractionReady={extractionReady}
+            summaryGenerating={summaryGenerating && !summaryLockStale && extractionReady}
             initialLanguage={language}
           />
         </div>

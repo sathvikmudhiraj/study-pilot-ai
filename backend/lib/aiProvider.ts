@@ -11,7 +11,7 @@ import { logProviderTelemetry } from "./observability";
 
 type AIProvider = "gemini" | "nvidia" | "auto";
 type AIErrorKind = "busy" | "quota" | "config" | "auth" | "empty" | "request" | "timeout" | "cancelled";
-type AIProviderProfile = "default" | "summary" | "revision";
+type AIProviderProfile = "default" | "summary" | "quiz" | "revision";
 
 export type AIProviderResult = {
   text: string;
@@ -58,6 +58,8 @@ type TextGenerationConfig = {
   maxOutputTokens?: number;
   responseMimeType?: "application/json" | "text/plain";
   timeoutMs?: number;
+  primaryTimeoutMs?: number;
+  fallbackTimeoutMs?: number;
   maxAttempts?: number;
   disableProviderFallback?: boolean;
   signal?: AbortSignal;
@@ -65,11 +67,10 @@ type TextGenerationConfig = {
 };
 
 const DEFAULT_PROVIDER_TIMEOUT_MS = 30000;
-const DEFAULT_INTERACTIVE_TIMEOUT_MS = 10000;
-const DEFAULT_SUMMARY_TIMEOUT_MS = 120000;
-const DEFAULT_REVISION_TIMEOUT_MS = 25000;
+const DEFAULT_INTERACTIVE_TIMEOUT_MS = 15_000;
+const DEFAULT_STRUCTURED_TIMEOUT_MS = 30_000;
 const DEFAULT_NVIDIA_TIMEOUT_MS = 180_000;
-const DEFAULT_NVIDIA_MODEL = "meta/llama-3.2-11b-vision-instruct";
+const DEFAULT_NVIDIA_TEXT_MODEL = "nvidia/nemotron-3-super-120b-a12b";
 const TIMEOUT_MESSAGE = "AI is taking longer than expected. Try fewer questions or switch to faster model.";
 export const SUMMARY_TIMEOUT_MESSAGE = "Summary generation timed out. Please retry.";
 const REVISION_TIMEOUT_MESSAGE = "Revision plan generation timed out. Please try again.";
@@ -139,6 +140,8 @@ export type AIProviderTelemetryEvent = {
   fallbackTriggered?: boolean;
   retryCount?: number;
   errorKind?: AIErrorKind | "gemini";
+  status?: number;
+  bodyLength?: number;
 };
 
 class AIProviderError extends Error {
@@ -191,45 +194,62 @@ function getProviderTimeoutMs() {
   return configuredTimeout(process.env.AI_PROVIDER_TIMEOUT_MS, DEFAULT_PROVIDER_TIMEOUT_MS);
 }
 
+function getNvidiaTextModel(profile: AIProviderProfile) {
+  const sharedTextModel = process.env.NVIDIA_TEXT_MODEL
+    || process.env.SUMMARY_NVIDIA_MODEL
+    || DEFAULT_NVIDIA_TEXT_MODEL;
+
+  if (profile === "summary") return process.env.SUMMARY_NVIDIA_MODEL || sharedTextModel;
+  if (profile === "quiz") return process.env.QUIZ_NVIDIA_MODEL || sharedTextModel;
+  if (profile === "revision") return process.env.REVISION_NVIDIA_MODEL || sharedTextModel;
+  return sharedTextModel;
+}
+
 function getRuntimeConfig(profile: AIProviderProfile): ProviderRuntimeConfig {
   if (profile === "summary") {
-    const timeoutMs = configuredTimeout(process.env.SUMMARY_AI_TIMEOUT_MS, DEFAULT_SUMMARY_TIMEOUT_MS);
+    const timeoutMs = Math.min(
+      configuredTimeout(process.env.SUMMARY_AI_TIMEOUT_MS, DEFAULT_STRUCTURED_TIMEOUT_MS),
+      DEFAULT_STRUCTURED_TIMEOUT_MS,
+    );
     return {
       profile,
       provider: normalizeProvider(process.env.SUMMARY_AI_PROVIDER || "auto"),
       timeoutMs,
-      fastFallbackTimeoutMs: Math.min(timeoutMs, getProviderTimeoutMs(), DEFAULT_PROVIDER_TIMEOUT_MS),
-      nvidiaModel: process.env.SUMMARY_NVIDIA_MODEL || DEFAULT_NVIDIA_MODEL,
+      fastFallbackTimeoutMs: Math.min(18_000, timeoutMs),
+      nvidiaModel: getNvidiaTextModel(profile),
       timeoutMessage: SUMMARY_TIMEOUT_MESSAGE,
       interactiveTimeoutMs: timeoutMs,
     };
   }
 
-  if (profile === "revision") {
-    const timeoutMs = configuredTimeout(process.env.REVISION_AI_TIMEOUT_MS, DEFAULT_REVISION_TIMEOUT_MS);
-    // Budget allocation: Gemini fast attempt ~10s, NVIDIA fallback ~15s, total ~25s
-    const geminiFastTimeoutMs = Math.min(10000, Math.floor(timeoutMs * 0.4));
+  if (profile === "quiz" || profile === "revision") {
+    const configured = profile === "quiz" ? process.env.QUIZ_AI_TIMEOUT_MS : process.env.REVISION_AI_TIMEOUT_MS;
+    const timeoutMs = Math.min(
+      configuredTimeout(configured, DEFAULT_STRUCTURED_TIMEOUT_MS),
+      DEFAULT_STRUCTURED_TIMEOUT_MS,
+    );
     return {
       profile,
-      provider: normalizeProvider(process.env.REVISION_AI_PROVIDER || "auto"),
+      provider: normalizeProvider((profile === "quiz" ? process.env.QUIZ_AI_PROVIDER : process.env.REVISION_AI_PROVIDER) || "auto"),
       timeoutMs,
-      fastFallbackTimeoutMs: geminiFastTimeoutMs,
-      nvidiaModel: process.env.REVISION_NVIDIA_MODEL || DEFAULT_NVIDIA_MODEL,
+      fastFallbackTimeoutMs: Math.min(18_000, timeoutMs),
+      nvidiaModel: getNvidiaTextModel(profile),
       timeoutMessage: REVISION_TIMEOUT_MESSAGE,
       interactiveTimeoutMs: timeoutMs,
     };
   }
 
-  const timeoutMs = getProviderTimeoutMs();
-  const interactiveTimeoutMs = configuredTimeout(process.env.AI_INTERACTIVE_TIMEOUT_MS, DEFAULT_INTERACTIVE_TIMEOUT_MS);
-  // Budget allocation for interactive: Gemini fast attempt ~8-10s, NVIDIA fallback ~15-20s, total ~25-30s
-  const geminiFastTimeoutMs = Math.min(10000, Math.floor(interactiveTimeoutMs * 0.4));
+  const timeoutMs = Math.min(getProviderTimeoutMs(), DEFAULT_INTERACTIVE_TIMEOUT_MS);
+  const interactiveTimeoutMs = Math.min(
+    configuredTimeout(process.env.AI_INTERACTIVE_TIMEOUT_MS, DEFAULT_INTERACTIVE_TIMEOUT_MS),
+    DEFAULT_INTERACTIVE_TIMEOUT_MS,
+  );
   return {
     profile,
     provider: normalizeProvider(process.env.AI_PROVIDER),
     timeoutMs,
-    fastFallbackTimeoutMs: geminiFastTimeoutMs,
-    nvidiaModel: process.env.NVIDIA_MODEL || DEFAULT_NVIDIA_MODEL,
+    fastFallbackTimeoutMs: Math.min(6_000, interactiveTimeoutMs),
+    nvidiaModel: getNvidiaTextModel(profile),
     timeoutMessage: TIMEOUT_MESSAGE,
     interactiveTimeoutMs,
   };
@@ -388,7 +408,7 @@ async function askNvidia(
   const callerTimeoutMs = validTimeout(generationConfig.timeoutMs);
   const timeoutMs = callerTimeoutMs ?? configuredTimeout(process.env.NVIDIA_TIMEOUT_MS, DEFAULT_NVIDIA_TIMEOUT_MS);
   const startedAt = Date.now();
-  const maxRetries = 3;
+  const maxRetries = 0;
   let retryCount = 0;
 
   devLog("provider started", {
@@ -662,30 +682,15 @@ async function generateAITextForProfile(
   const isInteractive = profile === "default";
   const interactiveTimeoutMs = runtime.interactiveTimeoutMs ?? DEFAULT_INTERACTIVE_TIMEOUT_MS;
 
-  const providerChainTimeoutMs = validTimeout(generationConfig?.timeoutMs)
-    ?? (isInteractive ? interactiveTimeoutMs : configuredTimeout(process.env.NVIDIA_TIMEOUT_MS, DEFAULT_NVIDIA_TIMEOUT_MS));
   const callTimeoutMs = boundedTimeout(generationConfig?.timeoutMs, isInteractive ? interactiveTimeoutMs : runtime.timeoutMs);
+  const providerChainTimeoutMs = callTimeoutMs;
   const callRuntime: ProviderRuntimeConfig = {
     ...runtime,
     timeoutMs: callTimeoutMs,
-    fastFallbackTimeoutMs: Math.min(runtime.fastFallbackTimeoutMs, callTimeoutMs),
+    fastFallbackTimeoutMs: Math.min(runtime.fastFallbackTimeoutMs, callTimeoutMs, validTimeout(generationConfig?.primaryTimeoutMs) ?? Infinity),
     interactiveTimeoutMs,
   };
 
-  console.log("[REVISION-TRACE] generateAITextForProfile START", {
-    profile,
-    isInteractive,
-    generationConfigTimeoutMs: generationConfig?.timeoutMs,
-    providerChainTimeoutMs,
-    callTimeoutMs,
-    callRuntimeTimeoutMs: callRuntime.timeoutMs,
-    callRuntimeFastFallbackTimeoutMs: callRuntime.fastFallbackTimeoutMs,
-    interactiveTimeoutMs,
-    runtimeTimeoutMs: runtime.timeoutMs,
-    runtimeFastFallbackTimeoutMs: runtime.fastFallbackTimeoutMs,
-    envAIProviderTimeoutMs: process.env.AI_PROVIDER_TIMEOUT_MS,
-    envInteractiveTimeoutMs: process.env.AI_INTERACTIVE_TIMEOUT_MS,
-  });
   const geminiModel = process.env.GEMINI_MODEL || "gemini-2.5-flash";
   const nvidiaModel = callRuntime.nvidiaModel;
 
@@ -721,7 +726,11 @@ async function generateAITextForProfile(
       fallbackTriggered: false,
     });
     try {
-      const response = await askNvidia(prompt, providerGenerationConfig, callRuntime);
+      const response = await askNvidia(
+        prompt,
+        { ...providerGenerationConfig, timeoutMs: callRuntime.timeoutMs },
+        callRuntime,
+      );
       nvidiaLatencyMs = Date.now() - nvidiaStartedAt;
       devLog("final provider used", { profile, provider: "nvidia", model: nvidiaModel, fallbackTriggered: false });
       emitTelemetry(generationConfig, {
@@ -931,17 +940,6 @@ async function generateAITextForProfile(
 
   const nvidiaStartedAt = Date.now();
   const elapsedBeforeNvidiaMs = nvidiaStartedAt - requestStartedAt;
-  console.log("[REVISION-TRACE] fallback triggered", {
-    profile,
-    fromProvider: "gemini",
-    toProvider: "nvidia",
-    model: nvidiaModel,
-    geminiSkippedDueToCooldown,
-    elapsedBeforeNvidiaMs,
-    providerChainTimeoutMs,
-    callRuntimeTimeoutMs: callRuntime.timeoutMs,
-    remainingBudgetMs: providerChainTimeoutMs - elapsedBeforeNvidiaMs,
-  });
   devLog("fallback triggered", { profile, fromProvider: "gemini", toProvider: "nvidia", model: nvidiaModel, geminiSkippedDueToCooldown, elapsedBeforeNvidiaMs });
   emitTelemetry(generationConfig, {
     event: "fallback_triggered",
@@ -968,13 +966,6 @@ async function generateAITextForProfile(
   if (remainingBudgetMs < MIN_NVIDIA_BUDGET_MS) {
     nvidiaTimeoutMs = 0;
     abortReason = "insufficient_budget";
-    console.log("[REVISION-TRACE] NVIDIA skipped: remaining budget below minimum", {
-      profile,
-      providerChainTimeoutMs,
-      elapsedBeforeNvidiaMs,
-      remainingBudgetMs,
-      minBudgetMs: MIN_NVIDIA_BUDGET_MS,
-    });
     devLog("NVIDIA skipped: remaining budget below minimum", {
       profile,
       providerChainTimeoutMs,
@@ -983,18 +974,10 @@ async function generateAITextForProfile(
       minBudgetMs: MIN_NVIDIA_BUDGET_MS,
     });
   } else {
-    nvidiaTimeoutMs = remainingBudgetMs;
+    nvidiaTimeoutMs = Math.min(remainingBudgetMs, validTimeout(generationConfig?.fallbackTimeoutMs) ?? Infinity);
     abortReason = null;
   }
 
-  console.log("[REVISION-TRACE] NVIDIA timeout computed", {
-    profile,
-    providerChainTimeoutMs,
-    elapsedBeforeNvidiaMs,
-    computedNvidiaTimeoutMs: nvidiaTimeoutMs,
-    minBudgetMs: MIN_NVIDIA_BUDGET_MS,
-    abortReason,
-  });
   devLog("NVIDIA timeout computed", {
     profile,
     providerChainTimeoutMs,
@@ -1026,23 +1009,12 @@ async function generateAITextForProfile(
 
   try {
     const actualNvidiaTimeoutMs = nvidiaTimeoutMs;
-    console.log("[REVISION-TRACE] calling askNvidia", {
-      profile,
-      actualNvidiaTimeoutMs,
-      providerGenerationConfigTimeoutMs: providerGenerationConfig.timeoutMs,
-      callRuntimeTimeoutMs: callRuntime.timeoutMs,
-    });
     const response = await askNvidia(
       prompt,
       { ...providerGenerationConfig, timeoutMs: nvidiaTimeoutMs },
       callRuntime,
     );
     nvidiaLatencyMs = Date.now() - nvidiaStartedAt;
-    console.log("[REVISION-TRACE] NVIDIA completed", {
-      profile,
-      nvidiaLatencyMs,
-      actualNvidiaTimeoutMs,
-    });
     devLog("final provider used", { profile, provider: "nvidia", model: nvidiaModel, fallbackTriggered: true });
     devLog("NVIDIA timeout enforcement", {
       profile,
@@ -1126,6 +1098,10 @@ export async function generateAITextWithMetadata(prompt: string, generationConfi
 
 export async function generateRevisionAITextWithMetadata(prompt: string, generationConfig?: TextGenerationConfig): Promise<AIProviderResult> {
   return generateAITextForProfile("revision", prompt, generationConfig);
+}
+
+export async function generateQuizAITextWithMetadata(prompt: string, generationConfig?: TextGenerationConfig): Promise<AIProviderResult> {
+  return generateAITextForProfile("quiz", prompt, generationConfig);
 }
 
 export async function generateSummaryAITextWithMetadata(prompt: string, generationConfig?: TextGenerationConfig): Promise<AIProviderResult> {

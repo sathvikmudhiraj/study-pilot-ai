@@ -1,6 +1,7 @@
 "use client";
 
-import type { Conversation, ConversationMessage, ContextMode } from "./conversationTypes";
+import type { Conversation, ConversationMessage, ConversationSearchResult, ContextMode } from "./conversationTypes";
+import type { ConversationStudyState } from "@/shared/studyState";
 import type { SupportedLanguageCode } from "@/shared/languages";
 
 // Thin Typed wrappers around the Phase 1A conversation REST endpoints. These
@@ -15,11 +16,11 @@ import type { SupportedLanguageCode } from "@/shared/languages";
 //    layer may compose them as needed.
 
 export type ListResult =
-  | { ok: true; conversations: Conversation[] }
+  | { ok: true; conversations: Conversation[]; nextCursor: string | null; hasMore: boolean }
   | { ok: false; status: number; message: string };
 
-export async function listConversations(query?: string): Promise<ListResult> {
-  const url = query ? `/api/conversations?q=${encodeURIComponent(query)}` : "/api/conversations";
+export async function listConversations(cursor?: string | null): Promise<ListResult> {
+  const url = cursor ? `/api/conversations?cursor=${encodeURIComponent(cursor)}` : "/api/conversations";
   let res: Response;
   try {
     res = await fetch(url, { cache: "no-store", credentials: "same-origin" });
@@ -32,8 +33,26 @@ export async function listConversations(query?: string): Promise<ListResult> {
     return { ok: false, status: res.status, message };
   }
 
-  const data = (await res.json()) as { conversations?: Conversation[] };
-  return { ok: true, conversations: data.conversations ?? [] };
+  const data = (await res.json()) as { conversations?: Conversation[]; next_cursor?: string | null; has_more?: boolean };
+  return { ok: true, conversations: data.conversations ?? [], nextCursor: data.next_cursor ?? null, hasMore: Boolean(data.has_more) };
+}
+
+export type SearchResult =
+  | { ok: true; results: ConversationSearchResult[] }
+  | { ok: false; status: number; message: string };
+
+export async function searchConversations(query: string, signal?: AbortSignal): Promise<SearchResult> {
+  try {
+    const res = await fetch(`/api/conversations/search?q=${encodeURIComponent(query)}`, {
+      cache: "no-store", credentials: "same-origin", signal,
+    });
+    if (!res.ok) return { ok: false, status: res.status, message: await safeError(res) };
+    const data = await res.json() as { results?: ConversationSearchResult[] };
+    return { ok: true, results: data.results ?? [] };
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw error;
+    return { ok: false, status: 0, message: "Network error. Check your connection and try again." };
+  }
 }
 
 export type CreateResult =
@@ -46,6 +65,7 @@ export async function createConversation(payload: {
   activeFileIds?: string[];
   activeNoteIds?: string[];
   language?: SupportedLanguageCode;
+  studyState?: ConversationStudyState;
 }): Promise<CreateResult> {
   let res: Response;
   try {
@@ -60,6 +80,7 @@ export async function createConversation(payload: {
         active_file_ids: payload.activeFileIds ?? [],
         active_note_ids: payload.activeNoteIds ?? [],
         language_code: payload.language,
+        study_state: payload.studyState,
       }),
     });
   } catch {
@@ -95,17 +116,18 @@ export async function getConversation(id: string): Promise<GetResult> {
 }
 
 export type MessagesResult =
-  | { ok: true; messages: ConversationMessage[] }
+  | { ok: true; messages: ConversationMessage[]; nextCursor: string | null; hasMore: boolean }
   | { ok: false; status: number; message: string };
 
 // Fetch the full chronological message list for a conversation. The API is
 // paginated, but for Phase 1B only the first (most recent 100) page is
 // hydrated up-front into the chat — that keeps the UI linear and well under
 // the response-size guard while remaining simple to extend later.
-export async function getMessages(id: string): Promise<MessagesResult> {
+export async function getMessages(id: string, cursor?: string | null): Promise<MessagesResult> {
   let res: Response;
   try {
-    res = await fetch(`/api/conversations/${encodeURIComponent(id)}/messages?limit=100&direction=asc`, {
+    const cursorQuery = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
+    res = await fetch(`/api/conversations/${encodeURIComponent(id)}/messages?limit=60&direction=desc${cursorQuery}`, {
       cache: "no-store",
       credentials: "same-origin",
     });
@@ -117,8 +139,35 @@ export async function getMessages(id: string): Promise<MessagesResult> {
     return { ok: false, status: res.status, message: await safeError(res) };
   }
 
-  const data = (await res.json()) as { messages?: ConversationMessage[] };
-  return { ok: true, messages: data.messages ?? [] };
+  const data = (await res.json()) as { messages?: ConversationMessage[]; next_cursor?: string | null; has_more?: boolean };
+  return { ok: true, messages: data.messages ?? [], nextCursor: data.next_cursor ?? null, hasMore: Boolean(data.has_more) };
+}
+
+export type CreateMessageResult =
+  | { ok: true; message: ConversationMessage }
+  | { ok: false; status: number; message: string };
+
+export async function createConversationMessage(
+  id: string,
+  payload: { question: string; answer: Record<string, unknown>; relatedFileIds?: string[]; relatedNoteIds?: string[] },
+): Promise<CreateMessageResult> {
+  try {
+    const res = await fetch(`/api/conversations/${encodeURIComponent(id)}/messages`, {
+      method: "POST", credentials: "same-origin", cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question: payload.question,
+        answer: payload.answer,
+        related_file_ids: payload.relatedFileIds ?? [],
+        related_note_ids: payload.relatedNoteIds ?? [],
+      }),
+    });
+    if (!res.ok) return { ok: false, status: res.status, message: await safeError(res) };
+    const data = await res.json() as { message: ConversationMessage };
+    return { ok: true, message: data.message };
+  } catch {
+    return { ok: false, status: 0, message: "Network error. Check your connection and try again." };
+  }
 }
 
 export type PatchResult =
@@ -136,6 +185,7 @@ export async function patchConversation(
     activeFileIds?: string[];
     activeNoteIds?: string[];
     language?: SupportedLanguageCode;
+    studyState?: ConversationStudyState;
   },
 ): Promise<PatchResult> {
   const body: Record<string, unknown> = {};
@@ -145,6 +195,7 @@ export async function patchConversation(
   if ("activeFileIds" in patch) body.active_file_ids = patch.activeFileIds;
   if ("activeNoteIds" in patch) body.active_note_ids = patch.activeNoteIds;
   if ("language" in patch) body.language_code = patch.language;
+  if ("studyState" in patch) body.study_state = patch.studyState;
 
   let res: Response;
   try {
@@ -165,6 +216,26 @@ export async function patchConversation(
 
   const data = (await res.json()) as { conversation: Conversation };
   return { ok: true, conversation: data.conversation };
+}
+
+type DraftRecord = { id: string; draft_text: string; draft_version: number };
+export type DraftResult =
+  | { ok: true; draft: DraftRecord }
+  | { ok: false; status: number; message: string; draft?: DraftRecord };
+
+export async function saveConversationDraft(id: string, draft: string, version: number): Promise<DraftResult> {
+  try {
+    const res = await fetch(`/api/conversations/${encodeURIComponent(id)}/draft`, {
+      method: "PATCH", credentials: "same-origin", cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ draft, version }),
+    });
+    const data = await res.json().catch(() => ({})) as { error?: string; draft?: DraftRecord };
+    if (!res.ok) return { ok: false, status: res.status, message: data.error ?? "Could not save draft.", ...(data.draft ? { draft: data.draft } : {}) };
+    return { ok: true, draft: data.draft! };
+  } catch {
+    return { ok: false, status: 0, message: "Network error. Check your connection and try again." };
+  }
 }
 
 export type DeleteResult =

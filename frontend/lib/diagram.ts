@@ -30,6 +30,7 @@ export type DiagramRequest = {
 };
 
 export type DiagramResult = {
+  id?: string;
   title: string;
   diagram_type: DiagramType;
   source_type: DiagramSourceType;
@@ -132,6 +133,7 @@ function normalizeDiagramResult(value: unknown): DiagramResult | null {
   const sourceType = record.source_type;
   const generatedAtValue = limitedText(record.generated_at, 80);
   const generatedAtDate = new Date(generatedAtValue);
+  const id = limitedText(root?.diagramId ?? record.id, 128);
 
   if (
     !title ||
@@ -146,6 +148,7 @@ function normalizeDiagramResult(value: unknown): DiagramResult | null {
   }
 
   return {
+    ...(id ? { id } : {}),
     title,
     diagram_type: diagramType,
     source_type: sourceType,

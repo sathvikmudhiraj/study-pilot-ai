@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { isPlaceholderSummary } from "../../../shared/summarySanitizer";
 
 // `server-only` is a Next.js-only side-effect import that throws when used in
 // a client bundle. Vitest loads source as plain TS, so we map it to a no-op
@@ -17,6 +18,15 @@ vi.mock("../aiProvider", () => ({
     if (mockGenerator) return mockGenerator(prompt);
     return Promise.resolve("{}");
   }),
+  generateSummaryAITextWithMetadata: vi.fn(async (prompt: string, config?: Record<string, unknown>) => {
+    observedGenerationConfigs.push(config);
+    const text = mockGenerator ? await mockGenerator(prompt) : "{}";
+    return { text, provider: "gemini", model: "gemini-2.5-flash", responseMode: "ai", fallbackUsed: false, totalLatencyMs: 1 };
+  }),
+  getAIProviderRuntimeInfo: vi.fn(() => ({
+    configuredProvider: "auto", primaryProvider: "gemini", primaryModel: "gemini-2.5-flash",
+    fallbackProvider: "nvidia", fallbackModel: "test-nvidia-model",
+  })),
   isAiBusyError: vi.fn((e: unknown) => e instanceof Error && /busy/.test(e.message)),
   isAiQuotaError: vi.fn((e: unknown) => e instanceof Error && /quota/.test(e.message)),
   isAiTimeoutError: vi.fn((e: unknown) => e instanceof Error && /timeout/.test(e.message)),
@@ -163,6 +173,70 @@ afterEach(() => {
 });
 
 describe("summarizeStudyText - resilient chunk processing", () => {
+  it("accepts canonical summary fields and preserves every canonical section", async () => {
+    mockGenerator = async (prompt: string) => {
+      expect(prompt).toContain('"examQuestions"');
+      return JSON.stringify({
+        summary: "Routing sends packets between networks.",
+        keyPoints: ["Routers use routing tables."],
+        importantConcepts: ["Routing table"],
+        studyAreas: ["Routing"],
+        examQuestions: ["How does a routing table guide packet forwarding?"],
+        suggestedTags: ["networking"],
+        suggestedNextStep: "Practice a routing-table example.",
+        sources: ["Page 1"],
+      });
+    };
+
+    const summary = await summarizeStudyText(
+      "Routing sends packets between networks. Routers use routing tables to select the next hop.",
+      { sourceType: "file", sourceName: "networking-notes.pdf" },
+    );
+
+    expect(summary.summary).toContain("Routing sends packets");
+    expect(summary.keyPoints).toContain("Routers use routing tables.");
+    expect(summary.studyAreas).toContain("Routing");
+    expect(summary.examQuestions).toContain("How does a routing table guide packet forwarding?");
+    expect(summary.suggestedTags).toContain("networking");
+    expect(summary.suggestedNextStep).toContain("routing-table example");
+    expect(summary.source_citations.length).toBeGreaterThan(0);
+  });
+
+  it("recovers complete canonical arrays from a truncated chunk response without leaking JSON keys", async () => {
+    mockGenerator = async (prompt: string) => {
+      if (isChunkMapPrompt(prompt)) {
+        return '{"study_areas":["Cryptography"],"important_points":["Cryptography protects information."],"important_concepts":["Cipher"]';
+      }
+      throw new Error("timeout during synthesis");
+    };
+
+    const summary = await summarizeStudyText(CNS_SOURCE, { sourceType: "file", sourceName: "CNSmodule-1.pdf" });
+    const visible = [summary.short_summary, ...summary.covered_topics, ...summary.key_points].join("\n");
+
+    expect(summary.covered_topics).toContain("Cryptography");
+    expect(visible).not.toMatch(/study_areas|important_points|important_concepts/i);
+    expect(summary.suggested_title).not.toBe("Study summary");
+    expect(isPlaceholderSummary(summary)).toBe(false);
+  });
+
+  it("keeps the extractive last-resort summary meaningful when every provider call is empty", async () => {
+    mockGenerator = async () => "";
+
+    const source = (
+      "SQL set operators combine query results. UNION removes duplicate rows. "
+      + "UNION ALL preserves duplicates. INTERSECT returns common rows. Database joins connect related tables. "
+    ).repeat(80);
+    const summary = await summarizeStudyText(
+      source,
+      { sourceType: "file", sourceName: "Module-3.docx" },
+    );
+
+    expect(summary.suggested_title).not.toMatch(/^study summary$/i);
+    expect(summary.covered_topics.length).toBeGreaterThan(0);
+    expect(isPlaceholderSummary(summary)).toBe(false);
+  });
+
+
   it("bounds chunk-map, synthesis, and repair provider calls", async () => {
     mockGenerator = (prompt: string) => {
       if (isChunkMapPrompt(prompt)) {
@@ -175,7 +249,7 @@ describe("summarizeStudyText - resilient chunk processing", () => {
 
     await summarizeStudyText(CNS_SOURCE, { sourceType: "file", sourceName: "CNSmodule-1.pdf" });
 
-    expect(observedGenerationConfigs.every((config) => config?.timeoutMs === 24_000)).toBe(true);
+    expect(observedGenerationConfigs.every((config) => config?.timeoutMs === 30_000)).toBe(true);
   });
 
   it("keeps the first valid synthesis when the bounded coverage retry times out", async () => {

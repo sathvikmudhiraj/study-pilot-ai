@@ -9,6 +9,7 @@ import { getAiUserMessage, isAiBusyError, isAiQuotaError } from "@/backend/lib/a
 import { buildLearnerProfile } from "@/backend/lib/learnerProfile";
 import { isSupportedLanguageCode, type SupportedLanguageCode } from "@/shared/languages";
 import { enforceAiRateLimit } from "@/backend/lib/rateLimit";
+import { readLocalDocxParagraphs } from "@/backend/lib/localStudyFallback";
 
 export const runtime = "nodejs";
 
@@ -232,11 +233,13 @@ type RevisionSourceFile = {
   content_type: string | null;
   extracted_text: string | null;
   processing_status?: string | null;
+  storage_path?: string | null;
 };
 
 type RevisionRequestBody = {
   language?: SupportedLanguageCode;
   fileId?: string;
+  force?: boolean;
 };
 
 function cleanUuid(value: unknown) {
@@ -257,7 +260,7 @@ async function findOwnedRevisionFile(
   if (!supabase) return null;
   const result = await supabase
     .from("files")
-    .select("id, file_name, content_type, extracted_text, processing_status")
+    .select("id, file_name, content_type, extracted_text, processing_status, storage_path")
     .eq("id", fileId)
     .eq("user_id", userId)
     .maybeSingle();
@@ -434,7 +437,7 @@ async function handlePost(request: Request) {
     }
 
     const existing = await getExistingRevisionPlan(supabase, user.id, language, fileId);
-    if (existing) {
+    if (existing && body.force !== true) {
       clearTimeout(timeoutId);
       return NextResponse.json({ plan: existing, sourceFile, reused: true });
     }
@@ -460,7 +463,18 @@ async function handlePost(request: Request) {
     }
 
     // Pass the AbortSignal to the AI generation for proper timeout propagation
-    const plan = await generateRevisionPlan(ctx, language, controller.signal);
+    const plan = await generateRevisionPlan(ctx, language, controller.signal, async () => {
+      if (!sourceFile?.storage_path || !sourceFile.file_name.toLowerCase().endsWith(".docx")) return ctx;
+      const download = await supabase.storage.from("study-files").download(sourceFile.storage_path);
+      if (download.error) return ctx;
+      try {
+        const localText = await readLocalDocxParagraphs(Buffer.from(await download.data.arrayBuffer()));
+        return localText ? { ...ctx, files: ctx.files.map((file) => file.file_name === sourceFile.file_name ? { ...file, extracted_text: localText } : file) } : ctx;
+      } catch (error) {
+        devLog("local revision source read failed", { fileId: sourceFile.id, error: String(error) });
+        return ctx;
+      }
+    });
 
     clearTimeout(timeoutId);
 

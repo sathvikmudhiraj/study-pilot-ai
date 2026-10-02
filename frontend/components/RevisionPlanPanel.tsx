@@ -42,6 +42,8 @@ type RevisionPlan = {
   ends_on: string | null;
   created_at?: string;
   language_code?: SupportedLanguageCode;
+  completion_status?: "pending" | "in_progress" | "completed";
+  completed_at?: string | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -189,20 +191,41 @@ export function RevisionPlanPanel({
   initialPlan,
   preferredLanguage,
   sourceFile = null,
+  autoGenerate = false,
 }: {
   initialPlan: RevisionPlan | null;
   preferredLanguage: SupportedLanguageCode;
   sourceFile?: { id: string; file_name: string | null } | null;
+  autoGenerate?: boolean;
 }) {
   const [plan, setPlan] = useState<RevisionPlan | null>(() => normalizePlan(initialPlan));
   const [loading, setLoading] = useState(Boolean(sourceFile && !initialPlan));
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [completing, setCompleting] = useState(false);
   const [language, setLanguage] = useState(preferredLanguage);
   const autoRequestKeyRef = useRef("");
   const abortControllerRef = useRef<AbortController | null>(null);
   const sourceFileName = sourceFile?.file_name?.trim() || "selected file";
   const sourceFileId = sourceFile?.id ?? null;
+
+  async function completePlan() {
+    if (!plan?.id || plan.completion_status === "completed") return;
+    setCompleting(true);
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(`/api/revision/${encodeURIComponent(plan.id)}/complete`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Could not complete this revision plan.");
+      setPlan(normalizePlan(data.plan));
+      setNotice("Revision completed. Your learning progress has been updated.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not complete this revision plan.");
+    } finally {
+      setCompleting(false);
+    }
+  }
 
   async function switchLanguage(nextLanguage: SupportedLanguageCode) {
     setLanguage(nextLanguage);
@@ -235,7 +258,7 @@ export function RevisionPlanPanel({
     }
   }
 
-  const generate = useCallback(async () => {
+  const generate = useCallback(async (force = false) => {
     setLoading(true);
     setError("");
     setNotice("");
@@ -249,7 +272,7 @@ export function RevisionPlanPanel({
       const response = await fetch("/api/revision", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ language, ...(sourceFileId ? { fileId: sourceFileId } : {}) }),
+        body: JSON.stringify({ language, force, ...(sourceFileId ? { fileId: sourceFileId } : {}) }),
         signal: controller.signal,
       });
       
@@ -286,12 +309,17 @@ export function RevisionPlanPanel({
   }, [language, plan, sourceFileId, sourceFileName]);
 
   useEffect(() => {
-    if (!sourceFileId || plan || error) return;
+    if (!sourceFileId || error || (!autoGenerate && plan)) return;
     const requestKey = `${sourceFileId}:${language}`;
     if (autoRequestKeyRef.current === requestKey) return;
     autoRequestKeyRef.current = requestKey;
-    void generate();
-  }, [sourceFileId, language, plan, error, generate]);
+    if (autoGenerate) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("autoGenerate");
+      window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    }
+    void generate(autoGenerate);
+  }, [sourceFileId, language, plan, error, generate, autoGenerate]);
 
   return (
     <aside className="grid min-w-0 gap-5">
@@ -310,16 +338,26 @@ export function RevisionPlanPanel({
             <p className="text-xs text-slate-500">Generated {new Date(plan.created_at).toLocaleDateString()}</p>
           ) : null}
         </div>
-        <div className="grid w-full gap-2 sm:w-auto sm:grid-cols-[180px_auto] sm:items-end">
+        <div className="grid w-full gap-2 sm:w-auto sm:grid-cols-[180px_auto_auto] sm:items-end">
           <LanguageSelector value={language} onChange={(value) => void switchLanguage(value)} compact />
           <button
             type="button"
-            onClick={generate}
+            onClick={() => void generate(Boolean(plan))}
             disabled={loading}
             className="h-10 w-full rounded-md bg-emerald-400 px-4 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
           >
             {loading ? "Generating..." : plan ? "Regenerate Plan" : "Generate Plan"}
           </button>
+          {plan?.id ? (
+            <button
+              type="button"
+              onClick={() => void completePlan()}
+              disabled={completing || plan.completion_status === "completed"}
+              className="h-10 w-full rounded-md border border-cyan-300/30 bg-cyan-300/10 px-4 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-300/15 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
+            >
+              {plan.completion_status === "completed" ? "Revision Completed" : completing ? "Saving..." : "Mark Complete"}
+            </button>
+          ) : null}
         </div>
       </div>
 
@@ -332,7 +370,7 @@ export function RevisionPlanPanel({
               type="button"
               onClick={() => {
                 autoRequestKeyRef.current = "";
-                void generate();
+                void generate(true);
               }}
               className="mt-3 rounded-md border border-red-200/30 bg-red-200/10 px-3 py-1.5 text-xs font-semibold text-red-100 hover:bg-red-200/15"
             >

@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useId, useRef, useState } from "react";
-import type { Conversation } from "@/frontend/lib/conversationTypes";
+import type { Conversation, ConversationSearchResult } from "@/frontend/lib/conversationTypes";
+import { searchConversations } from "@/frontend/lib/conversations";
 import { formatConversationTimestamp } from "@/frontend/lib/chatPersistence";
 import {
   IconChat,
@@ -44,13 +45,14 @@ type Props = {
   onTogglePin: (id: string, pinned: boolean) => void | Promise<void>;
   onDelete: (id: string) => void | Promise<void>;
   onOpenLegacy: () => void;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onLoadMore: () => void;
 
   /** Mobile drawer open state (drawer is rendered separately by parent). */
   mobileOpen: boolean;
   onCloseMobile: () => void;
 };
-
-const RECENT_LIMIT = 40;
 
 export function ConversationList({
   conversations,
@@ -66,6 +68,9 @@ export function ConversationList({
   onTogglePin,
   onDelete,
   onOpenLegacy,
+  hasMore,
+  loadingMore,
+  onLoadMore,
   mobileOpen,
   onCloseMobile,
 }: Props) {
@@ -74,6 +79,9 @@ export function ConversationList({
   // to filter when the query is set, but we also keep a quick substring here
   // so typing does not flicker.
   const [search, setSearch] = useState("");
+  const [searchResults, setSearchResults] = useState<ConversationSearchResult[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState("");
   const [dateFilter, setDateFilter] = useState<
     "all" | "today" | "yesterday" | "week"
   >("all");
@@ -130,13 +138,33 @@ export function ConversationList({
     }
   }, [renamingId]);
 
+  useEffect(() => {
+    const query = search.trim();
+    if (query.length < 2) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setSearching(true);
+      void searchConversations(query, controller.signal).then((result) => {
+        if (result.ok) {
+          setSearchResults(result.results);
+          setSearchError("");
+        } else {
+          setSearchResults([]);
+          setSearchError(result.message);
+        }
+        setSearching(false);
+      }).catch((caught) => {
+        if (!(caught instanceof Error) || caught.name !== "AbortError") setSearchError("Search failed.");
+        setSearching(false);
+      });
+    }, 250);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [search]);
+
   const filtered = conversations.filter((c) => {
-    const titleMatches = search.trim()
-      ? (c.title ?? "Untitled chat")
-          .toLowerCase()
-          .includes(search.trim().toLowerCase())
-      : true;
-    if (!titleMatches) return false;
     if (dateFilter === "all") return true;
 
     const updated = new Date(c.updated_at || c.created_at);
@@ -159,7 +187,7 @@ export function ConversationList({
   });
 
   const pinned = filtered.filter((c) => c.pinned);
-  const recent = filtered.filter((c) => !c.pinned).slice(0, RECENT_LIMIT);
+  const recent = filtered.filter((c) => !c.pinned);
 
   function startRename(c: Conversation) {
     setMenuId(null);
@@ -262,7 +290,15 @@ export function ConversationList({
             <input
               type="search"
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => {
+                const value = e.target.value;
+                setSearch(value);
+                if (value.trim().length < 2) {
+                  setSearchResults(null);
+                  setSearching(false);
+                  setSearchError("");
+                }
+              }}
               placeholder="Search chats"
               aria-label="Search conversations"
               className="h-10 w-full rounded-lg border border-white/10 bg-white/[0.04] pl-8 pr-3 text-sm text-slate-100 outline-none transition focus:border-emerald-300/40 focus-visible:ring-2 focus-visible:ring-emerald-400/40 placeholder:text-slate-500"
@@ -293,9 +329,40 @@ export function ConversationList({
 
         {/* Body: loading / error / empty / lists */}
         <div className="relative min-h-0 flex-1">
-          <div className="chat-history-scroll h-full overflow-y-auto pr-3">
+          <div
+            className="chat-history-scroll h-full overflow-y-auto pr-3"
+            onScroll={(event) => {
+              const target = event.currentTarget;
+              if (target.scrollHeight - target.scrollTop - target.clientHeight < 120 && hasMore && !loadingMore && !searchResults) {
+                onLoadMore();
+              }
+            }}
+          >
             {loading ? (
               <LoadingState />
+            ) : searching ? (
+              <div className="px-3 py-5 text-sm text-slate-400">Searching all conversations...</div>
+            ) : searchError ? (
+              <ErrorState message={searchError} />
+            ) : searchResults ? (
+              searchResults.length ? (
+                <ul className="grid gap-1.5 py-1.5">
+                  {searchResults.map((result) => (
+                    <li key={result.conversation_id}>
+                      <button
+                        type="button"
+                        onClick={() => onSelect(result.conversation_id)}
+                        className="w-full rounded-lg border border-white/8 bg-white/[0.03] px-3 py-2 text-left hover:border-emerald-300/25 hover:bg-white/[0.06]"
+                      >
+                        <span className="block truncate text-sm font-semibold text-slate-200">{result.title || "Untitled chat"}</span>
+                        <span className="mt-1 block line-clamp-2 text-xs leading-5 text-slate-500">{result.snippet}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-6 text-center text-sm text-slate-400">No matches in your conversation history.</div>
+              )
             ) : error ? (
               <ErrorState message={error} />
             ) : filtered.length === 0 && !hasLegacy && !search.trim() ? (
@@ -348,6 +415,16 @@ export function ConversationList({
                       </span>
                     </button>
                   </section>
+                ) : null}
+                {hasMore ? (
+                  <button
+                    type="button"
+                    onClick={onLoadMore}
+                    disabled={loadingMore}
+                    className="h-9 w-full rounded-md border border-white/10 bg-white/[0.03] text-xs font-semibold text-slate-300 hover:bg-white/[0.06] disabled:opacity-60"
+                  >
+                    {loadingMore ? "Loading older chats..." : "Load older chats"}
+                  </button>
                 ) : null}
               </div>
             )}

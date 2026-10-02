@@ -18,6 +18,8 @@ export async function generateLocalizedText(
   const localizedPrompt = `${languageInstruction(normalizedLanguage)}\n\n${prompt}`;
   const response = await generate(localizedPrompt);
 
+  if (!response.trim()) return response;
+
   if (responseUsesExpectedScript(response, normalizedLanguage)) return response;
 
   if (process.env.NODE_ENV !== "production") {

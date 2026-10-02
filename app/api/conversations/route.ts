@@ -3,6 +3,7 @@ import { requireUser } from "@/backend/lib/auth";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { withRequestObservability } from "@/backend/lib/observability";
 import { isSupportedLanguageCode } from "@/shared/languages";
+import { sanitizeStudyStatePatch } from "@/shared/studyState";
 
 export const runtime = "nodejs";
 
@@ -14,15 +15,15 @@ const ALLOWED_CONTEXT_MODES = ["general", "file", "web", "research", "image"] as
 type ContextMode = (typeof ALLOWED_CONTEXT_MODES)[number];
 
 const MAX_TITLE_LENGTH = 200;
-const MAX_SEARCH_LENGTH = 200;
-const MAX_CONVERSATIONS_PER_PAGE = 50;
+const DEFAULT_PAGE_SIZE = 30;
+const MAX_PAGE_SIZE = 50;
 const MAX_FILE_IDS = 8;
 const MAX_NOTE_IDS = 8;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Columns returned for list responses (no heavy data)
 const CONVERSATION_LIST_SELECT =
-  "id, title, pinned, context_mode, active_file_ids, active_note_ids, language_code, created_at, updated_at";
+  "id, title, pinned, context_mode, active_file_ids, active_note_ids, language_code, draft_text, draft_version, study_state, created_at, updated_at";
 const LEGACY_CONVERSATION_LIST_SELECT = "id, title, created_at";
 
 // ---------------------------------------------------------------------------
@@ -48,6 +49,9 @@ function isMissingOptionalConversationColumn(error: unknown) {
       lower.includes("context_mode") ||
       lower.includes("active_file_ids") ||
       lower.includes("active_note_ids") ||
+      lower.includes("draft_text") ||
+      lower.includes("draft_version") ||
+      lower.includes("study_state") ||
       lower.includes("updated_at")
     )
   );
@@ -61,6 +65,9 @@ function withDefaultLanguage<T extends Record<string, unknown>>(rows: T[] | null
     active_file_ids: row.active_file_ids ?? [],
     active_note_ids: row.active_note_ids ?? [],
     language_code: row.language_code ?? "en",
+    draft_text: row.draft_text ?? "",
+    draft_version: row.draft_version ?? 0,
+    study_state: row.study_state ?? {},
     updated_at: row.updated_at ?? row.created_at,
   }));
 }
@@ -96,8 +103,7 @@ function sanitizeTitle(value: unknown): string | null {
 
 // ---------------------------------------------------------------------------
 // GET /api/conversations
-// Returns the current user's conversations, pinned first then by updated_at.
-// Optional ?q= for a safe title-based search.
+// Returns all pinned conversations plus one stable cursor page of unpinned rows.
 // ---------------------------------------------------------------------------
 
 async function handleGet(request: Request) {
@@ -108,43 +114,62 @@ async function handleGet(request: Request) {
   if (!supabase) return apiError("Supabase is not configured.", 500);
 
   const { searchParams } = new URL(request.url);
-  const rawSearch = searchParams.get("q") ?? "";
-  const search = rawSearch.trim().slice(0, MAX_SEARCH_LENGTH);
+  const requestedLimit = Number(searchParams.get("limit") ?? DEFAULT_PAGE_SIZE);
+  const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, Number.isFinite(requestedLimit) ? requestedLimit : DEFAULT_PAGE_SIZE));
+  const rawCursor = searchParams.get("cursor") ?? "";
+  let cursor: { updatedAt: string; id: string } | null = null;
+  if (rawCursor) {
+    const [updatedAt, id] = rawCursor.split("|");
+    if (!Number.isFinite(Date.parse(updatedAt)) || !isUuid(id)) return apiError("Invalid conversation cursor.", 400);
+    cursor = { updatedAt: new Date(Date.parse(updatedAt)).toISOString(), id };
+  }
 
   try {
+    const pinnedResult = await supabase
+      .from("conversations")
+      .select(CONVERSATION_LIST_SELECT)
+      .eq("user_id", user.id)
+      .eq("pinned", true)
+      .order("updated_at", { ascending: false })
+      .order("id", { ascending: false });
+
     let query = supabase
       .from("conversations")
       .select(CONVERSATION_LIST_SELECT)
       .eq("user_id", user.id)
-      .order("pinned", { ascending: false })
+      .eq("pinned", false)
       .order("updated_at", { ascending: false })
-      .limit(MAX_CONVERSATIONS_PER_PAGE);
-
-    if (search) {
-      // ilike is safe server-side (Supabase parameterises it)
-      query = query.ilike("title", `%${search}%`);
+      .order("id", { ascending: false })
+      .limit(limit + 1);
+    if (cursor) {
+      query = query.or(`updated_at.lt.${cursor.updatedAt},and(updated_at.eq.${cursor.updatedAt},id.lt.${cursor.id})`);
     }
 
     const { data, error } = await query;
-    if (error && isMissingOptionalConversationColumn(error)) {
-      let legacyQuery = supabase
+    const pinnedError = pinnedResult.error;
+    if ((error && isMissingOptionalConversationColumn(error)) || (pinnedError && isMissingOptionalConversationColumn(pinnedError))) {
+      const legacyQuery = supabase
         .from("conversations")
         .select(LEGACY_CONVERSATION_LIST_SELECT)
         .eq("user_id", user.id)
         .order("created_at", { ascending: false })
-        .limit(MAX_CONVERSATIONS_PER_PAGE);
-
-      if (search) {
-        legacyQuery = legacyQuery.ilike("title", `%${search}%`);
-      }
+        .limit(limit);
 
       const legacyResult = await legacyQuery;
       if (legacyResult.error) throw legacyResult.error;
-      return NextResponse.json({ conversations: withDefaultLanguage(legacyResult.data) });
+      return NextResponse.json({ conversations: withDefaultLanguage(legacyResult.data), next_cursor: null, has_more: false });
     }
+    if (pinnedError) throw pinnedError;
     if (error) throw error;
 
-    return NextResponse.json({ conversations: data ?? [] });
+    const page = (data ?? []).slice(0, limit);
+    const hasMore = (data ?? []).length > limit;
+    const boundary = page[page.length - 1];
+    return NextResponse.json({
+      conversations: [...(pinnedResult.data ?? []), ...page],
+      next_cursor: hasMore && boundary ? `${boundary.updated_at}|${boundary.id}` : null,
+      has_more: hasMore,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Could not load conversations.";
     return apiError(message, 500);
@@ -181,6 +206,10 @@ async function handlePost(request: Request) {
     return apiError("Choose a supported language.", 400);
   }
   const language = isSupportedLanguageCode(body.language_code) ? body.language_code : user.preferredLanguage;
+  const requestedStudyState = body.study_state === undefined && body.studyState === undefined
+    ? {}
+    : sanitizeStudyStatePatch(body.study_state ?? body.studyState);
+  if (requestedStudyState === null) return apiError("study_state is invalid.", 400);
 
   // Validate fileIds: each must be a UUID owned by this user.
   const requestedFileIds = cleanIds(body.active_file_ids ?? body.activeFileIds, MAX_FILE_IDS);
@@ -222,6 +251,7 @@ async function handlePost(request: Request) {
       active_file_ids: verifiedFileIds,
       active_note_ids: verifiedNoteIds,
       language_code: language,
+      study_state: requestedStudyState,
     };
 
     const { data, error } = await supabase

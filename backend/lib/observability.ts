@@ -314,6 +314,8 @@ export type ProviderTelemetryLogEvent = {
   retryCount?: number;
   fallbackTriggered?: boolean;
   errorKind?: string;
+  status?: number;
+  bodyLength?: number;
 };
 
 export function logProviderTelemetry(event: ProviderTelemetryLogEvent): void {
@@ -328,6 +330,8 @@ export function logProviderTelemetry(event: ProviderTelemetryLogEvent): void {
     retryCount: event.retryCount,
     fallbackUsed: event.fallbackTriggered,
     errorCategory: event.errorKind,
+    status: event.status,
+    metadata: event.bodyLength === undefined ? undefined : { bodyLength: event.bodyLength },
   };
 
   if (event.event === "provider_failed") {
@@ -347,6 +351,7 @@ export function logProviderTelemetry(event: ProviderTelemetryLogEvent): void {
     metadata: {
       aiEvent: event.event,
       operation: `ai.${event.event}`,
+      bodyLength: event.bodyLength,
     },
   });
   if (event.event === "provider_failed") {
@@ -371,6 +376,50 @@ export function logProviderTelemetry(event: ProviderTelemetryLogEvent): void {
         // Provider alerting must never affect AI response handling.
       });
   }
+}
+
+export function logStructuredOutputDiagnostic(event: {
+  feature: "summary" | "quiz" | "revision";
+  provider: string;
+  model: string;
+  status?: number;
+  latencyMs?: number;
+  bodyLength: number;
+  parseStage: "initial" | "repair";
+  validationPassed: boolean;
+  failureCategory?: string;
+}): void {
+  const context = requestContext.getStore();
+  if (!context) return;
+  const metadata = {
+    feature: event.feature,
+    parseStage: event.parseStage,
+    bodyLength: event.bodyLength,
+    validationPassed: event.validationPassed,
+  };
+  const fields: Partial<LogContext> = {
+    operation: `ai.${event.feature}.structured_output`,
+    provider: event.provider,
+    model: event.model,
+    status: event.status,
+    durationMs: event.latencyMs,
+    errorCategory: event.failureCategory,
+    metadata,
+  };
+  if (event.validationPassed) context.logger.info("ai.structured_output", fields);
+  else context.logger.warn("ai.structured_output.invalid", fields);
+  persistMonitoringEvent({
+    requestId: context.requestId,
+    eventType: "ai.structured_output",
+    route: context.route,
+    method: context.method,
+    status: event.status,
+    durationMs: event.latencyMs,
+    provider: event.provider,
+    model: event.model,
+    errorCategory: event.failureCategory,
+    metadata,
+  });
 }
 
 export function sanitizeError(error: unknown): { message: string; category: string } {

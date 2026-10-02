@@ -13,6 +13,7 @@ const QUIZ_SOURCE_LIMIT = 100;
 
 type QuizSearchParams = {
   fileId?: string | string[];
+  autoGenerate?: string | string[];
   noteId?: string | string[];
   summaryId?: string | string[];
 };
@@ -109,7 +110,7 @@ export default async function QuizPage({ searchParams }: { searchParams?: Promis
         <div className="mb-6 rounded-xl border border-amber-400/25 bg-amber-400/[0.08] p-5 text-sm leading-6 text-amber-100 animate-fade-in">{error}</div>
       ) : null}
 
-      <QuizWorkspace savedQuizzes={savedQuizzes} sources={sources} initialAnalytics={quizAnalytics} initialSource={initialSource} preferredLanguage={user?.preferredLanguage ?? "en"} />
+      <QuizWorkspace savedQuizzes={savedQuizzes} sources={sources} initialAnalytics={quizAnalytics} initialSource={initialSource} autoGenerate={singleParam(params.autoGenerate) === "1"} preferredLanguage={user?.preferredLanguage ?? "en"} />
     </AppShell>
   );
 }

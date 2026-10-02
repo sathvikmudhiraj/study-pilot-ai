@@ -1,10 +1,11 @@
 // StudyPilot voice command definitions and matching.
+
+import { resolveStudyIntent, stripConversationalPrefix } from "@/shared/studyIntent";
 //
 // Voice commands here are intentionally safe and limited:
 //   - Navigation: open dashboard / files / quiz / revision.
-//   - AI-assisted study helpers (important notes, explain, generate quiz,
-//     revision plan) are turned into a plain-language study question and sent
-//     to the existing StudyPilot chat API.
+//   - Important notes and explanations use the chat API; quiz and revision
+//     commands open their existing file-backed generator workflows.
 //   - Notes commands only prepare an editable preview, or operate on a preview
 //     that is already open. Saving still requires an explicit confirmation.
 //
@@ -53,6 +54,11 @@ export type VoiceCommandOutcome =
   | {
       kind: "navigate";
       href: string;
+      message: string;
+    }
+  | {
+      kind: "study_workflow";
+      workflow: "quiz" | "revision";
       message: string;
     }
   | {
@@ -163,6 +169,8 @@ function webSearchQuery(text: string): string | null {
 function deepResearchQuery(text: string): string | null {
   const spoken = text.normalize("NFKC").trim();
   const patterns = [
+    /^research\s+(.+?)\s+in\s+detail[\s.!?]*$/iu,
+    /^do\s+some\s+deep\s+research\s+(?:on|about|into)\s+(.+?)[\s.!?]*$/iu,
     /^research(?:\s+(.*?))?\s+deeply[\s.!?।]*$/iu,
     /^(?:do\s+)?deep\s+research(?:\s+(?:on|about|into)(?:\s+(.*?))?)?[\s.!?।]*$/iu,
     /^(ee\s+topic)\s+meeda\s+detailed\s+research\s+cheyyi[\s.!?।]*$/iu,
@@ -215,6 +223,9 @@ function diagramCommand(text: string): {
 } | null {
   const spoken = text.normalize("NFKC").trim();
 
+  const drawn = spoken.match(/^draw\s+a\s+diagram(?:\s+(?:for|of|about)\s+(.+?))?[\s.!?]*$/iu);
+  if (drawn) return { diagramType: "flowchart", ...diagramSource(drawn[1] ?? "") };
+
   const mixedSummary = spoken.match(
     /^(?:ee\s+summary|ఈ\s+సమ్మరీ)\s+ki\s+mind\s+map\s+create\s+cheyyi[\s.!?।]*$/iu,
   );
@@ -246,7 +257,7 @@ export const VOICE_COMMANDS: VoiceCommand[] = [
   {
     id: "open_files",
     label: "Open files",
-    phrases: ["open files", "go to files", "show files", "open my files", "show my files"],
+    phrases: ["open files", "go to files", "show files", "open my files", "show my files", "take me to my files"],
     description: "Navigate to your uploaded files and notes.",
   },
   {
@@ -264,19 +275,19 @@ export const VOICE_COMMANDS: VoiceCommand[] = [
   {
     id: "important_notes",
     label: "Give important notes",
-    phrases: ["give important notes", "important notes", "give me important notes", "key points", "important points"],
+    phrases: ["give important notes", "important notes", "give me important notes", "key points", "important points", "show me the important points"],
     description: "Ask StudyPilot for the key points across your material.",
   },
   {
     id: "explain_file",
     label: "Explain this file",
     phrases: ["explain this file", "explain the file", "explain this", "explain this document"],
-    description: "Ask StudyPilot to explain your most recent file.",
+    description: "Ask StudyPilot to explain your selected file.",
   },
   {
     id: "generate_quiz",
     label: "Generate quiz",
-    phrases: ["generate quiz", "create quiz", "make a quiz", "generate questions", "quiz me"],
+    phrases: ["generate quiz", "create quiz", "make a quiz", "make me a quiz", "generate questions", "quiz me"],
     description: "Ask StudyPilot to generate practice questions from your material.",
   },
   {
@@ -325,7 +336,7 @@ export const VOICE_COMMANDS: VoiceCommand[] = [
   {
     id: "create_notes_answer",
     label: "Create notes from this answer",
-    phrases: ["create notes from this answer"],
+    phrases: ["create notes from this answer", "turn this answer into notes"],
     description: "Prepare editable notes from the latest Voice Tutor answer.",
     exact: true,
   },
@@ -353,7 +364,7 @@ export const VOICE_COMMANDS: VoiceCommand[] = [
   {
     id: "save_notes",
     label: "Save this as notes",
-    phrases: ["save this as notes"],
+    phrases: ["save this as notes", "save these notes"],
     description: "Ask for confirmation before saving the prepared note.",
     exact: true,
   },
@@ -367,7 +378,7 @@ export const VOICE_COMMANDS: VoiceCommand[] = [
   {
     id: "download_notes_docx",
     label: "Download notes as DOCX",
-    phrases: ["download notes as docx", "download notes as word"],
+    phrases: ["download notes as docx", "download notes as word", "download this as a word file"],
     description: "Download the prepared note as a Word document.",
     exact: true,
   },
@@ -472,8 +483,10 @@ export function isDestructiveCommand(text: string): boolean {
  */
 export function resolveVoiceCommand(
   text: string,
+  context: { lastWebQuery?: string } = {},
 ): { kind: "blocked"; message: string } | { kind: "command"; outcome: VoiceCommandOutcome } | { kind: "question"; question: string } {
-  const normalized = normalize(text);
+  const commandText = stripConversationalPrefix(text);
+  const normalized = normalize(commandText);
   if (!normalized) return { kind: "question", question: text.trim() };
 
   // ── Greeting / conversational-intent fast path ───────────────────────────
@@ -486,12 +499,20 @@ export function resolveVoiceCommand(
       outcome: { kind: "greeting", reply, message: reply },
     };
   }
+
+  const studyIntent = resolveStudyIntent(text, context);
+  if (studyIntent.kind === "web_search") {
+    return {
+      kind: "command",
+      outcome: { kind: "web_search", query: studyIntent.query, message: "Searching the web..." },
+    };
+  }
   // ──────────────────────────────────────────────────────────────────────────
 
   // These anchored intents are read-only. Resolve them before destructive-word
   // blocking so a safe query such as "APA format" is not mistaken for an
   // actionable "format my files" command.
-  const diagram = diagramCommand(text);
+  const diagram = diagramCommand(commandText);
   if (diagram) {
     return {
       kind: "command",
@@ -503,7 +524,7 @@ export function resolveVoiceCommand(
     };
   }
 
-  const researchQuery = deepResearchQuery(text);
+  const researchQuery = deepResearchQuery(commandText);
   if (researchQuery !== null) {
     return {
       kind: "command",
@@ -515,7 +536,7 @@ export function resolveVoiceCommand(
     };
   }
 
-  const query = webSearchQuery(text);
+  const query = webSearchQuery(commandText);
   if (query !== null) {
     return {
       kind: "command",
@@ -560,7 +581,9 @@ export function resolveVoiceCommand(
         kind: "command",
         outcome: {
           kind: "ask",
-          question: "Explain this file in simple words. Cover the main ideas and how they connect.",
+          question: normalized === "explain this file" || normalized === "explain the file" || normalized === "explain this document"
+            ? "Explain this file in simple words. Cover the main ideas and how they connect."
+            : commandText,
           message: "Asking StudyPilot to explain your latest file...",
         },
       };
@@ -568,18 +591,18 @@ export function resolveVoiceCommand(
       return {
         kind: "command",
         outcome: {
-          kind: "ask",
-          question: "Generate a short practice quiz with questions and answers from my study material.",
-          message: "Asking StudyPilot to generate a quiz...",
+          kind: "study_workflow",
+          workflow: "quiz",
+          message: "Generating a quiz from your selected file...",
         },
       };
     case "create_revision_plan":
       return {
         kind: "command",
         outcome: {
-          kind: "ask",
-          question: "Create a revision plan from my study material, ordered by priority for exam preparation.",
-          message: "Asking StudyPilot to create a revision plan...",
+          kind: "study_workflow",
+          workflow: "revision",
+          message: "Creating a revision plan from your selected file...",
         },
       };
     case "create_notes_answer":

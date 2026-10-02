@@ -246,8 +246,8 @@ test.describe("Diagram CRUD - Real End-to-End Test", () => {
 
     // DELETE
     console.log("\n=== DELETE: Remove diagram ===");
-    if (!diagramId) {
-      console.log("⚠ Skipping DELETE - no diagram created");
+    if (!diagramId || (process.env.STUDYPILOT_E2E_OTHER_EMAIL && process.env.STUDYPILOT_E2E_OTHER_PASSWORD)) {
+      console.log("Owner deletion deferred until cross-user checks finish, or no diagram was created.");
     } else {
       await page.goto("/dashboard");
       await expect(page).toHaveURL(/\/dashboard/, { timeout: 10_000 });
@@ -298,7 +298,7 @@ test.describe("Diagram CRUD - Real End-to-End Test", () => {
 
         console.log("--- RLS SELECT test ---");
         listResult = await listDiagramsViaAPI(otherPage);
-        if (listResult.status === 200) {
+        if (listResult.status === 200 && diagramId) {
           const found = listResult.body.diagrams?.find((d: any) => d.id === diagramId);
           if (!found) {
             console.log("✓ RLS SELECT: Other user cannot see diagram");
@@ -311,10 +311,13 @@ test.describe("Diagram CRUD - Real End-to-End Test", () => {
         }
 
         console.log("--- RLS DELETE test ---");
-        const rlsDeleteResult = await deleteDiagramViaAPI(otherPage, diagramId);
+        const rlsDeleteResult = diagramId ? await deleteDiagramViaAPI(otherPage, diagramId) : { status: 0, body: {} };
         if (rlsDeleteResult.status === 404 || rlsDeleteResult.status === 403) {
-          console.log("✓ RLS DELETE: Other user cannot delete diagram");
-          results.rlsDelete = "PASS";
+          const ownerList = await listDiagramsViaAPI(page);
+          if (ownerList.body.diagrams?.some((item: { id: string }) => item.id === diagramId)) {
+            console.log("✓ RLS DELETE: Other user cannot delete diagram; owner row intact");
+            results.rlsDelete = "PASS";
+          }
         } else {
           console.log(`✗ RLS DELETE FAILED: Status ${rlsDeleteResult.status}`);
         }
@@ -322,6 +325,16 @@ test.describe("Diagram CRUD - Real End-to-End Test", () => {
         console.log("✓ RLS UPDATE: NOT IMPLEMENTED - diagrams are immutable");
       } finally {
         await otherContext.close();
+      }
+    }
+
+    if (diagramId && results.delete !== "PASS") {
+      const deleteResult = await deleteDiagramViaAPI(page, diagramId);
+      if (deleteResult.status === 200 && deleteResult.body.ok === true) {
+        const ownerList = await listDiagramsViaAPI(page);
+        if (!ownerList.body.diagrams?.some((item: { id: string }) => item.id === diagramId)) {
+          results.delete = "PASS";
+        }
       }
     }
 
@@ -346,7 +359,7 @@ test.describe("Diagram CRUD - Real End-to-End Test", () => {
     console.log(`RLS UPDATE: ${results.rlsUpdate}`);
     console.log(`RLS DELETE: ${results.rlsDelete}`);
 
-    const overall = results.auth === "PASS" && results.create === "PASS" && results.read === "PASS" && results.delete === "PASS" && results.aiGeneration === "PASS"
+    const overall = results.auth === "PASS" && results.create === "PASS" && results.read === "PASS" && results.delete === "PASS" && results.aiGeneration === "PASS" && results.rlsSelect === "PASS" && results.rlsDelete === "PASS"
       ? "FULL PASS"
       : (results.auth === "PASS" && (results.create === "PASS" || results.read === "PASS") ? "PARTIAL" : "FAIL");
     console.log(`Overall Diagram Feature: ${overall}`);

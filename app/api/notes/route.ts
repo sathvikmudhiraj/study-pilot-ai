@@ -3,6 +3,7 @@ import { requireUser } from "@/backend/lib/auth";
 import { validateNoteBody } from "@/backend/lib/noteValidation";
 import { createServerSupabaseClient } from "@/backend/lib/supabase/server";
 import { withRequestObservability } from "@/backend/lib/observability";
+import { recordNoteLearningEvidence } from "@/backend/lib/learningMemory";
 
 export const runtime = "nodejs";
 
@@ -61,7 +62,18 @@ async function handlePost(request: Request) {
     .single();
 
   if (saved.error || !saved.data) return apiError("Could not save the note. Please try again.", 500);
-  return NextResponse.json({ note: saved.data }, { status: 201 });
+  let learningState = null;
+  try {
+    learningState = await recordNoteLearningEvidence(supabase, {
+      userId: user.id,
+      noteId: saved.data.id,
+      topic: saved.data.topic || saved.data.title,
+      fileId: saved.data.file_id,
+    });
+  } catch (error) {
+    console.error("[learning-memory] Could not record note evidence", error);
+  }
+  return NextResponse.json({ note: saved.data, learningState }, { status: 201 });
 }
 
 export async function POST(request: Request) {

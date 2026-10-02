@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sanitizeSummaryForDisplay } from "@/shared/summarySanitizer";
+import { sanitizeSummaryForDisplay, isPlaceholderSummary } from "@/shared/summarySanitizer";
 
 const INTERNAL_METADATA_PATTERN =
   /\b(chunk_number|chunk_total|chunkNumber|chunkTotal|heading|topics|CHUNK_MAPS|TOTAL_CHUNKS|ALL_DETECTED_TOPICS|ALL_DETECTED_CONCEPTS)\b/i;
@@ -8,7 +8,89 @@ function visibleSummaryText(value: unknown) {
   return JSON.stringify(value);
 }
 
+describe("isPlaceholderSummary", () => {
+  it("returns true for filename-only placeholder summary", () => {
+    expect(isPlaceholderSummary({
+      short_summary: "Study summary for Module-3.docx",
+      covered_topics: [],
+      key_points: [],
+      important_concepts: [],
+      suggested_tags: [],
+      module_overview: "",
+      generation_metadata: { attemptedChunks: 1, successfulChunks: [1], failedChunks: [], failureCategories: [], partialCoverage: false, sourceTextLength: 100, language: "en" },
+    })).toBe(true);
+  });
+
+  it("returns true for Chunk N tags in topics/tags", () => {
+    expect(isPlaceholderSummary({
+      short_summary: "This is a summary",
+      covered_topics: ["Chunk 1", "Chunk 2"],
+      key_points: [],
+      important_concepts: [],
+      suggested_tags: [],
+      module_overview: "Overview",
+      generation_metadata: { attemptedChunks: 2, successfulChunks: [1, 2], failedChunks: [], failureCategories: [], partialCoverage: false, sourceTextLength: 100, language: "en" },
+    })).toBe(true);
+  });
+
+  it("returns false for meaningful deterministic extractive fallback with no successful chunks", () => {
+    expect(isPlaceholderSummary({
+      short_summary: "This module covers SQL, relational algebra, PL/SQL, joins, and triggers from the uploaded study material.",
+      covered_topics: ["SQL", "Relational Algebra", "PL/SQL", "Joins", "Triggers"],
+      key_points: ["SQL is used for database queries.", "Joins combine tables."],
+      important_concepts: ["SQL", "Relational Algebra", "PL/SQL"],
+      suggested_tags: ["SQL", "Relational Algebra", "PL/SQL", "Joins", "Triggers"],
+      module_overview: "This module covers SQL, relational algebra, PL/SQL, joins, and triggers from the uploaded study material.",
+      generation_metadata: { attemptedChunks: 3, successfulChunks: [], failedChunks: [1, 2, 3], failureCategories: ["extractive-fallback"], partialCoverage: true, sourceTextLength: 5000, language: "en" },
+    })).toBe(false);
+  });
+
+  it("returns true for empty/generic summary with extractive-fallback metadata", () => {
+    expect(isPlaceholderSummary({
+      short_summary: "Study summary",
+      covered_topics: [],
+      key_points: [],
+      important_concepts: [],
+      suggested_tags: [],
+      module_overview: "AI processing was unavailable.",
+      generation_metadata: { attemptedChunks: 3, successfulChunks: [], failedChunks: [1, 2, 3], failureCategories: ["extractive-fallback"], partialCoverage: true, sourceTextLength: 5000, language: "en" },
+    })).toBe(true);
+  });
+
+  it("returns true for filename-only suggested_title", () => {
+    expect(isPlaceholderSummary({
+      suggested_title: "Study summary for Module-3.docx",
+      short_summary: "Some content",
+      covered_topics: ["SQL"],
+      key_points: [],
+      important_concepts: [],
+      suggested_tags: [],
+      module_overview: "Overview",
+      generation_metadata: { attemptedChunks: 1, successfulChunks: [1], failedChunks: [], failureCategories: [], partialCoverage: false, sourceTextLength: 100, language: "en" },
+    })).toBe(true);
+  });
+});
+
 describe("sanitizeSummaryForDisplay", () => {
+  it("maps canonical summary fields onto backward-compatible storage fields", () => {
+    const sanitized = sanitizeSummaryForDisplay({
+      summary: "Cloud computing provides computing services over the internet.",
+      keyPoints: ["Resources are delivered on demand."],
+      importantConcepts: ["Virtualization"],
+      studyAreas: ["Cloud service models"],
+      examQuestions: ["Compare public and private clouds."],
+      suggestedTags: ["cloud"],
+      suggestedNextStep: "Review service models.",
+      sources: ["Page 2"],
+    });
+
+    expect(sanitized.short_summary).toContain("Cloud computing");
+    expect(sanitized.key_points).toEqual(["Resources are delivered on demand."]);
+    expect(sanitized.covered_topics).toEqual(["Cloud service models"]);
+    expect(sanitized.exam_focus_points).toEqual(["Compare public and private clouds."]);
+    expect(sanitized.examQuestions).toEqual(sanitized.exam_focus_points);
+    expect(sanitized.sources).toEqual(["Page 2"]);
+  });
   it("sanitizes fresh generation output before it is returned or saved", () => {
     const sanitized = sanitizeSummaryForDisplay({
       suggested_title: "Study summary",

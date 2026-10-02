@@ -20,6 +20,7 @@ import {
   type SourceCitation,
 } from "./sourceCitations";
 import { STUDYPILOT_TUTOR_INSTRUCTION } from "./tutorPrompt";
+import { logStructuredOutputDiagnostic } from "./observability";
 import { generateLocalizedText } from "./aiLanguage";
 import {
   DEFAULT_LANGUAGE,
@@ -46,6 +47,14 @@ export type SummaryGenerationMetadata = {
 };
 
 export type StructuredSummary = {
+  summary?: string;
+  keyPoints?: string[];
+  importantConcepts?: string[];
+  studyAreas?: string[];
+  examQuestions?: string[];
+  suggestedTags?: string[];
+  suggestedNextStep?: string;
+  sources?: SourceCitation[];
   suggested_title: string;
   short_summary: string;
   module_overview: string;
@@ -85,7 +94,7 @@ export type SummarySourceContext = {
 };
 
 const MAX_CHUNK_CHARS = 12000;
-const SUMMARY_CHUNK_TIMEOUT_MS = 24_000;
+const SUMMARY_CHUNK_TIMEOUT_MS = 30_000;
 const SUMMARY_CHUNK_CONCURRENCY = 3;
 const DIRECT_SINGLE_CHUNK_SUMMARY_MAX_CHARS = 6_500;
 
@@ -447,6 +456,118 @@ function uniqueList(values: string[], limit = 24) {
   return items;
 }
 
+/**
+ * General-purpose extractive summary for any content type.
+ * Used when AI providers are completely unavailable.
+ * Extracts topics, concepts, and key points from text using
+ * frequency analysis, heading detection, and key phrase extraction.
+ */
+function generateExtractiveSummary(text: string, language: SupportedLanguageCode = DEFAULT_LANGUAGE): StructuredSummary {
+  const sentences = text
+    .split(/[.!?]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 20 && s.length < 500);
+
+  // Extract potential headings (short lines, title case, or all caps)
+  const lines = text.split(/\n/).map((l) => l.trim()).filter((l) => l.length > 3 && l.length < 120);
+  const headingCandidates = lines.filter((l) =>
+    /^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*$/.test(l) || // Title Case
+    /^[A-Z\s]{5,}$/.test(l) || // ALL CAPS
+    /^unit\s+\d+\b/i.test(l) || // Numbered module heading
+    /^\d+[\.\)]\s/.test(l) // Numbered
+  );
+
+  // Extract key phrases using frequency analysis
+  const words = text.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 3);
+
+  const wordFreq = new Map<string, number>();
+  for (const w of words) {
+    wordFreq.set(w, (wordFreq.get(w) || 0) + 1);
+  }
+
+  // Get top frequent meaningful words (excluding common stop words)
+  const stopWords = new Set([
+    "the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "had", "her", "was", "one", "our", "out", "day", "get", "has", "him", "his", "how", "its", "may", "new", "now", "old", "see", "two", "who", "boy", "did", "man", "put", "say", "she", "too", "use", "that", "with", "have", "this", "will", "your", "from", "they", "know", "want", "been", "good", "much", "some", "time", "very", "when", "come", "here", "just", "like", "long", "make", "many", "over", "such", "take", "than", "them", "well", "were", "what", "year", "into", "also", "more", "only", "said", "should", "could", "would", "there", "their", "about", "after", "before", "between", "through", "during", "under", "without", "within", "against", "among", "around", "because", "become", "beneath", "beside", "beyond", "certain", "despite", "except", "include", "inside", "instead", "near", "outside", "since", "until", "upon", "various", "across", "behind", "below", "between", "toward", "towards"
+  ]);
+
+  const topWords = [...wordFreq.entries()]
+    .filter(([w, c]) => c > 2 && !stopWords.has(w) && w.length > 3)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 30)
+    .map(([w]) => w);
+
+  // Extract n-grams (2-3 word phrases) that appear multiple times
+  const phrases = new Map<string, number>();
+  const tokens = text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 2);
+  for (let i = 0; i < tokens.length - 1; i++) {
+    const bigram = `${tokens[i]} ${tokens[i + 1]}`;
+    if (!stopWords.has(tokens[i]) && !stopWords.has(tokens[i + 1])) {
+      phrases.set(bigram, (phrases.get(bigram) || 0) + 1);
+    }
+  }
+  for (let i = 0; i < tokens.length - 2; i++) {
+    const trigram = `${tokens[i]} ${tokens[i + 1]} ${tokens[i + 2]}`;
+    if (!stopWords.has(tokens[i]) && !stopWords.has(tokens[i + 1]) && !stopWords.has(tokens[i + 2])) {
+      phrases.set(trigram, (phrases.get(trigram) || 0) + 1);
+    }
+  }
+
+  const topPhrases = [...phrases.entries()]
+    .filter(([, c]) => c > 1)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 20)
+    .map(([p]) => p);
+
+  // Combine headings, top phrases, and top words as topics
+  const allTopics = uniqueList([
+    ...headingCandidates.slice(0, 10),
+    ...topPhrases.slice(0, 15),
+    ...topWords.slice(0, 15).map((w) => w.charAt(0).toUpperCase() + w.slice(1)),
+  ], 25);
+
+  // Extract important points from first few sentences
+  const importantPoints = sentences.slice(0, 10).map((s) => s.charAt(0).toUpperCase() + s.slice(1));
+
+  // Build topic-wise summary
+  const topicWiseSummary = allTopics.slice(0, 12).map((topic) => ({
+    topic,
+    explanation: `This module covers ${topic.toLowerCase()} and related concepts.`,
+    important_points: importantPoints.slice(0, 3),
+  }));
+
+  const shortSummary = sentences.slice(0, 3).join(". ") || "This module covers the key concepts from the uploaded study material.";
+
+  return {
+    suggested_title: headingCandidates[0]
+      || (allTopics.length ? `${allTopics.slice(0, 2).join(" and ")} Overview` : "Study Material Overview"),
+    short_summary: shortSummary,
+    module_overview: `This module covers ${allTopics.slice(0, 8).join(", ")} and related topics extracted from the study material.`,
+    covered_topics: allTopics,
+    key_points: importantPoints,
+    topic_wise_summary: topicWiseSummary,
+    exam_focus_points: allTopics.slice(0, 8).map((t) => `Understand ${t.toLowerCase()}`),
+    memory_lines: [],
+    common_mistakes: [],
+    important_concepts: allTopics,
+    action_items: ["Review the key concepts.", "Practice with exercises.", "Generate a quiz to test understanding."],
+    suggested_tags: allTopics.slice(0, 12),
+    suggested_next_step: "Review the covered topics and generate a quiz to check understanding.",
+    source_citations: [],
+    generation_metadata: {
+      attemptedChunks: 0,
+      successfulChunks: [],
+      failedChunks: [],
+      failureCategories: ["extractive-fallback"],
+      partialCoverage: true,
+      sourceTextLength: text.length,
+      language,
+    },
+  };
+}
+
 const INTERNAL_SUMMARY_KEYS = [
   "chunk_number",
   "chunk_total",
@@ -541,23 +662,24 @@ function validateSummary(value: unknown): StructuredSummary | null {
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
 
-  const coveredTopics = arrayValue(record, "covered_topics", "coveredTopics", "topics", "major_topics", "majorTopics");
-  const keyPoints = arrayValue(record, "key_points", "keyPoints");
-  const importantConcepts = arrayValue(record, "important_concepts", "importantConcepts");
+  const coveredTopics = arrayValue(record, "studyAreas", "study_areas", "covered_topics", "coveredTopics", "topics", "major_topics", "majorTopics");
+  const keyPoints = arrayValue(record, "keyPoints", "importantPoints", "important_points", "key_points");
+  const importantConcepts = arrayValue(record, "importantConcepts", "important_concepts");
   const summary: StructuredSummary = {
-    suggested_title: textValue(record, "suggested_title", "suggestedTitle", "title") || "Study summary",
-    short_summary: textValue(record, "short_summary", "shortSummary", "summary"),
+    suggested_title: textValue(record, "suggested_title", "suggestedTitle", "title")
+      || (coveredTopics.length ? `${coveredTopics.slice(0, 2).join(" and ")} Overview` : "Study Material Overview"),
+    short_summary: textValue(record, "summary", "short_summary", "shortSummary"),
     module_overview: textValue(record, "module_overview", "moduleOverview", "overview"),
     covered_topics: coveredTopics,
     key_points: keyPoints,
     topic_wise_summary: topicArrayValue(record),
-    exam_focus_points: arrayValue(record, "exam_focus_points", "examFocusPoints", "exam_points", "examPoints"),
+    exam_focus_points: arrayValue(record, "examQuestions", "exam_questions", "exam_focus_points", "examFocusPoints", "exam_points", "examPoints"),
     memory_lines: arrayValue(record, "memory_lines", "memoryLines", "memory_tricks", "memoryTricks"),
     common_mistakes: arrayValue(record, "common_mistakes", "commonMistakes", "mistakes"),
     important_concepts: importantConcepts,
     action_items: arrayValue(record, "action_items", "actionItems", "next_actions", "nextActions"),
-    suggested_tags: arrayValue(record, "suggested_tags", "suggestedTags", "tags").slice(0, 12),
-    suggested_next_step: textValue(record, "suggested_next_step", "suggestedNextStep", "next_step", "nextStep"),
+    suggested_tags: arrayValue(record, "suggestedTags", "suggested_tags", "tags").slice(0, 12),
+    suggested_next_step: textValue(record, "suggestedNextStep", "suggested_next_step", "next_step", "nextStep"),
     // Citations are attached deterministically from source segments after the
     // model response is validated. Model-provided page numbers are ignored.
     source_citations: [],
@@ -674,29 +796,63 @@ function parseChunkMapJson(raw: string, index: number, total: number, citation: 
     }
   }
 
+  const partialRecord: Record<string, unknown> = {};
+  for (const key of [
+    "study_areas",
+    "important_points",
+    "exam_focus_points",
+    "important_concepts",
+    "memory_lines",
+    "common_mistakes",
+  ]) {
+    const keyMatch = new RegExp(`"${key}"\\s*:\\s*\\[`, "i").exec(withoutFence);
+    if (!keyMatch) continue;
+    const arrayStart = keyMatch.index + keyMatch[0].lastIndexOf("[");
+    let arrayEnd = -1;
+    let inString = false;
+    let escaped = false;
+    for (let cursor = arrayStart + 1; cursor < withoutFence.length; cursor += 1) {
+      const char = withoutFence[cursor];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === '"') inString = !inString;
+      if (!inString && char === "]") {
+        arrayEnd = cursor;
+        break;
+      }
+    }
+
+    const body = withoutFence.slice(arrayStart + 1, arrayEnd >= 0 ? arrayEnd : undefined);
+    const values = [...body.matchAll(/"((?:\\.|[^"\\])*)"/g)]
+      .map((match) => {
+        try {
+          return JSON.parse(`"${match[1]}"`) as string;
+        } catch {
+          return "";
+        }
+      })
+      .filter(Boolean);
+    if (values.length) partialRecord[key] = values;
+  }
+
+  const recovered = validateChunkMap(partialRecord, index, total, citation);
+  if (recovered) {
+    devLog("chunk map recovered from partial JSON", {
+      chunkNumber: index + 1,
+      total,
+      rawLength: raw.length,
+      recoveredFields: Object.keys(partialRecord),
+    });
+    return recovered;
+  }
+
   return null;
-}
-
-function fallbackChunkMap(raw: string, index: number, total: number, citation: SourceCitation): ChunkMap {
-  const lines = raw
-    .replace(/^#+\s*/gm, "")
-    .split(/\n|;|\.\s+/)
-    .map((line) => line.replace(/^[-*\d.)\s]+/, "").trim())
-    .filter((line) => line.length > 8)
-    .slice(0, 14);
-
-  return {
-    chunk_number: index + 1,
-    chunk_total: total,
-    heading: `Chunk ${index + 1}`,
-    topics: uniqueList(lines.slice(0, 6), 6),
-    important_points: uniqueList(lines, 12),
-    exam_focus_points: [],
-    important_concepts: uniqueList(lines.slice(0, 6), 6),
-    memory_lines: [],
-    common_mistakes: [],
-    citation,
-  };
 }
 
 function chunkMapsToCleanStudyMaterial(chunkMaps: ChunkMap[]) {
@@ -754,47 +910,6 @@ function ensureFullModuleCoverage(summary: StructuredSummary, chunkMaps: ChunkMa
   };
 }
 
-function summaryFromChunkMaps(chunkMaps: ChunkMap[], sourceName: string, partialCoverage: boolean): StructuredSummary {
-  const topics = uniqueList(chunkMaps.flatMap((chunk) => chunk.topics.length ? chunk.topics : [chunk.heading]), 30);
-  const keyPoints = uniqueList(chunkMaps.flatMap((chunk) => chunk.important_points), 24);
-  const topicWiseSummary = chunkMaps.flatMap((chunk) => {
-    const chunkTopics = chunk.topics.length ? chunk.topics : [chunk.heading];
-    return chunkTopics.map((topic) => ({
-      topic,
-      explanation: chunk.important_points.slice(0, 3).join(" ") || `This topic appears in ${sourceName}.`,
-      important_points: chunk.important_points.slice(0, 5),
-    }));
-  }).slice(0, 24);
-
-  return {
-    suggested_title: `${sourceName} study summary`,
-    short_summary: keyPoints.slice(0, 4).join(" ") || `Study summary for ${sourceName}.`,
-    module_overview: partialCoverage
-      ? "AI processing was unavailable for some or all sections, so this source-only extractive summary may be incomplete."
-      : "AI synthesis was unavailable, so this summary was assembled from the successfully processed source sections.",
-    covered_topics: topics,
-    key_points: keyPoints,
-    topic_wise_summary: topicWiseSummary,
-    exam_focus_points: uniqueList(chunkMaps.flatMap((chunk) => chunk.exam_focus_points), 20),
-    memory_lines: uniqueList(chunkMaps.flatMap((chunk) => chunk.memory_lines), 14),
-    common_mistakes: uniqueList(chunkMaps.flatMap((chunk) => chunk.common_mistakes), 14),
-    important_concepts: uniqueList(chunkMaps.flatMap((chunk) => chunk.important_concepts), 28),
-    action_items: ["Review the key points, then test your recall without looking at the source."],
-    suggested_tags: topics.slice(0, 8),
-    suggested_next_step: "Review the topic summaries and create a short practice quiz.",
-    source_citations: [],
-    generation_metadata: {
-      attemptedChunks: 0,
-      successfulChunks: [],
-      failedChunks: [],
-      failureCategories: [],
-      partialCoverage,
-      sourceTextLength: 0,
-      language: DEFAULT_LANGUAGE,
-    },
-  };
-}
-
 async function summarizeChunk(
   chunk: string,
   index: number,
@@ -834,6 +949,10 @@ ${chunk}`;
     }),
   );
 
+  if (!response.trim()) {
+    throw new Error("AI returned an empty chunk response.");
+  }
+
   const parsed = parseChunkMapJson(response, index, total, citation);
   if (parsed) {
     devLog("chunk map parsed", {
@@ -846,7 +965,26 @@ ${chunk}`;
   }
 
   devLog("chunk map used text fallback", { chunkNumber: index + 1, total, rawLength: response.length });
-  return fallbackChunkMap(response, index, total, citation);
+  // Use a generic section heading instead of "Chunk N" to avoid internal labels in user-facing output
+  const lines = response
+    .replace(/^#+\s*/gm, "")
+    .split(/\n|;|\.\s+/)
+    .map((line) => line.replace(/^[-*\d.)\s]+/, "").trim())
+    .filter((line) => line.length > 8 && !/^\s*["']?(?:study_areas|important_points|exam_focus_points|important_concepts|memory_lines|common_mistakes)["']?\s*:/i.test(line))
+    .slice(0, 14);
+
+  return {
+    chunk_number: index + 1,
+    chunk_total: total,
+    heading: lines[0] || `Study section ${index + 1}`,
+    topics: uniqueList(lines.slice(0, 6), 6),
+    important_points: uniqueList(lines, 12),
+    exam_focus_points: [],
+    important_concepts: uniqueList(lines.slice(0, 6), 6),
+    memory_lines: [],
+    common_mistakes: [],
+    citation,
+  };
 }
 
 /**
@@ -936,7 +1074,7 @@ Critical summary rules:
 - If one topic has more text, still mention other major topics that are present.
 - Mention topic coverage clearly.
 - Use student-friendly explanations, examples, memory lines, common mistakes, and exam/viva points.
-- The user-facing summary must read as one clean study document with these sections only: Short Summary, Key Points, Action Items, Important Concepts, Suggested Tags, Suggested Next Step.
+- The user-facing summary must include: Summary, Key Points, Important Concepts, Study Areas, Exam Questions, Suggested Tags, Suggested Next Step, and source references where available.
 - Never include internal processing labels, JSON fragments, source-section labels, chunk numbers, headings, raw arrays, braces, or implementation metadata in any user-facing field.
 - For Cryptography and Network Security files, check for cryptography basics, security concepts, CIA triad, OSI security architecture, threats vs attacks, active/passive attacks, security services, mechanisms, symmetric cipher model, and classical encryption ciphers such as Caesar, monoalphabetic, Playfair, and Hill. Only include topics actually present in the material.
 ${personalizationHint ? `\nLearner personalization:\n- ${personalizationHint}\n` : ""}
@@ -944,25 +1082,14 @@ ${chunkRule}${reminder}${partialHint}
 
 Return strict JSON only. Do not include markdown. The JSON shape must be:
 {
-  "suggested_title": "string",
-  "short_summary": "string",
-  "module_overview": "string",
-  "covered_topics": ["string"],
-  "key_points": ["string"],
-  "topic_wise_summary": [
-    {
-      "topic": "string",
-      "explanation": "string",
-      "important_points": ["string"]
-    }
-  ],
-  "exam_focus_points": ["string"],
-  "memory_lines": ["string"],
-  "common_mistakes": ["string"],
-  "important_concepts": ["string"],
-  "action_items": ["string"],
-  "suggested_tags": ["string"],
-  "suggested_next_step": "string"
+  "summary": "string",
+  "keyPoints": ["string"],
+  "importantConcepts": ["string"],
+  "studyAreas": ["string"],
+  "examQuestions": ["string"],
+  "suggestedTags": ["string"],
+  "suggestedNextStep": "string",
+  "sources": ["page, slide, or section reference when available"]
 }
 
 MATERIAL:
@@ -1001,6 +1128,17 @@ ${text}`;
     coverageRetry: Boolean(coverageReminder),
   });
   let parsed = parseSummaryJson(response);
+  logStructuredOutputDiagnostic({
+    feature: "summary",
+    provider: summaryRun.result.provider,
+    model: summaryRun.result.model,
+    status: response ? 200 : undefined,
+    latencyMs: summaryRun.result.totalLatencyMs,
+    bodyLength: response.length,
+    parseStage: "initial",
+    validationPassed: Boolean(parsed),
+    failureCategory: parsed ? undefined : "schema_validation",
+  });
   if (!parsed) {
     if (!shouldAttemptSummaryJsonRepair(summaryRun)) {
       throw new Error(SUMMARY_TIMEOUT_MESSAGE);
@@ -1009,7 +1147,7 @@ ${text}`;
     const repairRun = await generateSummaryAITextWithMetadata(
       `Repair the summary payload below into one complete, valid JSON object.
 Return JSON only, with no markdown or commentary. Preserve the original language and facts.
-Use exactly these keys: suggested_title, short_summary, module_overview, covered_topics, key_points, topic_wise_summary, exam_focus_points, memory_lines, common_mistakes, important_concepts, action_items, suggested_tags, suggested_next_step.
+Use exactly these keys: summary, keyPoints, importantConcepts, studyAreas, examQuestions, suggestedTags, suggestedNextStep, sources.
 Use strings for text fields and arrays for list fields. Each topic_wise_summary item must contain topic, explanation, and important_points.
 Remove incomplete trailing fragments instead of inventing source content.
 
@@ -1025,6 +1163,17 @@ ${response}`,
     assertUsableSummaryProviderRun({ text: repairRun.text, result: repairRun }, "repair");
     const repairedResponse = repairRun.text;
     parsed = parseSummaryJson(repairedResponse);
+    logStructuredOutputDiagnostic({
+      feature: "summary",
+      provider: repairRun.provider,
+      model: repairRun.model,
+      status: repairedResponse ? 200 : undefined,
+      latencyMs: repairRun.totalLatencyMs,
+      bodyLength: repairedResponse.length,
+      parseStage: "repair",
+      validationPassed: Boolean(parsed),
+      failureCategory: parsed ? undefined : "schema_validation",
+    });
     devLog("AI summary JSON repair completed", {
       repairedLength: repairedResponse.length,
       parsed: Boolean(parsed),
@@ -1166,14 +1315,39 @@ export async function summarizeStudyText(
 
   const allAiChunksFailed = chunkMaps.length === 0;
   if (allAiChunksFailed) {
-    processableChunks.forEach((chunk, index) => {
-      chunkMaps.push(fallbackChunkMap(chunk, index, chunks.length, segments[index].citation));
-    });
-    failureCategoriesSet.add("extractive-fallback");
-    devLog("all AI chunk maps failed; using source-only extractive maps", {
+    devLog("all AI chunk maps failed; using extractive fallback", {
       attempted: attemptedChunks,
-      fallbackMaps: chunkMaps.length,
+      failedChunks: failedChunks.length,
     });
+    // Use extractive fallback - generate summary directly from source text
+    const extractiveMaterial = text;
+    let fallbackSummary: StructuredSummary;
+    try {
+      fallbackSummary = await generateStructuredSummary(extractiveMaterial, "full-text", [], undefined, undefined, personalizationHint, language);
+    } catch (fallbackError) {
+      const failureCategory = classifyChunkFailure(fallbackError);
+      failureCategoriesSet.add(`extractive-fallback-${failureCategory}`);
+      // Create a deterministic summary from source text as last resort
+      // Use general extractive summary that works for any content type
+      fallbackSummary = generateExtractiveSummary(text, language);
+    }
+    failureCategoriesSet.add("extractive-fallback");
+    const final: StructuredSummary = sanitizeUserFacingSummary({
+      ...ensureFullModuleCoverage(fallbackSummary, []),
+      source_citations: sourceCitations,
+      generation_metadata: {
+        attemptedChunks,
+        successfulChunks: [],
+        failedChunks: Array.from({ length: attemptedChunks }, (_, i) => i + 1),
+        failureCategories: [...failureCategoriesSet],
+        partialCoverage: true,
+        sourceTextLength,
+        language,
+      },
+      module_overview: "AI processing was unavailable. This summary was assembled from the successfully processed source sections.",
+    });
+    devLog("summary complete (extractive fallback)", { chunkCount: 0, coveredTopicsCount: final.covered_topics.length });
+    return final;
   }
 
   const partialCoverage = failedChunks.length > 0;
@@ -1189,19 +1363,53 @@ export async function summarizeStudyText(
   const partialHint = partialCoverage
     ? { successfulChunks, failedChunks, totalChunks: attemptedChunks }
     : undefined;
-  let synthesisFallbackUsed = allAiChunksFailed;
+  let synthesisFallbackUsed = false;
   let summary: StructuredSummary;
-  if (allAiChunksFailed) {
-    summary = summaryFromChunkMaps(chunkMaps, sourceName, partialCoverage);
-  } else {
+  try {
+    summary = await generateStructuredSummary(material, "chunk-map", chunkMaps, undefined, partialHint, personalizationHint, language);
+  } catch (error) {
+    const failureCategory = classifyChunkFailure(error);
+    failureCategoriesSet.add(`synthesis-${failureCategory}`);
+    devLog("structured synthesis failed, using chunk-map fallback", { failureCategory, chunkMaps: chunkMaps.length });
+    synthesisFallbackUsed = true;
+    // Use chunk maps as fallback for synthesis
+    const fallbackMaterial = chunkMapsToCleanStudyMaterial(chunkMaps);
     try {
-      summary = await generateStructuredSummary(material, "chunk-map", chunkMaps, undefined, partialHint, personalizationHint, language);
-    } catch (error) {
-      const failureCategory = classifyChunkFailure(error);
-      failureCategoriesSet.add(`synthesis-${failureCategory}`);
-      synthesisFallbackUsed = true;
-      summary = summaryFromChunkMaps(chunkMaps, sourceName, partialCoverage);
-      devLog("structured synthesis fallback used", { failureCategory, chunkMaps: chunkMaps.length });
+      summary = await generateStructuredSummary(fallbackMaterial, "chunk-map", chunkMaps, undefined, partialHint, personalizationHint, language);
+    } catch (fallbackError) {
+      // If even chunk-map fallback fails, use the chunk maps directly
+      const fallbackTopics = uniqueList(
+        chunkMaps.flatMap((chunk) => chunk.topics.length ? chunk.topics : [chunk.heading]),
+        30,
+      );
+      const directSummary = ensureFullModuleCoverage({
+        suggested_title: fallbackTopics.length
+          ? `${fallbackTopics.slice(0, 2).join(" and ")} Overview`
+          : "Study Material Overview",
+        short_summary: fallbackTopics.slice(0, 5).join(", "),
+        module_overview: "AI synthesis was unavailable. This summary was assembled from the successfully processed source sections.",
+        covered_topics: fallbackTopics,
+        key_points: uniqueList(chunkMaps.flatMap((c) => c.important_points), 24),
+        topic_wise_summary: chunkMaps.flatMap((c) => c.topics.length ? c.topics.map((t) => ({ topic: t, explanation: "", important_points: [] })) : [{ topic: c.heading, explanation: "", important_points: [] }]),
+        exam_focus_points: uniqueList(chunkMaps.flatMap((c) => c.exam_focus_points), 20),
+        memory_lines: uniqueList(chunkMaps.flatMap((c) => c.memory_lines), 14),
+        common_mistakes: uniqueList(chunkMaps.flatMap((c) => c.common_mistakes), 14),
+        important_concepts: uniqueList(chunkMaps.flatMap((c) => c.important_concepts), 28),
+        action_items: ["Review the key points.", "Practice recall with a short quiz."],
+        suggested_tags: uniqueList(chunkMaps.flatMap((c) => c.topics.length ? c.topics : [c.heading]), 12),
+        suggested_next_step: "Review the covered topics and generate a quiz to check understanding.",
+        source_citations: [],
+        generation_metadata: {
+          attemptedChunks: 0,
+          successfulChunks: [],
+          failedChunks: [],
+          failureCategories: [],
+          partialCoverage: false,
+          sourceTextLength: 0,
+          language,
+        },
+      }, chunkMaps);
+      summary = sanitizeUserFacingSummary(directSummary);
     }
   }
   const reminder = buildCoverageReminder(summary, chunkMaps);

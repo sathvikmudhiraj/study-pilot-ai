@@ -8,6 +8,7 @@ export const dynamic = "force-dynamic";
 
 type RevisionSearchParams = {
   fileId?: string | string[];
+  autoGenerate?: string | string[];
   language?: string | string[];
 };
 
@@ -68,7 +69,7 @@ export default async function RevisionPage({ searchParams }: { searchParams?: Pr
         title="Revision Planner"
         description="Generate a structured revision plan from your files, notes, summaries, and quizzes."
       />
-      <RevisionPlanPanel initialPlan={initialPlan} preferredLanguage={user?.preferredLanguage ?? "en"} sourceFile={sourceFile} />
+      <RevisionPlanPanel initialPlan={initialPlan} preferredLanguage={user?.preferredLanguage ?? "en"} sourceFile={sourceFile} autoGenerate={singleParam(params.autoGenerate) === "1"} />
     </AppShell>
   );
 }

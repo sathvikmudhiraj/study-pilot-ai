@@ -1,6 +1,8 @@
 import "server-only";
 
-import { generateAITextWithMetadata, type AIProviderResult } from "./aiProvider";
+import { generateQuizAITextWithMetadata, type AIProviderResult } from "./aiProvider";
+import { buildLocalQuiz } from "./localStudyFallback";
+import { logStructuredOutputDiagnostic } from "./observability";
 import {
   canonicalTopicId,
   DEFAULT_LANGUAGE,
@@ -403,7 +405,7 @@ function buildTypeGuidance(questionTypes: QuizQuestionType[], count: number) {
 // Main exported function
 // ---------------------------------------------------------------------------
 
-export async function generateQuiz(sourceText: string, options: QuizOptions = {}): Promise<GeneratedQuiz> {
+export async function generateQuiz(sourceText: string, options: QuizOptions = {}, loadLocalSourceText?: () => Promise<string>): Promise<GeneratedQuiz> {
   const requestedTypes = options.questionTypes && options.questionTypes.length ? options.questionTypes : (["mcq", "short"] as QuizQuestionType[]);
   const count = clampCount(options.count ?? DEFAULT_QUESTION_COUNT);
   const difficulty = normalizeDifficulty(options.difficulty);
@@ -472,13 +474,24 @@ STUDY MATERIAL:
 ${text}`;
 
   const quizRun = await generateLocalizedQuizProviderRun(prompt, language, (localizedPrompt) =>
-    generateAITextWithMetadata(localizedPrompt, {
+    generateQuizAITextWithMetadata(localizedPrompt, {
       temperature: 0.4,
       maxOutputTokens: Math.min(1200 + count * 260, 5200),
       responseMimeType: "application/json",
+      timeoutMs: 30_000,
+      primaryTimeoutMs: 18_000,
+      fallbackTimeoutMs: 12_000,
     }),
   );
-  assertUsableQuizProviderRun(quizRun, "quiz");
+  if (quizProviderFailureMessage(quizRun.result)) {
+    devLog("using source-grounded local quiz", { category: quizRun.result.providerFailureCategory, sourceChars: sourceText.length });
+    let localText = sourceText;
+    if (loadLocalSourceText) {
+      try { localText = await loadLocalSourceText() || sourceText; }
+      catch (error) { devLog("local quiz source read failed", { error: String(error) }); }
+    }
+    return buildLocalQuiz(localText, options);
+  }
   const response = quizRun.text;
 
   devLog("AI quiz response received", {
@@ -501,12 +514,23 @@ ${text}`;
   }
 
   let parsed = tryParseJson(response);
+  logStructuredOutputDiagnostic({
+    feature: "quiz",
+    provider: quizRun.result.provider,
+    model: quizRun.result.model,
+    status: response ? 200 : undefined,
+    latencyMs: quizRun.result.totalLatencyMs,
+    bodyLength: response.length,
+    parseStage: "initial",
+    validationPassed: Boolean(parsed),
+    failureCategory: parsed ? undefined : "json_parse",
+  });
   if (!parsed) {
     if (!shouldAttemptQuizJsonRepair(quizRun)) {
       throw new Error(QUIZ_TIMEOUT_MESSAGE);
     }
     devLog("AI quiz JSON repair started", { rawLength: response.length });
-    const repairRun = await generateAITextWithMetadata(
+    const repairRun = await generateQuizAITextWithMetadata(
       `Repair the quiz payload below into one complete, valid JSON object.
 Return JSON only, with no markdown or commentary. Preserve the original language and facts.
 The object must contain title, source_summary, difficulty, and a questions array.
@@ -525,6 +549,17 @@ ${response}`,
     assertUsableQuizProviderRun({ text: repairRun.text, result: repairRun }, "repair");
     const repairedResponse = repairRun.text;
     parsed = tryParseJson(repairedResponse);
+    logStructuredOutputDiagnostic({
+      feature: "quiz",
+      provider: repairRun.provider,
+      model: repairRun.model,
+      status: repairedResponse ? 200 : undefined,
+      latencyMs: repairRun.totalLatencyMs,
+      bodyLength: repairedResponse.length,
+      parseStage: "repair",
+      validationPassed: Boolean(parsed),
+      failureCategory: parsed ? undefined : "json_parse",
+    });
     devLog("AI quiz JSON repair completed", {
       repairedLength: repairedResponse.length,
       parsed: Boolean(parsed),

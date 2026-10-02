@@ -5,6 +5,8 @@ import { generateLocalizedText } from "./aiLanguage";
 import { STUDYPILOT_TUTOR_INSTRUCTION } from "./tutorPrompt";
 import type { LearnerProfile } from "./learnerProfile";
 import { DEFAULT_LANGUAGE, type SupportedLanguageCode } from "@/shared/languages";
+import { buildLocalRevisionPlan } from "./localStudyFallback";
+import { logStructuredOutputDiagnostic } from "./observability";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -674,6 +676,7 @@ export async function generateRevisionPlan(
   ctx: StudyContext,
   language: SupportedLanguageCode = DEFAULT_LANGUAGE,
   signal?: AbortSignal,
+  loadLocalContext?: () => Promise<StudyContext>,
 ): Promise<RevisionPlan> {
   const { text: contextText, stats } = buildReducedStudyContextText(ctx);
   const providerInfo = getAIProviderRuntimeInfo("revision");
@@ -771,7 +774,9 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
         temperature: 0.25,
         maxOutputTokens: 6000,
         responseMimeType: "application/json",
-        timeoutMs: providerInfo.timeoutMs,
+        timeoutMs: 30_000,
+        primaryTimeoutMs: 18_000,
+        fallbackTimeoutMs: 12_000,
         signal,
         telemetry(event) {
           telemetryEvents.push(event);
@@ -803,7 +808,8 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
       fullExtractedTextSent: stats.fullExtractedTextSent,
       errorKind: failed?.errorKind ?? "request",
     });
-    throw error;
+    if (signal?.aborted) throw error;
+    return buildLocalRevisionPlan(loadLocalContext ? await loadLocalContext() : ctx, today);
   }
 
   telemetryLog("revision ai request completed", {
@@ -830,7 +836,7 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
       providerFailureCategory: providerResultRef.current?.providerFailureCategory ?? null,
       responseChars: response.length,
     });
-    throw new Error(unavailableMessage);
+    return buildLocalRevisionPlan(loadLocalContext ? await loadLocalContext() : ctx, today);
   }
 
   if (process.env.NODE_ENV !== "production") {
@@ -870,6 +876,17 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
       });
     }
   }
+  logStructuredOutputDiagnostic({
+    feature: "revision",
+    provider: actualProvider,
+    model: actualModel,
+    status: response ? 200 : undefined,
+    latencyMs: providerResultRef.current?.totalLatencyMs,
+    bodyLength: response.length,
+    parseStage: "initial",
+    validationPassed: Boolean(plan),
+    failureCategory: parseAttempt.error ? "json_parse" : validationError ? "schema_validation" : undefined,
+  });
 
   if (process.env.NODE_ENV !== "production") {
     console.log("[DEBUG] REVISION validation:", {
@@ -936,6 +953,17 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
         });
       }
     }
+    logStructuredOutputDiagnostic({
+      feature: "revision",
+      provider: repairedResponse.result?.provider ?? actualProvider,
+      model: repairedResponse.result?.model ?? actualModel,
+      status: repairedResponse.text ? 200 : undefined,
+      latencyMs: repairedResponse.result?.totalLatencyMs,
+      bodyLength: repairedResponse.text.length,
+      parseStage: "repair",
+      validationPassed: Boolean(plan),
+      failureCategory: repairedParse.error ? "json_parse" : validationError ? "schema_validation" : undefined,
+    });
   } else if (!plan && isProviderFailure) {
     devLog("AI revision skipping JSON repair due to provider failure", {
       provider: actualProvider,
@@ -947,7 +975,12 @@ Return strict JSON only. Do not include markdown. The JSON shape must be:
   }
 
   if (!plan) {
-    throw new Error("AI returned a plan format StudyPilot could not read. Please try again.");
+    const detail = validationError || parseAttempt.error;
+    throw new Error(
+      detail
+        ? `AI returned a plan format StudyPilot could not read. ${detail}`
+        : "AI returned a plan format StudyPilot could not read. Please try again.",
+    );
   }
 
   devLog("revision plan validated", {

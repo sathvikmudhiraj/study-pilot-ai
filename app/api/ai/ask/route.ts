@@ -15,9 +15,15 @@ import { withRequestObservability } from "@/backend/lib/observability";
 import { getAiUserMessage, isAiBusyError, isAiQuotaError } from "@/backend/lib/aiProvider";
 import { isGreeting, greetingResponse } from "@/backend/lib/greetingDetector";
 import { buildLearnerProfile, buildPersonalizedChatContext, recommendWeakTopic } from "@/backend/lib/learnerProfile";
-import { isSupportedLanguageCode, type SupportedLanguageCode } from "@/shared/languages";
+import { isSupportedLanguageCode, languageDetails, type SupportedLanguageCode } from "@/shared/languages";
 import { enforceAiRateLimit } from "@/backend/lib/rateLimit";
 import { applyGroundingValidation, unsupportedSelectedMaterialAnswer } from "@/backend/lib/ragGrounding";
+import { requestedStudyLanguage, stripConversationalPrefix, suggestedWebTopic } from "@/shared/studyIntent";
+import { focusedTopicMissingFromTexts } from "@/backend/lib/focusedTopicEvidence";
+import { buildLocalChatAnswer, readLocalDocxParagraphs } from "@/backend/lib/localStudyFallback";
+import { learningRecommendation, loadLearningMemory, recordExplicitLearningEvidence } from "@/backend/lib/learningMemory";
+import { learningMemoryIntent, type LearningState } from "@/shared/learningMemory";
+import { createConversationResult, withConversationResult } from "@/shared/conversationResults";
 
 export const runtime = "nodejs";
 
@@ -44,6 +50,8 @@ type ContextItem = {
   sourceName?: string;
   citationSourceType?: CitationSourceType;
   citation?: SourceCitation;
+  fallbackText?: string;
+  fallbackStoragePath?: string;
 };
 
 type SourceChip = {
@@ -57,6 +65,7 @@ type ChatAnswerWithMode = StructuredChatAnswer & {
   fallback_notice?: string;
   source_chips?: SourceChip[];
   source_citations?: SourceCitation[];
+  fallback_item_ids?: string[];
 };
 
 const MAX_CONTEXT_CHARS = 12000;
@@ -67,7 +76,6 @@ const SELECTED_FILE_RELEVANCE_THRESHOLD = 1;
 const DEFAULT_SELECTED_CHAT_CHUNKS = 4;
 const BROAD_SELECTED_CHAT_CHUNKS = 8;
 const OFFLINE_FALLBACK_MODE = "offline_fallback";
-const OFFLINE_QUOTA_MESSAGE = "AI quota is temporarily reached, but I can still help from your saved notes and summaries.";
 
 function isDev() {
   return process.env.NODE_ENV !== "production";
@@ -147,26 +155,6 @@ function idKey(ids: unknown) {
   return cleanIds(ids).sort().join("|");
 }
 
-function cleanSnippet(text: string, limit = 360) {
-  return text.replace(/\s+/g, " ").trim().slice(0, limit).trim();
-}
-
-function splitSnippets(text: string) {
-  const normalized = text.replace(/\r/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
-  if (!normalized) return [];
-
-  const paragraphs = normalized
-    .split(/\n{2,}/)
-    .map((item) => cleanSnippet(item, 520))
-    .filter((item) => item.length > 40);
-
-  if (paragraphs.length >= 3) return paragraphs.slice(0, 80);
-
-  return (normalized.match(/[^.!?]+[.!?]+|[^.!?]+$/g) ?? [])
-    .map((item) => cleanSnippet(item, 420))
-    .filter((item) => item.length > 40)
-    .slice(0, 80);
-}
 
 function sourceTypeForItem(item: ContextItem): SourceChip["type"] {
   if (item.source) return item.source;
@@ -196,6 +184,16 @@ function sourceChipsForItems(items: ContextItem[]) {
   return chips;
 }
 
+function learningContextForPrompt(states: LearningState[]) {
+  if (!states.length) return "";
+  return [
+    "Verified learning-state evidence (do not infer beyond these records):",
+    ...states.slice(0, 8).map((state) =>
+      `- ${state.topic}: ${state.status}; quiz attempts ${state.quiz_attempts}; correct ${state.correct_count}; incorrect ${state.incorrect_count}; revision ${state.revision_status}.`,
+    ),
+  ].join("\n");
+}
+
 function citationTypeForItem(item: ContextItem): CitationSourceType {
   if (item.citationSourceType) return item.citationSourceType;
   return item.type;
@@ -214,17 +212,6 @@ function citedSegmentsForItems(items: ContextItem[], maxChars = 5200) {
   );
 }
 
-function isImportantNotesQuestion(question: string) {
-  const lower = question.toLowerCase();
-  return ["important notes", "imp notes", "key points", "important points", "summarize", "summary", "revise", "revision", "what should i revise"].some((phrase) =>
-    lower.includes(phrase),
-  );
-}
-
-function isRevisionQuestion(question: string) {
-  const lower = question.toLowerCase();
-  return lower.includes("revise") || lower.includes("revision") || lower.includes("what should i revise") || lower.includes("next topic");
-}
 
 export const CONTINUATION_PHRASES = [
   "next",
@@ -232,6 +219,7 @@ export const CONTINUATION_PHRASES = [
   "more",
   "next questions",
   "give me more",
+  "tell me more",
   "continue this",
   "next one",
   "next batch",
@@ -250,6 +238,15 @@ const CONTEXT_TRANSFORM_PHRASES = [
   "explain this",
   "teach me this",
   "do it",
+  "simple ga cheppu",
+  "telugu lo simple ga cheppu",
+  "english lo cheppu",
+  "telugu lo cheppu",
+  "short ga cheppu",
+  "detail ga cheppu",
+  "explain simply",
+  "explain in telugu",
+  "explain in english",
 ] as const;
 
 export function requestedFollowUpCount(question: string): number | null {
@@ -263,7 +260,7 @@ export function requestedFollowUpCount(question: string): number | null {
 }
 
 export function isContinuationIntent(question: string): boolean {
-  const lower = question.toLowerCase().trim();
+  const lower = stripConversationalPrefix(question).toLowerCase().trim();
   if (requestedFollowUpCount(lower) !== null) return true;
   // Use word boundary: phrase must be the first word (start of string), followed by space or end
   // But NOT followed by another word (e.g., "next topic" should not match)
@@ -288,15 +285,20 @@ export function isContinuationIntent(question: string): boolean {
 }
 
 export function isContextTransformFollowUp(question: string): boolean {
-  const lower = question.toLowerCase().trim().replace(/[?.!]+$/g, "");
-  return CONTEXT_TRANSFORM_PHRASES.some((phrase) => lower === phrase);
+  return contextTransformKind(question) !== null;
 }
 
-function contextTransformKind(question: string): "summarize" | "explain" | "teach" | null {
-  const lower = question.toLowerCase().trim().replace(/[?.!]+$/g, "");
+function contextTransformKind(question: string): "summarize" | "explain" | "teach" | "simple" | "short" | "detail" | "telugu" | "english" | "language" | null {
+  const lower = stripConversationalPrefix(question).toLowerCase().trim().replace(/[?.!]+$/g, "");
   if (lower === "summarize it" || lower === "summarise it" || lower === "summary" || lower === "give me summary") return "summarize";
   if (lower === "explain it" || lower === "explain this") return "explain";
   if (lower === "teach me this" || lower === "do it") return "teach";
+  if (["simple ga cheppu", "telugu lo simple ga cheppu", "explain simply"].includes(lower)) return lower.startsWith("telugu") ? "telugu" : "simple";
+  if (["telugu lo cheppu", "explain in telugu"].includes(lower)) return "telugu";
+  if (["english lo cheppu", "explain in english"].includes(lower)) return "english";
+  if (requestedStudyLanguage(question)) return "language";
+  if (lower === "short ga cheppu") return "short";
+  if (lower === "detail ga cheppu") return "detail";
   return null;
 }
 
@@ -308,6 +310,17 @@ export type ActiveIntent =
   | "learn_step"
   | "quiz"
   | "general_qa";
+
+function activeIntentFromStudyTask(task: unknown): ActiveIntent | null {
+  switch (task) {
+    case "explain": return "explain";
+    case "quiz": return "quiz";
+    case "viva": return "viva_questions";
+    case "exam_questions": return "exam_questions";
+    case "notes": return "summarize";
+    default: return null;
+  }
+}
 
 export function classifyIntent(question: string): ActiveIntent {
   const lower = question.toLowerCase();
@@ -352,7 +365,8 @@ export function buildFollowUpQuestion(
   isNextBatch: boolean,
   options: {
     requestedCount?: number | null;
-    transform?: "summarize" | "explain" | "teach" | null;
+    transform?: "summarize" | "explain" | "teach" | "simple" | "short" | "detail" | "telugu" | "english" | "language" | null;
+    transformLanguage?: SupportedLanguageCode | null;
     previousQuestions?: string[];
   } = {},
 ): string {
@@ -375,6 +389,14 @@ export function buildFollowUpQuestion(
   if (options.transform === "teach") {
     const target = topic || base;
     return `Teach the previous ${target} topic step by step using the same selected study material and citations.`;
+  }
+  if (options.transform === "simple") return `Explain ${topic || base} in beginner-friendly words using the same selected study material and citations.`;
+  if (options.transform === "short") return `Explain ${topic || base} briefly using the same selected study material and citations.`;
+  if (options.transform === "detail") return `Explain ${topic || base} in more detail using the same selected study material and citations.`;
+  if (options.transform === "telugu") return `Explain ${topic || base} simply in Telugu or natural Telugu-English, preserving technical terms and using the same selected study material and citations.`;
+  if (options.transform === "english") return `Explain ${topic || base} in English using the same selected study material and citations.`;
+  if (options.transform === "language" && options.transformLanguage) {
+    return `Explain ${topic || base} in ${languageDetails(options.transformLanguage).promptName} using the same selected study material and citations.`;
   }
 
   switch (intent) {
@@ -399,35 +421,43 @@ export async function getLastMeaningfulUserQuestion({
   supabase,
   userId,
   conversationId,
-  language,
+  fileIds = [],
+  noteIds = [],
 }: {
   supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>;
   userId: string;
   conversationId: string | null;
-  language: SupportedLanguageCode;
-}): Promise<{ question: string; intent: ActiveIntent; previousQuestions: string[] } | null> {
+  fileIds?: string[];
+  noteIds?: string[];
+}): Promise<{ question: string; intent: ActiveIntent; previousQuestions: string[]; fallbackItemIds: string[] } | null> {
   if (!supabase || !conversationId) return null;
 
   const { data, error } = await supabase
     .from("assistant_questions")
-    .select("question, answer")
+    .select("question, answer, related_file_ids, related_note_ids")
     .eq("user_id", userId)
     .eq("conversation_id", conversationId)
-    .eq("language_code", language)
     .order("created_at", { ascending: false })
     .limit(10);
 
   if (error || !data?.length) return null;
 
   const previousQuestions: string[] = [];
+  const fallbackItemIds: string[] = [];
   for (const row of data) {
+    const sameFiles = !fileIds.length || fileIds.some((id) => (row.related_file_ids ?? []).includes(id));
+    const sameNotes = !noteIds.length || noteIds.some((id) => (row.related_note_ids ?? []).includes(id));
+    if (!sameFiles || !sameNotes) continue;
     previousQuestions.push(...extractGeneratedQuestions(row.answer));
+    if (row.answer && typeof row.answer === "object" && Array.isArray((row.answer as { fallback_item_ids?: unknown }).fallback_item_ids)) {
+      fallbackItemIds.push(...(row.answer as { fallback_item_ids: string[] }).fallback_item_ids);
+    }
     const q = String(row.question ?? "").trim();
     if (!q) continue;
     if (isContinuationIntent(q)) continue;
     if (isContextTransformFollowUp(q)) continue;
     if (isGreeting(q)) continue;
-    return { question: q, intent: classifyIntent(q), previousQuestions };
+    return { question: q, intent: classifyIntent(q), previousQuestions, fallbackItemIds };
   }
   return null;
 }
@@ -436,9 +466,14 @@ export async function getLastMeaningfulUserQuestion({
 // stale narrow cached answer or a previously-saved summary. These questions ask about
 // the whole attachment ("explain this PDF", "give important notes"), so any previous
 // answer tied to the same question+file is likely a stale, narrow snapshot.
-function isBroadFileQuestion(question: string) {
+export function isBroadFileQuestion(question: string) {
   const lower = question.toLowerCase().trim();
   if (!lower) return false;
+
+  if (
+    /^(?:give|generate|create|make)(?:\s+me)?\s+(?:(?:a|some|the)\s+)?(?:(?:short|practice|exam|viva)\s+)*(?:quiz|questions?|revision plan)\b/i.test(lower)
+    && !/\b(?:on|about|for)\s+(?!(?:exam preparation|(?:this|my|the|selected)\s+(?:file|document|study material|notes))\b)[a-z0-9]/i.test(lower)
+  ) return true;
 
   const broadPhrases = [
     "important notes",
@@ -475,29 +510,6 @@ function isBroadFileQuestion(question: string) {
   return stripped.split(" ").length <= 2 && singleWordBroad.some((word) => stripped === word || stripped.startsWith(`${word} `));
 }
 
-function pickRelevantSnippets(question: string, items: ContextItem[]) {
-  const queryTokens = tokens(question);
-  const segments = citedSegmentsForItems(items, 4200);
-  const ranked = segments.flatMap((segment, segmentIndex) =>
-    splitSnippets(segment.text).map((snippet, snippetIndex) => ({
-      citation: segment.citation,
-      snippet,
-      score:
-        scoreText(queryTokens, `${segment.citation.source_name}\n${snippet}`) * 12 +
-        Math.max(0, 8 - segmentIndex) +
-        Math.max(0, 4 - snippetIndex),
-    })),
-  );
-
-  return ranked
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 8)
-    .map(({ citation, snippet }) => ({
-      label: formatCitationLocator(citation),
-      citation,
-      text: cleanSnippet(snippet, 420),
-    }));
-}
 
 function answerToContextText(answer: unknown) {
   if (!answer) return "";
@@ -531,7 +543,7 @@ function normalizeGeneratedQuestion(text: string) {
     .trim();
 }
 
-function extractGeneratedQuestions(answer: unknown) {
+export function extractGeneratedQuestions(answer: unknown) {
   const text = answerToContextText(answer);
   if (!text) return [];
 
@@ -550,107 +562,6 @@ function extractGeneratedQuestions(answer: unknown) {
   return questions;
 }
 
-function buildOfflineFallbackAnswer({
-  question,
-  contextItems,
-}: {
-  question: string;
-  contextItems: ContextItem[];
-}): ChatAnswerWithMode {
-  // Greetings are handled upstream and never reach the fallback builder.
-  // Guard here as a safety net.
-  if (isGreeting(question)) {
-    const msg = greetingResponse(question);
-    return {
-      response_mode: OFFLINE_FALLBACK_MODE,
-      fallback_notice: undefined,
-      source_chips: [],
-      source_citations: [],
-      short_answer: msg,
-      simple_explanation: msg,
-      step_by_step: [],
-      example: "",
-      memory_line: "",
-      common_mistake: "",
-      exam_viva_answer: "",
-      practice_question: "",
-      related_files_notes: [],
-      next_step: "",
-    };
-  }
-
-  // Deduplicate context items by text content.
-  const seenTexts = new Set<string>();
-  const uniqueItems = contextItems.filter((item) => {
-    if (!item.text) return false;
-    if (item.text.toLowerCase().includes("no readable extracted text")) return false;
-    // Use first 120 chars as dedup key to catch near-identical chunks.
-    const key = item.text.slice(0, 120).trim();
-    if (seenTexts.has(key)) return false;
-    seenTexts.add(key);
-    return true;
-  });
-
-  const sources = sourceChipsForItems(uniqueItems);
-  const snippets = pickRelevantSnippets(question, uniqueItems);
-  const citations = uniqueSourceCitations(snippets.map((snippet) => snippet.citation), 8);
-  const importantMode = isImportantNotesQuestion(question);
-  const revisionMode = isRevisionQuestion(question);
-  const related = sources.map((source) => `${source.type}: ${source.label}`);
-
-  if (!snippets.length) {
-    return {
-      response_mode: OFFLINE_FALLBACK_MODE,
-      fallback_notice: OFFLINE_QUOTA_MESSAGE,
-      source_chips: sources,
-      source_citations: citations,
-      short_answer: "I couldn't find this in your saved study material. Try asking a specific question or use Web Search.",
-      simple_explanation:
-        "AI quota is temporarily reached. StudyPilot checked your saved files, notes, and summaries but did not find enough content for this question. Try attaching a specific file or asking a narrower question.",
-      step_by_step: [
-        "Attach the relevant file or note and retry.",
-        "Add manual notes for the topic you want to revise.",
-        "Use Web Search for general knowledge questions.",
-      ],
-      example: "",
-      memory_line: "",
-      common_mistake: "",
-      exam_viva_answer: "",
-      practice_question: "",
-      related_files_notes: related,
-      next_step: "Retry AI in a few seconds, or attach a specific file for focused help.",
-    };
-  }
-
-  const bullets = snippets.map((snippet) => `${snippet.text} (${snippet.label})`).slice(0, importantMode ? 7 : 5);
-  const first = snippets[0];
-
-  return {
-    response_mode: OFFLINE_FALLBACK_MODE,
-    fallback_notice: OFFLINE_QUOTA_MESSAGE,
-    source_chips: sources,
-    source_citations: citations,
-    short_answer: first.text,
-    simple_explanation: [
-      "Based on your saved study material, here are the most relevant parts found:",
-      ...bullets.map((bullet) => `- ${bullet}`),
-    ].join("\n\n"),
-    step_by_step: revisionMode
-      ? bullets.map((bullet, index) => `${index + 1}. Revise: ${bullet}`)
-      : importantMode
-        ? bullets.map((bullet) => `Focus on: ${bullet}`)
-        : bullets,
-    example: importantMode ? "Use these points as quick revision notes." : first.text,
-    memory_line: "",
-    common_mistake: "",
-    exam_viva_answer: bullets.slice(0, 4).join(" "),
-    practice_question: revisionMode ? "Explain the first revision topic in your own words." : "What is the main idea behind the most important point above?",
-    related_files_notes: related,
-    next_step: revisionMode
-      ? "Revise the listed topics, then retry AI for a deeper explanation or quiz."
-      : "Retry AI in a few seconds for a richer answer, or attach the specific file.",
-  };
-}
 
 function asStringList(value: unknown) {
   return Array.isArray(value) ? value.map((item) => String(item ?? "").trim()).filter(Boolean) : [];
@@ -982,7 +893,7 @@ async function getSelectedFileContext({
         fullTextUsed: text.length <= FULL_SELECTED_FILE_CONTEXT_CHARS && !broadQuestion,
       });
 
-      for (const chunk of selectedChunks) {
+      for (const [index, chunk] of selectedChunks.entries()) {
         const citation = citationForChunk(file, chunk);
         items.push({
           id: file.id,
@@ -990,6 +901,8 @@ async function getSelectedFileContext({
           label: file.file_name,
           sourceName: file.file_name,
           text: chunk.text,
+          fallbackText: index === 0 ? text : undefined,
+          fallbackStoragePath: index === 0 ? file.storage_path ?? undefined : undefined,
           source: "Extracted text",
           citation,
         });
@@ -1144,109 +1057,6 @@ async function getKeywordContext({
     .map(({ item }) => item);
 }
 
-async function getGlobalFallbackContext({
-  supabase,
-  userId,
-  question,
-  language,
-  excludeFileIds = [],
-  excludeNoteIds = [],
-}: {
-  supabase: Awaited<ReturnType<typeof createServerSupabaseClient>>;
-  userId: string;
-  question: string;
-  language: SupportedLanguageCode;
-  excludeFileIds?: string[];
-  excludeNoteIds?: string[];
-}) {
-  if (!supabase) return [];
-  const queryTokens = tokens(question);
-
-  const [filesResult, notesResult] = await Promise.all([
-    supabase
-      .from("files")
-      .select("id, file_name, extracted_text, created_at")
-      .eq("user_id", userId)
-      .not("id", "in", `(${excludeFileIds.map(() => "?").join(",")})`)
-      .order("created_at", { ascending: false })
-      .limit(20),
-    supabase
-      .from("notes")
-      .select("id, title, topic, raw_notes, content, created_at")
-      .eq("user_id", userId)
-      .not("id", "in", `(${excludeNoteIds.map(() => "?").join(",")})`)
-      .order("created_at", { ascending: false })
-      .limit(20),
-  ]);
-
-  const summariesResult = await supabase
-    .from("ai_outputs")
-    .select("id, suggested_title, short_summary, key_points, important_concepts, content, file_id, note_id, created_at")
-    .eq("user_id", userId)
-    .eq("language_code", language)
-    .order("created_at", { ascending: false })
-    .limit(20);
-  let summaryRows = (summariesResult.data ?? []) as Record<string, unknown>[];
-  let summaryError = summariesResult.error;
-
-  if (summariesResult.error && isMissingColumnLike(summariesResult.error.message)) {
-    const fallbackSummaries = await supabase
-      .from("ai_outputs")
-      .select("id, suggested_title, short_summary, key_points, important_concepts, file_id, note_id, created_at")
-      .eq("user_id", userId)
-      .eq("language_code", language)
-      .order("created_at", { ascending: false })
-      .limit(20);
-    summaryRows = (fallbackSummaries.data ?? []) as Record<string, unknown>[];
-    summaryError = fallbackSummaries.error;
-  }
-
-  if (filesResult.error) throw filesResult.error;
-  if (notesResult.error) throw notesResult.error;
-  if (summaryError) throw summaryError;
-
-  const candidates: ContextItem[] = [
-    ...(filesResult.data ?? []).map((file) => ({
-      id: file.id,
-      type: "file" as const,
-      label: file.file_name,
-      sourceName: file.file_name,
-      text: String(file.extracted_text ?? "").trim(),
-      source: "Extracted text" as const,
-    })),
-    ...(notesResult.data ?? []).map((note) => ({
-      id: note.id,
-      type: "note" as const,
-      label: note.title ?? note.topic ?? "Manual note",
-      sourceName: note.title ?? note.topic ?? "Manual note",
-      text: String(note.raw_notes ?? note.content ?? "").trim(),
-      source: "Manual notes" as const,
-    })),
-    ...summaryRows.map((summary) => ({
-      id: String(summary.id),
-      type: "summary" as const,
-      label: String(summary.suggested_title ?? "Saved summary"),
-      sourceName:
-        (summary.file_id
-          ? (filesResult.data ?? []).find((file) => file.id === summary.file_id)?.file_name
-          : summary.note_id
-            ? (notesResult.data ?? []).find((note) => note.id === summary.note_id)?.title
-            : null) ?? String(summary.suggested_title ?? "Saved summary"),
-      text: summaryToContextText(summary),
-      source: "Saved summary" as const,
-    })),
-  ].filter((item) => item.text);
-
-  return candidates
-    .map((item, index) => ({
-      item,
-      score: scoreText(queryTokens, `${item.label}\n${item.text}`) * 10 + Math.max(0, 8 - index),
-    }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 6)
-    .map(({ item }) => item);
-}
-
 async function getPreviousAnswerContext({
   supabase,
   userId,
@@ -1289,8 +1099,32 @@ async function getPreviousAnswerContext({
     return [];
   }
 
-  return (data ?? [])
+  let contextRows = data ?? [];
+  const historicalTokens = tokens(question).slice(0, 4);
+  if (conversationId && historicalTokens.length) {
+    const historical = await supabase
+      .from("assistant_questions")
+      .select("id, question, answer, created_at")
+      .eq("user_id", userId)
+      .eq("conversation_id", conversationId)
+      .eq("language_code", language)
+      .or(historicalTokens.map((token) => `question.ilike.%${token}%`).join(","))
+      .order("created_at", { ascending: false })
+      .limit(12);
+    if (!historical.error) {
+      const byId = new Map(contextRows.map((row) => [row.id, row]));
+      for (const row of historical.data ?? []) byId.set(row.id, row);
+      contextRows = [...byId.values()];
+    }
+  }
+
+  return contextRows
     .filter((row) => String(row.question ?? "").trim().toLowerCase() !== question.trim().toLowerCase())
+    .sort((left, right) => {
+      const relevance = scoreText(tokens(question), `${right.question}\n${answerToContextText(right.answer)}`)
+        - scoreText(tokens(question), `${left.question}\n${answerToContextText(left.answer)}`);
+      return relevance || Date.parse(right.created_at) - Date.parse(left.created_at);
+    })
     .map((row) => ({
       id: row.id,
       type: "previous_answer" as const,
@@ -1439,6 +1273,7 @@ async function handlePost(request: Request) {
   const rawConversationId = body.conversationId?.trim() ?? null;
   let conversationId: string | null = null;
   let conversationContextMode: string | null = null;
+  let conversationStudyState: Record<string, unknown> = {};
 
   if (rawConversationId) {
     if (!CONVERSATION_ID_RE.test(rawConversationId)) {
@@ -1448,7 +1283,7 @@ async function handlePost(request: Request) {
     const { data: convo, error: convoError } = await measure("conversation_loading", async () =>
       await supabase
         .from("conversations")
-        .select("id, context_mode, active_file_ids, active_note_ids, language_code")
+        .select("id, context_mode, active_file_ids, active_note_ids, language_code, study_state")
         .eq("id", rawConversationId)
         .eq("user_id", user.id)
         .maybeSingle(),
@@ -1462,6 +1297,9 @@ async function handlePost(request: Request) {
     }
     conversationId = rawConversationId;
     conversationContextMode = typeof convo.context_mode === "string" ? convo.context_mode : "general";
+    conversationStudyState = convo.study_state && typeof convo.study_state === "object"
+      ? convo.study_state as Record<string, unknown>
+      : {};
     if (body.language === undefined && isSupportedLanguageCode(convo.language_code)) {
       language = convo.language_code;
     }
@@ -1477,6 +1315,7 @@ async function handlePost(request: Request) {
     debug.noteCount = noteIds.length;
     debug.contextMode = conversationContextMode;
   }
+  language = requestedStudyLanguage(question) ?? language;
   // ──────────────────────────────────────────────────────────────────────
 
   // ── Continuation intent resolution ──────────────────────────────────────
@@ -1484,19 +1323,22 @@ async function handlePost(request: Request) {
   // last meaningful question in this conversation to inherit the active task.
   let resolvedQuestion = question;
   let resolvedIntent: ActiveIntent | null = null;
+  let continuationFallbackItemIds: string[] = [];
   const requestedCount = requestedFollowUpCount(question);
   const transform = contextTransformKind(question);
   const isFollowUpRequest = isContinuationIntent(question) || transform !== null;
 
   if (conversationId && isFollowUpRequest) {
     const lastMeaningful = await measure("continuation_resolution", () =>
-      getLastMeaningfulUserQuestion({ supabase, userId: user.id, conversationId, language }),
+      getLastMeaningfulUserQuestion({ supabase, userId: user.id, conversationId, fileIds, noteIds }),
     );
     if (lastMeaningful) {
+      continuationFallbackItemIds = lastMeaningful.fallbackItemIds ?? [];
       resolvedIntent = transform === "summarize" ? "summarize" : transform === "explain" ? "explain" : transform === "teach" ? "learn_step" : lastMeaningful.intent;
       resolvedQuestion = buildFollowUpQuestion(lastMeaningful.question, resolvedIntent, true, {
         requestedCount,
         transform,
+        transformLanguage: requestedStudyLanguage(question),
         previousQuestions: lastMeaningful.previousQuestions,
       });
       debug.continuationResolved = true;
@@ -1507,8 +1349,19 @@ async function handlePost(request: Request) {
       debug.contextTransform = transform;
       debug.previousGeneratedQuestionCount = lastMeaningful.previousQuestions.length;
     } else {
-      debug.continuationResolved = false;
-      debug.continuationReason = "no_previous_meaningful_question";
+      const storedIntent = activeIntentFromStudyTask(conversationStudyState.active_task);
+      const storedTopic = typeof conversationStudyState.active_topic === "string"
+        ? conversationStudyState.active_topic.trim()
+        : "";
+      if (storedIntent && storedTopic) {
+        resolvedIntent = storedIntent;
+        resolvedQuestion = buildFollowUpQuestion(storedTopic, storedIntent, true, { requestedCount, transform });
+        debug.continuationResolved = true;
+        debug.continuationSource = "persisted_study_state";
+      } else {
+        debug.continuationResolved = false;
+        debug.continuationReason = "no_previous_meaningful_question";
+      }
     }
   }
   // ────────────────────────────────────────────────────────────────────────
@@ -1561,6 +1414,109 @@ async function handlePost(request: Request) {
     return NextResponse.json({ chat: saved.data, related: [], mode: "ai", ...(isDev() ? { debug: { ...debug, timings: timingDebug() } } : {}) });
   }
   // ─────────────────────────────────────────────────────────────────────────
+
+  const memoryIntent = learningMemoryIntent(question);
+  if (memoryIntent) {
+    try {
+      const activeTopic = typeof conversationStudyState.active_topic === "string"
+        ? conversationStudyState.active_topic.trim()
+        : "";
+      let text: string;
+      let states: LearningState[];
+
+      if (memoryIntent === "explicit_understanding" || memoryIntent === "explicit_confusion") {
+        const statedTopic = topicFromQuestion(question.replace(/\b(?:i|am|still|do not|don't|understand|understood|now|this|it|is|confusing|confused|mark|complete)\b/gi, " "));
+        const topic = statedTopic || activeTopic;
+        if (!topic) {
+          text = "Tell me which topic you mean before I update your learning progress.";
+          states = [];
+        } else {
+          const state = await recordExplicitLearningEvidence(supabase, {
+            userId: user.id,
+            topic,
+            understood: memoryIntent === "explicit_understanding",
+            fileIds,
+            conversationId,
+          });
+          states = [state];
+          text = memoryIntent === "explicit_understanding"
+            ? `${topic} is now marked understood based on your explicit confirmation.`
+            : `${topic} is marked for revision because you said it is still unclear.`;
+        }
+      } else {
+        const memory = await loadLearningMemory(supabase, user.id, { fileId: fileIds[0], limit: 50 });
+        const recommendation = learningRecommendation(memory, memoryIntent);
+        text = recommendation.text;
+        states = recommendation.states;
+      }
+
+      const result = createConversationResult("learning_state_result", {
+        intent: memoryIntent,
+        states: states.map((state) => ({
+          id: state.id,
+          topic: state.topic,
+          status: state.status,
+          confidence: state.confidence,
+          quiz_attempts: state.quiz_attempts,
+          correct_count: state.correct_count,
+          incorrect_count: state.incorrect_count,
+          revision_status: state.revision_status,
+          reason: state.incorrect_count
+            ? `${state.incorrect_count} recorded incorrect answer${state.incorrect_count === 1 ? "" : "s"}`
+            : `Evidence-backed status: ${state.status}`,
+        })),
+      }, {
+        text,
+        title: "Learning progress",
+        status: "completed",
+        provenance: { file_ids: fileIds, topic: activeTopic || undefined, language },
+      });
+      const answer = withConversationResult<ChatAnswerWithMode>({
+        response_mode: "ai",
+        short_answer: text,
+        simple_explanation: text,
+        step_by_step: [],
+        example: "",
+        memory_line: "",
+        common_mistake: "",
+        exam_viva_answer: "",
+        practice_question: "",
+        related_files_notes: [],
+        next_step: states.length ? "Continue studying or complete another quiz to add new evidence." : "Complete a quiz to build evidence-based recommendations.",
+      }, result);
+      const saved = await supabase.from("assistant_questions").insert({
+        user_id: user.id,
+        question,
+        answer,
+        related_file_ids: fileIds,
+        related_note_ids: noteIds,
+        mode: "learning_memory",
+        status: "answered",
+        language_code: language,
+        ...(conversationId ? { conversation_id: conversationId } : {}),
+      }).select("id, question, answer, related_file_ids, related_note_ids, created_at").single();
+      if (saved.error) throw saved.error;
+      if (conversationId && states[0]) {
+        await supabase.from("conversations").update({ study_state: {
+          ...conversationStudyState,
+          active_topic: states[0].topic,
+          active_task: memoryIntent,
+          last_meaningful_intent: memoryIntent,
+          updated_at: new Date().toISOString(),
+        } }).eq("id", conversationId).eq("user_id", user.id);
+      }
+      return NextResponse.json({
+        chat: saved.data,
+        related: [],
+        mode: "learning_memory",
+        learningMemory: states,
+        ...(isDev() ? { debug: { ...debug, learningMemoryIntent: memoryIntent, timings: timingDebug() } } : {}),
+      });
+    } catch (error) {
+      devLog("learning memory request failed", { error: error instanceof Error ? error.message : String(error) });
+      return apiError("Could not load or update learning progress. Please try again.", 500);
+    }
+  }
 
   if (isFollowUpRequest && resolvedQuestion === question) {
     const clarification = "What should I continue? Ask a full question first, or continue from an existing conversation topic.";
@@ -1643,54 +1599,8 @@ async function handlePost(request: Request) {
       : conversationId
         ? []
         : await measure("file_context_loading", () => getKeywordContext({ supabase, userId: user.id, question: resolvedQuestion, language }));
-    let contextItems = selectedContext.length ? selectedContext : keywordContext;
+    const contextItems = selectedContext.length ? selectedContext : keywordContext;
     const selectedMaterialMode = fileIds.length > 0 || noteIds.length > 0;
-    let usedGlobalFallback = false;
-
-    // Global fallback search: if selected material mode but no relevant citations found,
-    // search user's other uploaded files and notes automatically.
-    if (selectedMaterialMode && contextItems.length > 0) {
-      const preparedSelected = await measure("prompt_building", async () =>
-        prepareCitedContext(contextItems, resolvedQuestion),
-      );
-      if (!preparedSelected.citations.length) {
-        devLog("selected material has no relevant citations, searching global fallback", { fileIds, noteIds });
-        logFileContextTrace("global_fallback_triggered", {
-          requestedFileIds: fileIds,
-          selectedFileIds: selectedFileContext.map((c) => c.id),
-          selectedFileNames: selectedFileContext.map((c) => c.label),
-        });
-        const globalContext = await measure("global_fallback_search", () =>
-          getGlobalFallbackContext({
-            supabase,
-            userId: user.id,
-            question: resolvedQuestion,
-            language,
-            excludeFileIds: fileIds,
-            excludeNoteIds: noteIds,
-          }),
-        );
-        if (globalContext.length > 0) {
-          const preparedGlobal = await measure("prompt_building", async () =>
-            prepareCitedContext(globalContext, resolvedQuestion),
-          );
-          if (preparedGlobal.citations.length > 0) {
-            contextItems = globalContext;
-            usedGlobalFallback = true;
-            logFileContextTrace("global_fallback_used", {
-              requestedFileIds: fileIds,
-              fallbackFileIds: globalContext.filter((c) => c.type === "file").map((c) => c.id),
-              fallbackFileNames: globalContext.filter((c) => c.type === "file").map((c) => c.label),
-              fallbackNoteIds: globalContext.filter((c) => c.type === "note").map((c) => c.id),
-              citationCount: preparedGlobal.citations.length,
-              citationSourceIds: preparedGlobal.citations.map((c) => c.id),
-              citationSourceNames: preparedGlobal.citations.map((c) => c.source_name),
-            });
-            devLog("global fallback found relevant citations", { citationCount: preparedGlobal.citations.length });
-          }
-        }
-      }
-    }
 
     const cached = requestMode === "learn_step_by_step" || broadAttachedFileQuestion || selectedMaterialMode
       ? null
@@ -1728,7 +1638,11 @@ async function handlePost(request: Request) {
           }),
         );
     const learnerProfile = await measure("learner_profile_loading", () => getLearnerProfileForChat({ supabase, userId: user.id }));
+    const learningMemory = await measure("learning_memory_loading", () =>
+      loadLearningMemory(supabase, user.id, { fileId: fileIds[0], limit: 12 }),
+    );
     const personalizedContext = selectedMaterialMode ? "" : buildPersonalizedChatContext(learnerProfile, resolvedQuestion);
+    const verifiedLearningContext = learningContextForPrompt(learningMemory.states);
     const recommendedWeakTopic = recommendWeakTopic(learnerProfile);
     const personalizedQuestion =
       requestMode === "learn_step_by_step" && recommendedWeakTopic && /^(start|begin|recommend|suggest|lesson|learn|teach|next|weak)/i.test(resolvedQuestion)
@@ -1747,14 +1661,15 @@ async function handlePost(request: Request) {
       citationCount: preparedContext.citations.length,
       citationFileIds: preparedContext.citations.map((c) => c.source_id),
       citationSourceNames: preparedContext.citations.map((c) => c.source_name),
-      usedGlobalFallback,
+      usedGlobalFallback: false,
     });
 
-    const promptContext = [personalizedContext, preparedContext.text].filter(Boolean).join("\n\n");
+    const promptContext = [personalizedContext, verifiedLearningContext, preparedContext.text].filter(Boolean).join("\n\n");
 
     // If no supporting context found after all search strategies, return not-found without calling AI.
-    if (selectedMaterialMode && !preparedContext.citations.length) {
+    if (selectedMaterialMode && (!preparedContext.citations.length || focusedTopicMissingFromTexts(resolvedQuestion, contextItems.map((item) => item.text)))) {
       const answer = unsupportedSelectedMaterialAnswer();
+      answer.next_step = `Use Web Search for "${suggestedWebTopic(question)}".`;
       return NextResponse.json({
         chat: { id: null, question, answer, related_file_ids: [], related_note_ids: [], created_at: new Date().toISOString() },
         related: [],
@@ -1764,23 +1679,10 @@ async function handlePost(request: Request) {
       });
     }
 
-    // If not in selected material mode and no context at all, don't call AI.
-    if (!selectedMaterialMode && !contextItems.length && !previousContext.length) {
-      const answer = unsupportedSelectedMaterialAnswer();
-      answer.short_answer = "This topic was not found in your uploaded study material.";
-      answer.simple_explanation = "No relevant content was found in your files, notes, or summaries. Try uploading relevant material or use Web Search for general knowledge questions.";
-      return NextResponse.json({
-        chat: { id: null, question, answer, related_file_ids: [], related_note_ids: [], created_at: new Date().toISOString() },
-        related: [],
-        mode: "keyword-context",
-        usedGlobalFallback: false,
-        ...(isDev() ? { debug: { ...debug, noContextFound: true, timings: timingDebug() } } : {}),
-      });
-    }
-
     debug.contextItemCount = contextItems.length;
     debug.previousAnswerContextCount = previousContext.length;
     debug.learnerWeakTopicCount = learnerProfile.weakTopics.length;
+    debug.learningStateCount = learningMemory.states.length;
     debug.contextLength = promptContext.length;
     debug.citationCount = preparedContext.citations.length;
     devLog("question context prepared", debug);
@@ -1788,7 +1690,7 @@ async function handlePost(request: Request) {
     let answer: ChatAnswerWithMode;
     let mode: "selected-context" | "keyword-context" | "offline_fallback" = selectedContext.length ? "selected-context" : "keyword-context";
     let providerMetaForResponse: Record<string, unknown> | null = null;
-    const usedGlobalFallbackResponse = usedGlobalFallback;
+    const usedGlobalFallbackResponse = false;
 
     try {
       answer = {
@@ -1808,6 +1710,14 @@ async function handlePost(request: Request) {
       };
       if (selectedMaterialMode && requestMode !== "learn_step_by_step") {
         answer = applyGroundingValidation(answer, preparedContext.citations);
+      }
+      const generatedIntent = resolvedIntent ?? classifyIntent(resolvedQuestion);
+      if (
+        selectedMaterialMode
+        && (generatedIntent === "viva_questions" || generatedIntent === "exam_questions")
+        && extractGeneratedQuestions(answer).length < 3
+      ) {
+        throw new Error("The provider response did not contain a usable question batch.");
       }
       const providerMeta = (answer as ChatAnswerWithMode & ChatAnswerWithMetadata)._providerMeta;
       delete (answer as ChatAnswerWithMode & ChatAnswerWithMetadata)._providerMeta;
@@ -1834,13 +1744,45 @@ async function handlePost(request: Request) {
         debug.geminiSkippedDueToCooldown = providerMeta.geminiSkippedDueToCooldown ?? false;
       }
     } catch (error) {
-      if (!isAiQuotaError(error) && !isAiBusyError(error)) throw error;
-
       const fallbackContext = [...contextItems, ...previousContext];
-      answer = buildOfflineFallbackAnswer({ question: resolvedQuestion, contextItems: fallbackContext });
+      const fullFileSources = (await Promise.all(fallbackContext.filter((item): item is ContextItem => item.type === "file" && "fallbackText" in item && Boolean(item.fallbackText)).map(async (item) => {
+        let localText = item.fallbackText!;
+        if (item.fallbackStoragePath && item.label.toLowerCase().endsWith(".docx")) {
+          const download = await supabase.storage.from("study-files").download(item.fallbackStoragePath);
+          if (!download.error) {
+            try {
+              localText = await readLocalDocxParagraphs(Buffer.from(await download.data.arrayBuffer())) || localText;
+            } catch (parseError) {
+              devLog("local DOCX paragraph read failed", { fileId: item.id, error: String(parseError) });
+            }
+          }
+        }
+        return chunkDocument(localText, { sourceId: item.id, maxChars: 8000, overlapChars: 0, dedupe: true }).map((chunk) => ({
+          id: chunk.id,
+          label: item.label,
+          text: chunk.text,
+          citation: citationForChunk({ id: item.id, file_name: item.label }, chunk),
+        }));
+      }))).flat();
+      const local = buildLocalChatAnswer({
+        question: isFollowUpRequest && resolvedIntent ? `${resolvedIntent} ${resolvedQuestion}` : resolvedQuestion,
+        sources: fullFileSources.length ? fullFileSources : fallbackContext.filter((item) => item.type !== "previous_answer").map((item) => {
+          const citation = "citation" in item ? item.citation : undefined;
+          return { id: citation?.id ?? item.id, label: item.label, text: item.text, citation };
+        }),
+        excludedIds: continuationFallbackItemIds,
+        language,
+        count: requestedCount ?? undefined,
+      });
+      answer = {
+        ...local,
+        response_mode: OFFLINE_FALLBACK_MODE,
+        fallback_notice: "Generated from your selected study material while AI providers are unavailable.",
+        source_chips: sourceChipsForItems(fallbackContext),
+      };
       mode = OFFLINE_FALLBACK_MODE;
       debug.offlineFallback = true;
-      debug.fallbackReason = isAiQuotaError(error) ? "quota" : "busy";
+      debug.fallbackReason = isAiQuotaError(error) ? "quota" : isAiBusyError(error) ? "busy_or_timeout" : error instanceof Error ? error.message : "provider_failure";
       devLog("offline fallback answer generated", {
         reason: debug.fallbackReason,
         contextItemCount: contextItems.length,
@@ -1848,8 +1790,8 @@ async function handlePost(request: Request) {
       });
     }
 
-    const relatedFileIds = contextItems.filter((item) => item.type === "file").map((item) => item.id);
-    const relatedNoteIds = contextItems.filter((item) => item.type === "note").map((item) => item.id);
+    const relatedFileIds = Array.from(new Set(contextItems.filter((item) => item.type === "file").map((item) => item.id)));
+    const relatedNoteIds = Array.from(new Set(contextItems.filter((item) => item.type === "note").map((item) => item.id)));
     const persistencePayload = {
       user_id: user.id,
       question,
@@ -1898,6 +1840,20 @@ return NextResponse.json({
     );
 
     if (saved.error) throw saved.error;
+
+    if (conversationId) {
+      const intent = resolvedIntent ?? classifyIntent(resolvedQuestion);
+      const activeTopic = topicFromQuestion(resolvedQuestion)
+        || (typeof conversationStudyState.active_topic === "string" ? conversationStudyState.active_topic : "");
+      const updatedStudyState = {
+        ...conversationStudyState,
+        active_topic: activeTopic,
+        active_task: intent,
+        last_meaningful_intent: intent,
+        updated_at: new Date().toISOString(),
+      };
+      await supabase.from("conversations").update({ study_state: updatedStudyState }).eq("id", conversationId).eq("user_id", user.id);
+    }
 
 return NextResponse.json({
       chat: saved.data,

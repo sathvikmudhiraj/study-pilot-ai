@@ -47,7 +47,7 @@ describe("REAL AI Provider Runtime Verification", () => {
     expect(runtime.primaryProvider).toBe("gemini");
     expect(runtime.primaryModel).toBe("gemini-2.5-flash");
     expect(runtime.fallbackProvider).toBe("nvidia");
-    expect(runtime.fallbackModel).toBe("meta/llama-3.2-11b-vision-instruct");
+    expect(runtime.fallbackModel).toBe("nvidia/nemotron-3-super-120b-a12b");
     console.log("  Text Provider Info:", runtime);
   });
 

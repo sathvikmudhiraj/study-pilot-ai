@@ -617,21 +617,13 @@ async function processPdf(
   }
 
   const completedPagesFromResume = resumeProgress ? new Set<number>() : new Set<number>();
-  const failedPagesFromResume = resumeProgress ? new Set<number>() : new Set<number>();
-  const visionCompletedFromResume = resumeProgress ? new Set<number>() : new Set<number>();
   if (resumeProgress) {
     for (const range of resumeProgress.completedPageRanges ?? []) {
       if (range.success) {
         for (let p = range.startPage; p <= range.endPage; p++) {
           completedPagesFromResume.add(p);
-          if (range.extractor === "gemini-vision" || range.extractor === "nvidia-vision") {
-            visionCompletedFromResume.add(p);
-          }
         }
       }
-    }
-    for (const p of resumeProgress.failedPages ?? []) {
-      failedPagesFromResume.add(p);
     }
   }
 
@@ -666,8 +658,7 @@ async function processPdf(
 
   let problematicPages = nativeQuality
     .filter((p) => !p.readable)
-    .map((p) => p.pageNumber)
-    .filter((p) => !completedPagesFromResume.has(p) && !failedPagesFromResume.has(p));
+    .map((p) => p.pageNumber);
 
   devLog("native page quality assessment", {
     fileName,
@@ -736,9 +727,7 @@ async function processPdf(
         ? `Standard PDF extraction found ${extracted.readableTextLength} characters; coverage validation required vision for some pages.`
         : "Standard PDF extraction did not cover the full module; vision fallback needed.",
     );
-    problematicPages = Array.from({ length: totalPages }, (_, i) => i + 1).filter(
-      (p) => !completedPagesFromResume.has(p) && !failedPagesFromResume.has(p),
-    );
+    problematicPages = Array.from({ length: totalPages }, (_, i) => i + 1);
   }
 
   if (problematicPages.length > 0) {
@@ -764,7 +753,6 @@ async function processPdf(
       problematicPages,
       nativeExtractions,
       [...readableNativePages, ...alreadyCompletedNative],
-      visionCompletedFromResume,
       validateExtractedText,
       reportProgress,
     );
@@ -928,7 +916,6 @@ async function extractProblematicPagesWithVision(
   problematicPages: number[],
   nativeExtractions: PdfPageExtraction[],
   readableNativePages: number[],
-  visionCompletedFromResume: Set<number>,
   validateExtractedText?: (text: string) => boolean,
   progressCallback?: (progress: import("./backgroundJobs").ExtractionProgressDetail) => Promise<void>,
 ): Promise<{
@@ -984,7 +971,6 @@ async function extractProblematicPagesWithVision(
   ];
   const readablePages = [
     ...readableNativePages,
-    ...Array.from(visionCompletedFromResume),
     ...Array.from(allVisionResults.entries())
       .filter(([, v]) => v.success)
       .map(([pageNum]) => pageNum),

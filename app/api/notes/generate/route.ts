@@ -616,7 +616,7 @@ async function handlePost(request: Request) {
   } catch (error) {
     if (error instanceof NotesRouteError) return apiError(error.message, error.status);
     if (error instanceof StudyNoteGenerationError) {
-      const status = error.code === "empty_source" ? 400 : 422;
+      const status = error.code === "empty_source" ? 400 : error.code === "provider_unavailable" ? 503 : 422;
       return apiError(error.message, status);
     }
 

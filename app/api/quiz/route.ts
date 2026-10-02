@@ -10,6 +10,7 @@ import { sanitizeQuizForClient } from "@/backend/lib/quizSecurity";
 import { buildLearnerProfile, buildPersonalizedQuizOptions } from "@/backend/lib/learnerProfile";
 import { isSupportedLanguageCode, type SupportedLanguageCode } from "@/shared/languages";
 import { enforceAiRateLimit } from "@/backend/lib/rateLimit";
+import { readLocalDocxParagraphs } from "@/backend/lib/localStudyFallback";
 
 export const runtime = "nodejs";
 
@@ -145,6 +146,7 @@ type SourceResolution = {
   summaryId: string | null;
   chunksCount?: number;
   partialCoverage?: boolean;
+  localDocxPath?: string;
 };
 
 type SummaryRow = {
@@ -307,6 +309,7 @@ async function resolveSource(
     return {
       text: coverage.text,
       fileId: file.id,
+      localDocxPath: file.file_name.toLowerCase().endsWith(".docx") ? file.storage_path ?? undefined : undefined,
       noteId: null,
       summaryId: null,
       chunksCount: coverage.chunksCount,
@@ -524,7 +527,11 @@ async function handlePost(request: Request) {
       focusTopics: personalized.focusTopics,
       personalizationNote: personalized.extraQuestionBias,
       language,
-    });
+    }, source.localDocxPath ? async () => {
+      const download = await supabase.storage.from("study-files").download(source.localDocxPath!);
+      if (download.error) return source.text;
+      return readLocalDocxParagraphs(Buffer.from(await download.data.arrayBuffer()));
+    } : undefined);
 
     devLog("quiz generated", {
       title: quiz.title,

@@ -21,13 +21,15 @@ async function handleDelete(request: Request, { params }: { params: Promise<{ id
   const supabase = await createServerSupabaseClient();
   if (!supabase) return apiError("Supabase is not configured.", 500);
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("diagrams")
     .delete()
     .eq("id", id)
-    .eq("user_id", user.id);
+    .eq("user_id", user.id)
+    .select("id");
 
   if (error) return apiError("Failed to delete diagram.", 500);
+  if (!data?.length) return apiError("Diagram not found.", 404);
 
   return NextResponse.json({ ok: true });
 }

@@ -5,6 +5,15 @@ export type SummaryTopic = {
 };
 
 export type SummarySanitizable = {
+  summary?: string | null;
+  keyPoints?: unknown;
+  importantPoints?: unknown;
+  importantConcepts?: unknown;
+  studyAreas?: unknown;
+  examQuestions?: unknown;
+  suggestedTags?: unknown;
+  suggestedNextStep?: string | null;
+  sources?: unknown;
   suggested_title?: string | null;
   short_summary?: string | null;
   module_overview?: string | null;
@@ -18,6 +27,15 @@ export type SummarySanitizable = {
   action_items?: unknown;
   suggested_tags?: unknown;
   suggested_next_step?: string | null;
+  generation_metadata?: {
+    attemptedChunks?: number;
+    successfulChunks?: number[];
+    failedChunks?: number[];
+    failureCategories?: string[];
+    partialCoverage?: boolean;
+    sourceTextLength?: number;
+    language?: string;
+  } | null;
   [key: string]: unknown;
 };
 
@@ -136,39 +154,113 @@ function sanitizeContentString(value: unknown) {
   }
 }
 
-export function sanitizeSummaryForDisplay<T extends SummarySanitizable>(summary: T): T {
+export function isPlaceholderSummary(summary: SummarySanitizable | null): boolean {
+  if (!summary) return true;
+
+  const shortSummary = String(summary.short_summary ?? "").toLowerCase();
+  const suggestedTitle = String(summary.suggested_title ?? "").toLowerCase();
+  const moduleOverview = String(summary.module_overview ?? "").toLowerCase();
+  const tags = Array.isArray(summary.suggested_tags) ? summary.suggested_tags : [];
+  const coveredTopics = Array.isArray(summary.covered_topics) ? summary.covered_topics : [];
+  const importantConcepts = Array.isArray(summary.important_concepts) ? summary.important_concepts : [];
+  const genMeta = summary.generation_metadata;
+
+  // Check for filename-only placeholder patterns
+  const placeholderPatterns = [
+    /^study summary for /i,
+    /^summary for /i,
+    / study summary$/i,
+    /^study summary$/i,
+  ];
+
+  if (placeholderPatterns.some((p) => p.test(shortSummary)) || placeholderPatterns.some((p) => p.test(suggestedTitle))) {
+    return true;
+  }
+
+  // Check for "Chunk N" tags in suggested_tags, covered_topics, or important_concepts
+  const allTags = [...tags, ...coveredTopics, ...importantConcepts];
+  const hasChunkTags = allTags.some((tag) => /^chunk\s+\d+$/i.test(String(tag).trim()));
+  if (hasChunkTags) return true;
+
+  // FIRST: Check if content itself is meaningful (source-derived, not generic)
+  // A valid summary has non-generic short_summary and specific topics/tags
+  const hasMeaningfulShortSummary = summary.short_summary && summary.short_summary.length > 20 &&
+    !/^(study summary|summary|overview)$/i.test(summary.short_summary.trim());
+  const hasSpecificTopics = coveredTopics.length > 0 &&
+    coveredTopics.some((t) => typeof t === "string" && t.length > 2 && !/^chunk\s+\d+$/i.test(t.trim()));
+  const hasSpecificTags = tags.length > 0 &&
+    tags.some((t) => typeof t === "string" && t.length > 2 && !/^chunk\s+\d+$/i.test(t.trim()));
+  const hasMeaningfulContent = hasMeaningfulShortSummary || hasSpecificTopics || hasSpecificTags ||
+    (summary.module_overview && summary.module_overview.length > 20) ||
+    importantConcepts.length > 0;
+
+  // If content is clearly meaningful (derived from actual source text), it's VALID
+  // regardless of how it was generated (AI or deterministic fallback)
+  if (hasMeaningfulContent) {
+    return false;
+  }
+
+  // Check generation metadata for extractive fallback ONLY if content is not meaningful
+  if (genMeta) {
+    const successfulChunks = genMeta.successfulChunks || [];
+    const failureCategories = genMeta.failureCategories || [];
+    const hasExtractiveFallback = failureCategories.some((c) => c.includes("extractive-fallback"));
+    if (hasExtractiveFallback && successfulChunks.length === 0) {
+      return true;
+    }
+    // No AI processing attempted at all
+    if ((genMeta.attemptedChunks ?? 0) === 0 && successfulChunks.length === 0) {
+      return true;
+    }
+  }
+
+  // Check for module_overview that explicitly says AI was unavailable
+  if (
+    moduleOverview.includes("ai synthesis was unavailable") ||
+    moduleOverview.includes("ai processing was unavailable") ||
+    moduleOverview.includes("assembled from the successfully processed source sections")
+  ) {
+    return true;
+  }
+
+  // Empty or near-empty meaningful content (fallback)
+  if (!hasMeaningfulContent) return true;
+
+  return false;
+}
+export function sanitizeSummaryForDisplay<T extends SummarySanitizable>(summary: T): T & SummarySanitizable {
   const topicWiseSummary = sanitizeTopicSummaries(summary.topic_wise_summary, 24);
   const topicWiseKeys = keySet(topicWiseSummary.map((item) => item.topic));
-  const coveredTopics = sanitizeSummaryList(summary.covered_topics, 30);
+  const coveredTopics = sanitizeSummaryList(summary.studyAreas ?? summary.covered_topics, 30);
   const coveredKeys = keySet(coveredTopics);
-  const importantConcepts = sanitizeSummaryList(summary.important_concepts, 28, new Set([...coveredKeys, ...topicWiseKeys]));
+  const importantConcepts = sanitizeSummaryList(summary.importantConcepts ?? summary.important_concepts, 28, new Set([...coveredKeys, ...topicWiseKeys]));
   const importantKeys = keySet(importantConcepts);
-  const keyPoints = sanitizeSummaryList(summary.key_points, 24, new Set([...coveredKeys, ...topicWiseKeys, ...importantKeys]));
+  const keyPoints = sanitizeSummaryList(summary.keyPoints ?? summary.importantPoints ?? summary.key_points, 24, new Set([...coveredKeys, ...topicWiseKeys, ...importantKeys]));
   const actionItems = sanitizeSummaryList(summary.action_items, 16);
-  const suggestedTags = sanitizeSummaryList(summary.suggested_tags, 12)
+  const suggestedTags = sanitizeSummaryList(summary.suggestedTags ?? summary.suggested_tags, 12)
     .map((tag) => tag.replace(/^#/, "").trim())
     .filter(Boolean);
 
   const sanitized = {
     ...summary,
     suggested_title: sanitizeSummaryText(summary.suggested_title, "Study summary"),
-    short_summary: sanitizeSummaryText(summary.short_summary, keyPoints.slice(0, 3).join(" ")),
+    short_summary: sanitizeSummaryText(summary.summary ?? summary.short_summary, keyPoints.slice(0, 3).join(" ")),
     module_overview: sanitizeSummaryText(summary.module_overview, sanitizeSummaryText(summary.short_summary)),
     covered_topics: coveredTopics,
     key_points: keyPoints,
     topic_wise_summary: topicWiseSummary,
-    exam_focus_points: sanitizeSummaryList(summary.exam_focus_points, 20),
+    exam_focus_points: sanitizeSummaryList(summary.examQuestions ?? summary.exam_focus_points, 20),
     memory_lines: sanitizeSummaryList(summary.memory_lines, 14),
     common_mistakes: sanitizeSummaryList(summary.common_mistakes, 14),
     important_concepts: importantConcepts,
     action_items: actionItems,
     suggested_tags: Array.from(new Set(suggestedTags)).slice(0, 12),
     suggested_next_step: sanitizeSummaryText(
-      summary.suggested_next_step,
+      summary.suggestedNextStep ?? summary.suggested_next_step,
       "Review the key points, then generate a quiz to check your understanding.",
     ),
     content: sanitizeContentString(summary.content),
-  } as T;
+  } as T & SummarySanitizable;
 
   if (!sanitized.short_summary) sanitized.short_summary = "StudyPilot generated a structured summary from the provided study material.";
   if (!sanitized.module_overview) sanitized.module_overview = sanitized.short_summary;
@@ -205,6 +297,21 @@ export function sanitizeSummaryForDisplay<T extends SummarySanitizable>(summary:
   if (!Array.isArray(sanitized.suggested_tags) || !sanitized.suggested_tags.length) {
     sanitized.suggested_tags = Array.isArray(sanitized.covered_topics) ? sanitized.covered_topics.slice(0, 5) : [];
   }
+
+  Object.assign(sanitized, {
+    summary: sanitized.short_summary,
+    keyPoints: sanitized.key_points,
+    importantConcepts: sanitized.important_concepts,
+    studyAreas: sanitized.covered_topics,
+    examQuestions: sanitized.exam_focus_points,
+    suggestedTags: sanitized.suggested_tags,
+    suggestedNextStep: sanitized.suggested_next_step,
+    sources: Array.isArray(summary.sources)
+      ? summary.sources
+      : Array.isArray(summary.source_citations)
+        ? summary.source_citations
+        : [],
+  });
 
   return sanitized;
 }

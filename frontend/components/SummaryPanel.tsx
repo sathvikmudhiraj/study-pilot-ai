@@ -10,7 +10,7 @@ import {
 import { StudyNoteEditor } from "./StudyNoteEditor";
 import { adaptStudyNoteRow, type StudyNoteDraft } from "@/frontend/lib/studyNotes";
 import { cancelSpeechSynthesis } from "@/frontend/lib/speechSynthesis";
-import { sanitizeSummaryForDisplay } from "@/shared/summarySanitizer";
+import { sanitizeSummaryForDisplay, isPlaceholderSummary } from "@/shared/summarySanitizer";
 import { LanguageSelector } from "./LanguageSelector";
 import { languageDetails, type SupportedLanguageCode } from "@/shared/languages";
 
@@ -269,16 +269,23 @@ export function SummaryPanel({
   noteId,
   initialSummary,
   canCreateStudyActions = false,
+  extractionReady = true,
+  summaryGenerating = false,
   initialLanguage,
 }: {
   fileId?: string;
   noteId?: string;
   initialSummary: Summary | null;
   canCreateStudyActions?: boolean;
+  extractionReady?: boolean;
+  summaryGenerating?: boolean;
   initialLanguage: SupportedLanguageCode;
 }) {
   const router = useRouter();
-  const [summary, setSummary] = useState<Summary | null>(() => normalizeSummary(initialSummary));
+  const [summary, setSummary] = useState<Summary | null>(() => {
+    const normalized = normalizeSummary(initialSummary);
+    return normalized;
+  });
   const [loading, setLoading] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [notesLoading, setNotesLoading] = useState(false);
@@ -286,6 +293,7 @@ export function SummaryPanel({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [staleSummary, setStaleSummary] = useState(false);
+  const [placeholderSummary, setPlaceholderSummary] = useState(() => isPlaceholderSummary(normalizeSummary(initialSummary)));
   const [speaking, setSpeaking] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [finalElapsedMs, setFinalElapsedMs] = useState<number | null>(null);
@@ -340,6 +348,14 @@ export function SummaryPanel({
   }, []);
 
   async function generateSummary() {
+    if (fileId && !extractionReady) {
+      setNotice("Complete file extraction before generating a summary.");
+      return;
+    }
+    if (summaryGenerating) {
+      setNotice(SUMMARY_IN_PROGRESS_NOTICE);
+      return;
+    }
     setFinalElapsedMs(null);
     setElapsedSeconds(0);
     setLoading(true);
@@ -363,7 +379,7 @@ export function SummaryPanel({
       if (!regenerationSucceeded || staleFlag) {
         const serverError = typeof data.error === "string" ? data.error : "";
         const isAlreadyInProgress =
-          response.status === 409 || serverError.toLowerCase().includes("already being generated");
+          serverError.toLowerCase().includes("already being generated");
         if (isAlreadyInProgress) {
           setNotice(SUMMARY_IN_PROGRESS_NOTICE);
           return;
@@ -382,7 +398,9 @@ export function SummaryPanel({
 
       // Success (full or partial). Replace the displayed summary from the
       // response body and clear the stale flag.
-      setSummary(normalizeSummary((data.summary as Summary) ?? null));
+      const newSummary = normalizeSummary((data.summary as Summary) ?? null);
+      setSummary(newSummary);
+      setPlaceholderSummary(isPlaceholderSummary(newSummary));
       setStaleSummary(false);
       setError("");
       if (typeof data.elapsedMs === "number" && data.elapsedMs > 0) {
@@ -471,7 +489,7 @@ export function SummaryPanel({
 
   function goToQuiz() {
     const query = sourceQuery();
-    if (!query || (!summary && !canCreateStudyActions)) {
+    if (!query || (!hasValidSummary && !canCreateStudyActions)) {
       setNotice("Generate a summary or extract readable text before creating a quiz from this material.");
       return;
     }
@@ -480,7 +498,7 @@ export function SummaryPanel({
 
   function goToRevisionPlan() {
     const query = sourceQuery();
-    if (!query || (!summary && !canCreateStudyActions)) {
+    if (!query || (!hasValidSummary && !canCreateStudyActions)) {
       setNotice("Generate a summary or extract readable text before creating a revision plan from this material.");
       return;
     }
@@ -488,8 +506,8 @@ export function SummaryPanel({
   }
 
   async function createNotes(selectedTopic?: string) {
-    if (!summary?.id) {
-      setNotice("A saved summary is required before creating notes. Generate the summary first, then try again.");
+    if (!hasValidSummary || !summary) {
+      setNotice("A valid summary is required before creating notes. Generate the summary first, then try again.");
       return;
     }
 
@@ -525,6 +543,7 @@ export function SummaryPanel({
   }
 
   const showStudyActions = Boolean(fileId || noteId);
+  const hasValidSummary = Boolean(summary && !placeholderSummary);
 
   return (
     <aside className="relative min-w-0 rounded-xl border border-white/10 bg-white/[0.04] p-4 sm:p-5">
@@ -556,13 +575,17 @@ export function SummaryPanel({
           <button
             type="button"
             onClick={generateSummary}
-            disabled={loading || extracting || notesLoading}
+            disabled={loading || extracting || notesLoading || (Boolean(fileId) && !extractionReady) || summaryGenerating}
             className="min-h-10 rounded-md bg-emerald-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {loading ? "Summarizing..." : summary ? "Regenerate Summary" : "Generate Summary"}
           </button>
         </div>
       </div>
+
+      {fileId && !extractionReady ? (
+        <p className="mt-4 text-sm text-amber-200">Complete file extraction before generating a summary.</p>
+      ) : null}
 
       {error ? (
         <div className="mt-5 rounded-lg border border-red-400/30 bg-red-400/10 p-4 text-sm leading-6 text-red-200">
@@ -632,7 +655,12 @@ export function SummaryPanel({
         </div>
       ) : null}
 
-      {summary ? (
+      {summary && placeholderSummary ? (
+        <div className="mt-5 rounded-lg border border-amber-300/30 bg-amber-300/10 p-5 text-sm leading-6 text-amber-100">
+          <p className="font-semibold">Placeholder summary detected</p>
+          <p className="mt-2">The saved summary appears to be a placeholder. Please click <span className="font-semibold underline">Regenerate Summary</span> to create a proper content-based summary.</p>
+        </div>
+      ) : summary ? (
         <div className="mt-6 grid min-w-0 gap-5">
           {normalizeSourceCitations(summary.source_citations).length ? (
             <section className={insightSectionClass}>
@@ -644,7 +672,7 @@ export function SummaryPanel({
           ) : null}
 
           <section className="min-w-0 rounded-lg border border-cyan-300/20 bg-cyan-300/10 p-4">
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-cyan-100">Study Summary</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-cyan-100">Summary</h3>
             <p className="mt-3 break-words text-sm leading-6 text-slate-200">{normalizeInsightItem(summary.short_summary)}</p>
           </section>
 
@@ -701,7 +729,7 @@ export function SummaryPanel({
           ) : null}
 
           <SectionList title="Key Points" items={stringList(summary.key_points)} />
-          <SectionList title="Exam Focus Points" items={stringList(summary.exam_focus_points)} />
+          <SectionList title="Exam Questions" items={stringList(summary.exam_focus_points)} />
           <SectionList title="Memory Lines" items={stringList(summary.memory_lines)} />
           <SectionList title="Common Mistakes" items={stringList(summary.common_mistakes)} />
           <SectionList title="Action Items" items={stringList(summary.action_items)} />
@@ -739,7 +767,7 @@ export function SummaryPanel({
         </div>
       ) : null}
 
-      {!summary && showStudyActions ? (
+      {!hasValidSummary && showStudyActions ? (
         <div className="mt-5 grid gap-2 sm:grid-cols-2">
           <button type="button" onClick={goToQuiz} className="min-h-11 rounded-md border border-emerald-300/30 bg-emerald-300/10 px-3 py-2.5 text-center text-sm font-semibold leading-5 text-emerald-100 transition hover:bg-emerald-300/15">
             Generate Quiz

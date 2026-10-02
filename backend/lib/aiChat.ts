@@ -4,7 +4,7 @@ import { generateAITextWithMetadata, type AIProviderResult } from "./aiProvider"
 import { DEFAULT_LANGUAGE, languageInstruction, type SupportedLanguageCode } from "@/shared/languages";
 import { STUDYPILOT_TUTOR_INSTRUCTION } from "./tutorPrompt";
 
-const CHAT_INTERACTIVE_TIMEOUT_MS = 30_000;
+const CHAT_INTERACTIVE_TIMEOUT_MS = 15_000;
 
 export type StructuredChatAnswer = {
   short_answer: string;
@@ -346,6 +346,8 @@ ${question}`;
     maxOutputTokens: 1000,
     responseMimeType: "application/json",
     timeoutMs: CHAT_INTERACTIVE_TIMEOUT_MS,
+    primaryTimeoutMs: 6_000,
+    fallbackTimeoutMs: 9_000,
     maxAttempts: 1,
   });
   devLog("AI chat response received", { rawLength: result.text.length, provider: result.provider, fallbackUsed: result.fallbackUsed });
@@ -464,6 +466,8 @@ ${question}`;
     maxOutputTokens: 1000,
     responseMimeType: "application/json",
     timeoutMs: CHAT_INTERACTIVE_TIMEOUT_MS,
+    primaryTimeoutMs: 6_000,
+    fallbackTimeoutMs: 9_000,
     maxAttempts: 1,
   });
   devLog("Learn Step by Step response received", { rawLength: result.text.length, provider: result.provider, fallbackUsed: result.fallbackUsed });

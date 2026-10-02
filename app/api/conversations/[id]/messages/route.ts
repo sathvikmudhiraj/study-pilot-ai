@@ -32,6 +32,17 @@ function isValidUuid(value: string): boolean {
   return UUID_RE.test(value.trim());
 }
 
+function cleanIds(value: unknown, max = 20): string[] | null {
+  if (!Array.isArray(value)) return [];
+  const ids = [...new Set(value.map((item) => String(item ?? "").trim()).filter(Boolean))];
+  if (ids.length > max || ids.some((id) => !isValidUuid(id))) return null;
+  return ids;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 type RouteContext = { params: Promise<{ id: string }> };
 
 // ---------------------------------------------------------------------------
@@ -70,12 +81,13 @@ async function handleGet(request: Request, { params }: RouteContext) {
   const ascending = rawDirection !== "desc";
 
   const rawCursor = searchParams.get("cursor") ?? "";
-  // Validate cursor: must be a parseable ISO timestamp if supplied.
-  let cursor: string | null = null;
+  let cursor: { createdAt: string; id: string | null } | null = null;
   if (rawCursor) {
-    const ts = Date.parse(rawCursor);
+    const [rawCreatedAt, rawId] = rawCursor.split("|");
+    const ts = Date.parse(rawCreatedAt);
     if (!Number.isFinite(ts)) return apiError("cursor must be a valid ISO timestamp.", 400);
-    cursor = new Date(ts).toISOString();
+    if (rawId && !isValidUuid(rawId)) return apiError("cursor contains an invalid row id.", 400);
+    cursor = { createdAt: new Date(ts).toISOString(), id: rawId || null };
   }
 
   try {
@@ -101,25 +113,32 @@ async function handleGet(request: Request, { params }: RouteContext) {
       .eq("conversation_id", conversationId)
       .eq("user_id", user.id)
       .order("created_at", { ascending })
+      .order("id", { ascending })
       .limit(limit + 1); // fetch one extra to detect has_more
 
     if (cursor) {
-      // When ascending: created_at > cursor (items after cursor)
-      // When descending: created_at < cursor (items before cursor)
-      query = ascending
-        ? query.gt("created_at", cursor)
-        : query.lt("created_at", cursor);
+      if (cursor.id) {
+        const operator = ascending ? "gt" : "lt";
+        query = query.or(
+          `created_at.${operator}.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.${operator}.${cursor.id})`,
+        );
+      } else {
+        query = ascending
+          ? query.gt("created_at", cursor.createdAt)
+          : query.lt("created_at", cursor.createdAt);
+      }
     }
 
     const { data: rows, error } = await query;
     if (error) throw error;
 
-    const messages = (rows ?? []).slice(0, limit);
+    const pageRows = (rows ?? []).slice(0, limit);
     const hasMore = (rows ?? []).length > limit;
-
-    // The next cursor is the created_at of the last message in this page.
-    const lastRow = messages[messages.length - 1];
-    const nextCursor = hasMore && lastRow ? (lastRow.created_at as string) : null;
+    const boundaryRow = pageRows[pageRows.length - 1];
+    const nextCursor = hasMore && boundaryRow
+      ? `${boundaryRow.created_at as string}|${boundaryRow.id as string}`
+      : null;
+    const messages = ascending ? pageRows : [...pageRows].reverse();
 
     return NextResponse.json({
       messages,
@@ -134,4 +153,59 @@ async function handleGet(request: Request, { params }: RouteContext) {
 
 export async function GET(request: Request, context: RouteContext) {
   return withRequestObservability(request, "/api/conversations/[id]/messages", async () => handleGet(request, context));
+}
+
+async function handlePost(request: Request, { params }: RouteContext) {
+  const user = await requireUser();
+  if (!user) return apiError("Please log in first.", 401);
+  const supabase = await createServerSupabaseClient();
+  if (!supabase) return apiError("Supabase is not configured.", 500);
+
+  const { id: conversationId } = await params;
+  if (!isValidUuid(conversationId)) return apiError("Invalid conversation id.", 400);
+
+  let body: Record<string, unknown>;
+  try {
+    body = await request.json() as Record<string, unknown>;
+  } catch {
+    return apiError("Request body must be valid JSON.", 400);
+  }
+  const question = typeof body.question === "string" ? body.question.trim() : "";
+  const answer = body.answer;
+  const fileIds = cleanIds(body.related_file_ids ?? body.relatedFileIds);
+  const noteIds = cleanIds(body.related_note_ids ?? body.relatedNoteIds);
+  if (!question || question.length > 2_000) return apiError("Voice turn question is invalid.", 400);
+  if (!isPlainRecord(answer)) return apiError("Voice turn answer is invalid.", 400);
+  if (JSON.stringify(answer).length > 100_000) return apiError("Voice turn answer is too large.", 413);
+  if (!fileIds || !noteIds) return apiError("Voice turn references are invalid.", 400);
+
+  const conversationResult = await supabase
+    .from("conversations")
+    .select("id")
+    .eq("id", conversationId)
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (conversationResult.error) return apiError(conversationResult.error.message, 500);
+  if (!conversationResult.data) return apiError("Conversation not found.", 404);
+
+  const { data, error } = await supabase
+    .from("assistant_questions")
+    .insert({
+      user_id: user.id,
+      conversation_id: conversationId,
+      question,
+      answer,
+      related_file_ids: fileIds,
+      related_note_ids: noteIds,
+      mode: "voice_tool",
+      status: "answered",
+    })
+    .select(MESSAGE_SELECT)
+    .single();
+  if (error) return apiError(error.message, 500);
+  return NextResponse.json({ message: data }, { status: 201 });
+}
+
+export async function POST(request: Request, context: RouteContext) {
+  return withRequestObservability(request, "/api/conversations/[id]/messages", async () => handlePost(request, context));
 }

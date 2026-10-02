@@ -139,9 +139,8 @@ test.describe("voice tutor mocked-speech pipeline (real AI backend)", () => {
     // The question text can also appear inside the model's answer (it quotes
     // the user), so target the first match (the user turn bubble) only.
     await expect(page.getByText(question).first()).toBeVisible();
-    await expect(page.getByText("Short Answer").first()).toBeVisible({ timeout: 15_000 });
     const anchorWord = shortAnswer.split(/\s+/).find((word) => word.replace(/[^A-Za-z]/g, "").length >= 6) ?? shortAnswer;
-    await expect(page.getByText(anchorWord, { exact: false }).first()).toBeVisible();
+    await expect(page.getByText(anchorWord, { exact: false }).first()).toBeVisible({ timeout: 15_000 });
 
     // --- TTS triggered ------------------------------------------------------
     await expect

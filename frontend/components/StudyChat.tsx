@@ -23,6 +23,12 @@ import { WebCitationList } from "./WebCitationList";
 import { DeepResearchReport as DeepResearchReportView } from "./DeepResearchReport";
 import { DiagramComposer } from "./DiagramComposer";
 import { DiagramPreview } from "./DiagramPreview";
+import { GeneratedImagePreview } from "./GeneratedImagePreview";
+import {
+  normalizeGeneratedImage,
+  runImageGeneration,
+  type GeneratedImageResult,
+} from "@/frontend/lib/generatedImage";
 import {
   deepResearchToText,
   runDeepResearch,
@@ -30,6 +36,9 @@ import {
   type DeepResearchReport,
   type WebSearchAnswer,
 } from "@/frontend/lib/webFeatures";
+import { requestedStudyLanguage, resolveStudyIntent } from "@/shared/studyIntent";
+import { measureIntent } from "@/frontend/lib/intentTiming";
+import { inferJarvisTopic, resolveJarvisControlIntent } from "@/frontend/lib/speech/jarvisAgent";
 import {
   boundDiagramSourceText,
   runDiagramGeneration,
@@ -58,13 +67,16 @@ import {
 } from "@/frontend/lib/conversationTypes";
 import {
   createConversation,
+  createConversationMessage,
   deleteConversation,
   getConversation,
   getMessages,
   listConversations,
   patchConversation,
+  saveConversationDraft,
   shortTitleFromQuestion,
 } from "@/frontend/lib/conversations";
+import { createConversationResult, readConversationResult, withConversationResult } from "@/shared/conversationResults";
 import {
   assistantIdsFromRows,
   isComposerReadOnly,
@@ -108,6 +120,11 @@ type Answer = {
   source_citations?: SourceCitationValue[];
   found_in_notes?: boolean;
   source_ids?: string[];
+  voice_turn?: {
+    kind: "generated_image";
+    payload?: unknown;
+  };
+  conversation_result?: unknown;
 };
 
 type SourceChip = {
@@ -148,8 +165,8 @@ type Attachment = {
 
 type RequestMode =
   "study" | "web_search" | "deep_research" | LearnStepByStepMode;
-type UserMessageMode = RequestMode | "diagram";
-type LoadingMode = RequestMode | "diagram";
+type UserMessageMode = RequestMode | "diagram" | "image";
+type LoadingMode = RequestMode | "diagram" | "image";
 
 type RetryPayload = {
   question: string;
@@ -167,6 +184,7 @@ type SendOptions = {
   attachmentsOverride?: Attachment[];
   skipUserBubble?: boolean;
   modeOverride?: RequestMode;
+  displayQuestion?: string;
 };
 
 type BrowserSpeechRecognition = {
@@ -230,7 +248,39 @@ type UiMessage =
       diagramRequest: DiagramRequest;
       sourceLabel: string;
       createdAt?: string;
+    }
+  | {
+      id: string;
+      role: "assistant";
+      mode: "image";
+      image: GeneratedImageResult;
+      imagePrompt: string;
+      createdAt?: string;
     };
+
+function localDraftKey(conversationId: string) {
+  return `studypilot:conversation-draft:${conversationId}`;
+}
+
+function cacheConversationDraft(conversationId: string, text: string, version: number) {
+  try {
+    if (!text) window.localStorage.removeItem(localDraftKey(conversationId));
+    else window.localStorage.setItem(localDraftKey(conversationId), JSON.stringify({ text, version }));
+  } catch {
+    // Server persistence remains authoritative when browser storage is unavailable.
+  }
+}
+
+function restoredConversationDraft(conversationId: string, serverText: string, serverVersion: number) {
+  try {
+    const raw = window.localStorage.getItem(localDraftKey(conversationId));
+    if (!raw) return serverText;
+    const local = JSON.parse(raw) as { text?: unknown; version?: unknown };
+    return typeof local.text === "string" && Number(local.version) >= serverVersion ? local.text : serverText;
+  } catch {
+    return serverText;
+  }
+}
 
 const bucketName = "study-files";
 const allowedExtensions = [
@@ -584,6 +634,9 @@ function normalizeAnswer(value: unknown, depth = 0): Answer {
           ? record.foundInNotes
           : undefined,
     source_ids: arrayValue(record, "source_ids", "sourceIds", "citation_ids", "citationIds"),
+    voice_turn: record.voice_turn && typeof record.voice_turn === "object"
+      ? record.voice_turn as Answer["voice_turn"]
+      : undefined,
   };
 }
 
@@ -721,10 +774,14 @@ export function StudyChat({
   const requestedConversationId = searchParams.get("conversationId");
   const handledRequestedConversationIdRef = useRef<string | null>(null);
   const suppressLatestRestoreRef = useRef(false);
+  const openedConversationIdRef = useRef<string | null>(null);
 
   /* Persistent conversations (Phase 1B) */
   // List state.
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [conversationCursor, setConversationCursor] = useState<string | null>(null);
+  const [hasMoreConversations, setHasMoreConversations] = useState(false);
+  const [loadingMoreConversations, setLoadingMoreConversations] = useState(false);
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [conversationsError, setConversationsError] = useState<string | null>(
     null,
@@ -733,8 +790,16 @@ export function StudyChat({
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeConversation, setActiveConversation] =
     useState<Conversation | null>(null);
-  const [loadingMessages, setLoadingMessages] = useState(false);
+  // A direct conversation URL belongs to that conversation from the first
+  // paint. Keep the composer gated until its server draft and context finish
+  // hydrating so early typing cannot be replaced by the hydration response.
+  const [loadingMessages, setLoadingMessages] = useState(
+    Boolean(requestedConversationId),
+  );
   const [messagesError, setMessagesError] = useState<string | null>(null);
+  const [messageCursor, setMessageCursor] = useState<string | null>(null);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   // Read-only legacy assistant_questions view (conversation_id IS NULL).
   const [legacyActive, setLegacyActive] = useState(false);
   // Mobile drawer.
@@ -743,6 +808,10 @@ export function StudyChat({
   // optimistic appends and DB hooks never reproduce the same assistant row
   // (this is the "refresh must not duplicate" guarantee).
   const loadedAssistantIdsRef = useRef<Set<string>>(new Set());
+  const draftVersionRef = useRef(0);
+  const draftSaveSequenceRef = useRef(0);
+  const draftSaveTimerRef = useRef<number | null>(null);
+  const lastPersistedDraftRef = useRef("");
   // Track the conversation id we consider "titled" to avoid PATCHing the
   // title twice (e.g. user renames mid-stream).
   const titledConversationIdsRef = useRef<Set<string>>(new Set());
@@ -766,6 +835,8 @@ export function StudyChat({
     const result = await listConversations();
     if (result.ok) {
       setConversations(result.conversations);
+      setConversationCursor(result.nextCursor);
+      setHasMoreConversations(result.hasMore);
     } else {
       // 401 is "session expired"; surface a clean message.
       setConversationsError(
@@ -777,6 +848,24 @@ export function StudyChat({
     setLoadingConversations(false);
     return result;
   }, []);
+
+  const loadMoreConversations = useCallback(async () => {
+    if (!conversationCursor || !hasMoreConversations || loadingMoreConversations) return;
+    setLoadingMoreConversations(true);
+    const result = await listConversations(conversationCursor);
+    if (result.ok) {
+      setConversations((current) => {
+        const byId = new Map(current.map((item) => [item.id, item]));
+        for (const item of result.conversations) byId.set(item.id, item);
+        return [...byId.values()];
+      });
+      setConversationCursor(result.nextCursor);
+      setHasMoreConversations(result.hasMore);
+    } else {
+      setConversationsError(result.message);
+    }
+    setLoadingMoreConversations(false);
+  }, [conversationCursor, hasMoreConversations, loadingMoreConversations]);
 
   const syncActiveConversationInList = useCallback((updated: Conversation) => {
     setConversations((current) =>
@@ -892,6 +981,8 @@ export function StudyChat({
 
   async function openConversation(id: string) {
     if (loading) return;
+    if (openedConversationIdRef.current === id && !legacyActive) return;
+    openedConversationIdRef.current = id;
     // Abort any in-flight question.
     abortActiveController();
     setAbortController(null);
@@ -909,6 +1000,9 @@ export function StudyChat({
     setLoadingMessages(true);
     const conversationVersion = bumpConversationVersion();
 
+    if (activeId && question) {
+      void saveConversationDraft(activeId, question, draftVersionRef.current);
+    }
     // Reset composer + context first; they will be restored from the conversation.
     setQuestion("");
     setAttachments([]);
@@ -933,6 +1027,7 @@ export function StudyChat({
           ? "This conversation is unavailable or has been removed."
           : messagesResult.message,
       );
+      openedConversationIdRef.current = null;
       return;
     }
 
@@ -953,6 +1048,7 @@ export function StudyChat({
       setMessages([]);
       loadedAssistantIdsRef.current = new Set();
       setMessagesError("This conversation is unavailable or has been removed.");
+      openedConversationIdRef.current = null;
       return;
     }
 
@@ -964,6 +1060,9 @@ export function StudyChat({
     setActiveFileIdsState(conversation.active_file_ids ?? []);
     setActiveNoteIdsState(conversation.active_note_ids ?? []);
     setLanguage(conversation.language_code ?? preferredLanguage);
+    draftVersionRef.current = conversation.draft_version ?? 0;
+    lastPersistedDraftRef.current = conversation.draft_text ?? "";
+    setQuestion(restoredConversationDraft(conversation.id, conversation.draft_text ?? "", draftVersionRef.current));
     if (
       titledConversationIdsRef.current.has(conversation.id) ||
       conversation.title
@@ -985,6 +1084,8 @@ export function StudyChat({
       messagesResult.messages,
     );
     setMessages(messagesResult.messages.flatMap((m) => recordToUiMessages(m)));
+    setMessageCursor(messagesResult.nextCursor);
+    setHasOlderMessages(messagesResult.hasMore);
     setLoadingMessages(false);
     setShowScrollDown(false);
     // Scroll to the latest message after hydration.
@@ -995,6 +1096,38 @@ export function StudyChat({
     });
 
     window.setTimeout(() => textareaRef.current?.focus(), 0);
+  }
+
+  async function loadOlderConversationMessages() {
+    if (!activeId || !messageCursor || !hasOlderMessages || loadingOlderMessages) return;
+    const conversationVersion = currentConversationVersion();
+    const scroller = messagesScrollRef.current;
+    const previousHeight = scroller?.scrollHeight ?? 0;
+    const previousTop = scroller?.scrollTop ?? 0;
+    setLoadingOlderMessages(true);
+    const result = await getMessages(activeId, messageCursor);
+    if (currentConversationVersion() !== conversationVersion) return;
+    if (!result.ok) {
+      setMessagesError(result.message);
+      setLoadingOlderMessages(false);
+      return;
+    }
+    loadedAssistantIdsRef.current = new Set([
+      ...loadedAssistantIdsRef.current,
+      ...assistantIdsFromRows(result.messages),
+    ]);
+    const older = result.messages.flatMap((message) => recordToUiMessages(message));
+    setMessages((current) => {
+      const ids = new Set(current.map((message) => message.id));
+      return [...older.filter((message) => !ids.has(message.id)), ...current];
+    });
+    setMessageCursor(result.nextCursor);
+    setHasOlderMessages(result.hasMore);
+    setLoadingOlderMessages(false);
+    window.requestAnimationFrame(() => {
+      const currentScroller = messagesScrollRef.current;
+      if (currentScroller) currentScroller.scrollTop = previousTop + currentScroller.scrollHeight - previousHeight;
+    });
   }
 
   // Convert a fetched ConversationMessage row to the local UiMessage pair.
@@ -1012,6 +1145,59 @@ export function StudyChat({
           created_at: string;
         },
   ): UiMessage[] {
+    const answer = normalizeAnswer(chat.answer);
+    const result = readConversationResult(chat.answer);
+    const generatedImage = result?.kind === "generated_image"
+      ? normalizeGeneratedImage(result.payload)
+      : null;
+    const resultPayload = result?.payload && typeof result.payload === "object"
+      ? result.payload as Record<string, unknown>
+      : null;
+    const webAnswer = result?.kind === "web_search" ? result.payload as WebSearchAnswer : null;
+    const researchReport = result?.kind === "deep_research" ? result.payload as DeepResearchReport : null;
+    const diagram = result?.kind === "diagram"
+      ? ((resultPayload?.diagram ?? result.payload) as DiagramResult)
+      : null;
+    const diagramRequest = resultPayload?.request as DiagramRequest | undefined;
+    const assistant: UiMessage = generatedImage
+      ? {
+          id: `${chat.id}-assistant`,
+          role: "assistant",
+          mode: "image",
+          image: generatedImage,
+          imagePrompt: chat.question,
+          createdAt: chat.created_at,
+        }
+      : webAnswer
+        ? {
+            id: `${chat.id}-assistant`, role: "assistant", mode: "web_search",
+            webAnswer, createdAt: chat.created_at,
+          }
+      : researchReport
+        ? {
+            id: `${chat.id}-assistant`, role: "assistant", mode: "deep_research",
+            researchReport, createdAt: chat.created_at,
+          }
+      : diagram
+        ? {
+            id: `${chat.id}-assistant`, role: "assistant", mode: "diagram",
+            diagram,
+            diagramRequest: diagramRequest ?? {
+              diagramType: diagram.diagram_type,
+              sourceType: diagram.source_type,
+              sourceText: diagram.explanation,
+            },
+            sourceLabel: typeof resultPayload?.sourceLabel === "string" ? resultPayload.sourceLabel : diagram.title,
+            createdAt: chat.created_at,
+          }
+      : {
+          id: `${chat.id}-assistant`,
+          role: "assistant",
+          mode: "study",
+          answer,
+          answerId: chat.id,
+          createdAt: chat.created_at,
+        };
     return [
       {
         id: `${chat.id}-user`,
@@ -1032,14 +1218,7 @@ export function StudyChat({
         ],
         createdAt: chat.created_at,
       },
-      {
-        id: `${chat.id}-assistant`,
-        role: "assistant",
-        mode: "study",
-        answer: normalizeAnswer(chat.answer),
-        answerId: chat.id,
-        createdAt: chat.created_at,
-      },
+      assistant,
     ];
   }
 
@@ -1172,6 +1351,7 @@ export function StudyChat({
     setLoadingMode(null);
     stopSpeaking();
     setLegacyActive(true);
+    openedConversationIdRef.current = null;
     setActiveId(null);
     setActiveConversation(null);
     bumpConversationVersion();
@@ -1440,6 +1620,51 @@ export function StudyChat({
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }, [question]);
 
+  function scheduleDraftPersistence(conversationId: string, value: string) {
+    cacheConversationDraft(conversationId, value, draftVersionRef.current);
+    if (value === lastPersistedDraftRef.current) return;
+    if (draftSaveTimerRef.current !== null) window.clearTimeout(draftSaveTimerRef.current);
+    const sequence = ++draftSaveSequenceRef.current;
+    draftSaveTimerRef.current = window.setTimeout(() => {
+      draftSaveTimerRef.current = null;
+      const expectedVersion = draftVersionRef.current;
+      void saveConversationDraft(conversationId, value, expectedVersion).then(async (result) => {
+        if (sequence !== draftSaveSequenceRef.current) return;
+        if (result.ok) {
+          draftVersionRef.current = result.draft.draft_version;
+          lastPersistedDraftRef.current = value;
+          cacheConversationDraft(conversationId, value, result.draft.draft_version);
+          return;
+        }
+        if (result.status === 409 && result.draft) {
+          draftVersionRef.current = result.draft.draft_version;
+          const retry = await saveConversationDraft(conversationId, value, result.draft.draft_version);
+          if (retry.ok && sequence === draftSaveSequenceRef.current) {
+            draftVersionRef.current = retry.draft.draft_version;
+            lastPersistedDraftRef.current = value;
+            cacheConversationDraft(conversationId, value, retry.draft.draft_version);
+          }
+        }
+      });
+    }, 300);
+  }
+
+  // Persist independent drafts for saved conversations. The server compares
+  // draft_version atomically, preventing a delayed request from overwriting a
+  // newer browser/device write.
+  useEffect(() => {
+    if (!activeConversation?.id || legacyActive || loadingMessages) return;
+    scheduleDraftPersistence(activeConversation.id, question);
+  }, [activeConversation?.id, activeId, legacyActive, loadingMessages, question]);
+
+  useEffect(() => {
+    if (activeId || legacyActive) return;
+    const timer = window.setTimeout(() => {
+      window.localStorage.setItem("studypilot:new-chat-draft", question);
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [activeId, legacyActive, question]);
+
   // Scroll management
   useEffect(() => {
     const scroller = messagesScrollRef.current;
@@ -1452,11 +1677,14 @@ export function StudyChat({
       const near = distance < 140;
       setNearBottom(near);
       setShowScrollDown(!near && messages.length > 0);
+      if (scroller.scrollTop < 80 && hasOlderMessages && !loadingOlderMessages) {
+        void loadOlderConversationMessages();
+      }
     }
     scroller.addEventListener("scroll", handleScroll, { passive: true });
     handleScroll();
     return () => scroller.removeEventListener("scroll", handleScroll);
-  }, [messages.length]);
+  }, [messages.length, hasOlderMessages, loadingOlderMessages]);
 
   // Auto-scroll on new messages when near bottom
   useEffect(() => {
@@ -1758,8 +1986,26 @@ export function StudyChat({
       });
       if (currentConversationVersion() !== conversationVersion) return;
 
+      if (!sendConversationId) throw new Error("Could not save the diagram conversation.");
+      const saved = await createConversationMessage(sendConversationId, {
+        question: userQuestion,
+        answer: withConversationResult(
+          { short_answer: diagram.explanation },
+          createConversationResult("diagram", { diagram, request, sourceLabel }, {
+            title: diagram.title,
+            status: "completed",
+            provenance: {
+              file_ids: diagramAttachments.map((item) => item.id),
+              language,
+            },
+          }),
+        ),
+        relatedFileIds: diagramAttachments.map((item) => item.id),
+      });
+      if (!saved.ok) throw new Error(saved.message);
+
       const assistantMessageId =
-        replaceMessageId ?? nextMessageId("diagram-assistant");
+        replaceMessageId ?? `${saved.message.id}-assistant`;
       const assistantMessage: UiMessage = {
         id: assistantMessageId,
         role: "assistant",
@@ -1801,6 +2047,99 @@ export function StudyChat({
       }
       if (diagramRequestInFlightRef.current === requestKey) {
         diagramRequestInFlightRef.current = "";
+      }
+    }
+  }
+
+  async function generateStudyImage(
+    displayQuestion: string,
+    topic: string,
+    imageAttachments: Attachment[],
+  ) {
+    if (loading) return;
+    const cleanTopic = topic.trim();
+    if (!cleanTopic) {
+      setError("Ask about a topic first, then generate an image for it.");
+      return;
+    }
+    if (legacyActive) {
+      setError("This is a read-only previous chat. Start a new chat to generate an image.");
+      return;
+    }
+
+    let sendConversationId = activeId;
+    if (!sendConversationId) {
+      const ensured = await ensureConversationForSend({
+        question: displayQuestion,
+        attachments: imageAttachments,
+        requestMode: "study",
+      });
+      if (!ensured.ok) {
+        setError(ensured.message);
+        return;
+      }
+      sendConversationId = ensured.conversation.id;
+    }
+
+    const sourceFile = imageAttachments.find((attachment) => attachment.type === "file")
+      ?? (activeFileIdsState[0]
+        ? { id: activeFileIdsState[0], type: "file" as const, label: fileNamesById.get(activeFileIdsState[0]) ?? "Active file" }
+        : undefined);
+    const conversationVersion = currentConversationVersion();
+    setMessages((current) => [...current, {
+      id: nextMessageId("image-user"),
+      role: "user",
+      mode: "image",
+      question: displayQuestion,
+      attachments: sourceFile ? [sourceFile] : [],
+      createdAt: new Date().toISOString(),
+    }]);
+    setQuestion("");
+    setAttachments([]);
+    setError("");
+    setLoading(true);
+    setLoadingMode("image");
+    markNearBottom();
+    const controller = new AbortController();
+    setAbortController(controller);
+
+    try {
+      const result = await runImageGeneration({
+        prompt: displayQuestion,
+        topic: cleanTopic,
+        conversationId: sendConversationId,
+        fileId: sourceFile?.id,
+        language,
+      }, { signal: controller.signal });
+      if (currentConversationVersion() !== conversationVersion) return;
+      const assistantId = result.messageId ? `${result.messageId}-assistant` : nextMessageId("image-assistant");
+      if (result.messageId) loadedAssistantIdsRef.current.add(result.messageId);
+      setMessages((current) => [...current, {
+        id: assistantId,
+        role: "assistant",
+        mode: "image",
+        image: result.image,
+        imagePrompt: displayQuestion,
+        createdAt: result.image.created_at,
+      }]);
+      setContextModeState("image");
+      void patchConversation(sendConversationId, {
+        contextMode: "image",
+        activeFileIds: sourceFile ? [sourceFile.id] : activeFileIdsState,
+      });
+      void maybeAutoTitleConversation(sendConversationId, displayQuestion);
+      void touchConversationUpdatedAt(sendConversationId, activeConversation?.title ?? null);
+    } catch (error) {
+      if (currentConversationVersion() !== conversationVersion) return;
+      if (error instanceof Error && error.name === "AbortError") return;
+      setQuestion(displayQuestion);
+      setAttachments(imageAttachments);
+      setError(cleanErrorMessage(error instanceof Error ? error.message : "Image generation failed."));
+    } finally {
+      if (abortRef.current === controller) {
+        setLoading(false);
+        setLoadingMode(null);
+        setAbortController(null);
       }
     }
   }
@@ -1944,7 +2283,7 @@ export function StudyChat({
       id: nextMessageId("web-user"),
       role: "user",
       mode: "web_search",
-      question: trimmed,
+      question: options?.displayQuestion ?? trimmed,
       attachments: [],
       createdAt: new Date().toISOString(),
     };
@@ -1969,7 +2308,20 @@ export function StudyChat({
         signal: controller.signal,
       });
       if (currentConversationVersion() !== conversationVersion) return;
-      const assistantMessageId = nextMessageId("web-assistant");
+      if (!sendConversationId) throw new Error("Could not save the web-search conversation.");
+      const saved = await createConversationMessage(sendConversationId, {
+        question: trimmed,
+        answer: withConversationResult(
+          { short_answer: webAnswer.concise_answer },
+          createConversationResult("web_search", webAnswer, {
+            title: webAnswer.query,
+            status: "completed",
+            provenance: { language },
+          }),
+        ),
+      });
+      if (!saved.ok) throw new Error(saved.message);
+      const assistantMessageId = `${saved.message.id}-assistant`;
       setMessages((current) => {
         if (current.some((m) => m.id === assistantMessageId)) return current;
         return [
@@ -1983,6 +2335,17 @@ export function StudyChat({
           },
         ];
       });
+
+      setRequestMode("study");
+      const nextContextMode = computeContextModeForSend({ requestMode: "study", attachments: currentAttachments });
+      const fileIds = currentAttachments.filter((item) => item.type === "file").map((item) => item.id);
+      const noteIds = currentAttachments.filter((item) => item.type === "note").map((item) => item.id);
+      setContextModeState(nextContextMode);
+      setActiveFileIdsState(fileIds);
+      setActiveNoteIdsState(noteIds);
+      if (sendConversationId) {
+        void persistContext(sendConversationId, { contextMode: nextContextMode, activeFileIds: fileIds, activeNoteIds: noteIds });
+      }
 
       void maybeAutoTitleConversation(sendConversationId, trimmed);
       void touchConversationUpdatedAt(
@@ -2071,7 +2434,20 @@ export function StudyChat({
         signal: controller.signal,
       });
       if (currentConversationVersion() !== conversationVersion) return;
-      const assistantMessageId = nextMessageId("research-assistant");
+      if (!sendConversationId) throw new Error("Could not save the research conversation.");
+      const saved = await createConversationMessage(sendConversationId, {
+        question: trimmed,
+        answer: withConversationResult(
+          { short_answer: researchReport.executive_summary },
+          createConversationResult("deep_research", researchReport, {
+            title: researchReport.research_question,
+            status: "completed",
+            provenance: { language },
+          }),
+        ),
+      });
+      if (!saved.ok) throw new Error(saved.message);
+      const assistantMessageId = `${saved.message.id}-assistant`;
       setMessages((current) => {
         if (current.some((m) => m.id === assistantMessageId)) return current;
         return [
@@ -2116,6 +2492,26 @@ export function StudyChat({
   }
 
   async function sendMessage(text = question, options?: SendOptions) {
+    const trimmed = text.trim();
+    const imageControl = resolveJarvisControlIntent(trimmed);
+    if (imageControl?.kind === "generate_image") {
+      if (!trimmed || loading) return;
+      const imageAttachments = options?.attachmentsOverride ?? attachments;
+      const latestTopic = [...messages].reverse().find((message) =>
+        message.role === "user" && !resolveJarvisControlIntent(message.question)
+      );
+      const topic = imageControl.topic || (latestTopic?.role === "user" ? inferJarvisTopic(latestTopic.question) : "");
+      await generateStudyImage(trimmed, topic, imageAttachments);
+      return;
+    }
+    const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
+    const lastWebQuery = lastAssistant?.mode === "web_search" ? lastAssistant.webAnswer.query : undefined;
+    const intent = measureIntent("studypilot.chat.intent", () => resolveStudyIntent(trimmed, { lastWebQuery }));
+    if (intent.kind === "web_search") {
+      await sendWebSearch(intent.query, { ...options, displayQuestion: trimmed });
+      return;
+    }
+
     const mode = options?.modeOverride ?? requestMode;
     if (mode === "web_search") {
       await sendWebSearch(text, options);
@@ -2126,7 +2522,6 @@ export function StudyChat({
       return;
     }
 
-    const trimmed = text.trim();
     if (!trimmed || loading) return;
 
     const currentAttachments = options?.attachmentsOverride ?? attachments;
@@ -2156,6 +2551,11 @@ export function StudyChat({
     }
 
     const conversationVersion = currentConversationVersion();
+    const requestedLanguage = requestedStudyLanguage(trimmed);
+    if (requestedLanguage && requestedLanguage !== language) {
+      setLanguage(requestedLanguage);
+      if (sendConversationId) void patchConversation(sendConversationId, { language: requestedLanguage });
+    }
 
     const userMessage: UiMessage = {
       id: nextMessageId("user"),
@@ -2194,7 +2594,7 @@ export function StudyChat({
           noteIds: currentAttachments
             .filter((attachment) => attachment.type === "note")
             .map((attachment) => attachment.id),
-          language,
+          language: requestedLanguage ?? language,
           ...(sendConversationId ? { conversationId: sendConversationId } : {}),
         }),
         signal: controller.signal,
@@ -2248,12 +2648,12 @@ export function StudyChat({
       // Title the conversation from the first meaningful question if it hasn't
       // been titled yet. Greetings never become a title (shortTitleFromQuestion
       // returns null for greetings).
-      void maybeAutoTitleConversation(sendConversationId, trimmed);
+      await maybeAutoTitleConversation(sendConversationId, trimmed);
 
       // Bump updated_at so this conversation floats to the top of the list.
-      void touchConversationUpdatedAt(
+      await touchConversationUpdatedAt(
         sendConversationId,
-        activeConversation?.title ?? null,
+        activeConversation?.title ?? shortTitleFromQuestion(trimmed),
       );
     } catch (err) {
       if (currentConversationVersion() !== conversationVersion) return;
@@ -2345,7 +2745,7 @@ export function StudyChat({
     if (index === -1) return;
     const userMessage = messages[index - 1];
     if (!userMessage || userMessage.role !== "user") return;
-    if (userMessage.mode === "diagram") return;
+    if (userMessage.mode === "diagram" || userMessage.mode === "image") return;
 
     setMessages((current) => current.filter((m) => m.id !== messageId));
     sendMessage(userMessage.question, {
@@ -2356,6 +2756,7 @@ export function StudyChat({
   }
 
   function startNewChat() {
+    if (activeId && question) void saveConversationDraft(activeId, question, draftVersionRef.current);
     suppressLatestRestoreRef.current = true;
     handledRequestedConversationIdRef.current = null;
     router.replace("/chat", { scroll: false });
@@ -2366,8 +2767,10 @@ export function StudyChat({
     setLoadingMode(null);
     stopSpeaking();
     setMessages([]);
+    setMessageCursor(null);
+    setHasOlderMessages(false);
     loadedAssistantIdsRef.current = new Set();
-    setQuestion("");
+    setQuestion(window.localStorage.getItem("studypilot:new-chat-draft") ?? "");
     setAttachments([]);
     setDiagramOpen(false);
     setRequestMode("study");
@@ -2503,6 +2906,9 @@ export function StudyChat({
         onTogglePin={(id, pinned) => void togglePinConversation(id, pinned)}
         onDelete={(id) => void removeConversation(id)}
         onOpenLegacy={openLegacyChat}
+        hasMore={hasMoreConversations}
+        loadingMore={loadingMoreConversations}
+        onLoadMore={() => void loadMoreConversations()}
         mobileOpen={mobileDrawerOpen}
         onCloseMobile={() => setMobileDrawerOpen(false)}
       />
@@ -2565,6 +2971,18 @@ export function StudyChat({
             <ChatEmptyState onPick={(suggestion) => setQuestion(suggestion)} />
           ) : (
             <div className="mx-auto w-full max-w-5xl space-y-5 px-0.5 pb-6">
+            {hasOlderMessages || loadingOlderMessages ? (
+              <div className="flex justify-center pb-1">
+                <button
+                  type="button"
+                  onClick={() => void loadOlderConversationMessages()}
+                  disabled={loadingOlderMessages}
+                  className="h-8 rounded-md border border-white/10 bg-white/[0.04] px-3 text-xs font-semibold text-slate-300 hover:bg-white/[0.08] disabled:opacity-60"
+                >
+                  {loadingOlderMessages ? "Loading earlier messages..." : "Load earlier messages"}
+                </button>
+              </div>
+            ) : null}
             {messages.map((message) => {
               // Render via an explicit if/else chain so TypeScript's control-flow
               // analysis narrows the UiMessage discriminated union by `role` and
@@ -2739,6 +3157,27 @@ export function StudyChat({
                 );
               }
 
+              if (message.mode === "image") {
+                return (
+                  <div key={message.id} data-testid="chat-message" className="flex animate-fade-in-up gap-3">
+                    <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-emerald-300/25 bg-emerald-300/10 text-emerald-200">
+                      <IconImage size={15} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-1 flex flex-wrap items-baseline gap-2">
+                        <span className="text-xs font-semibold text-emerald-200">StudyPilot Image</span>
+                        {mounted && message.createdAt ? <span className="text-[11px] text-slate-500">{formatTime(message.createdAt)}</span> : null}
+                      </div>
+                      <GeneratedImagePreview
+                        image={message.image}
+                        onRegenerate={() => void generateStudyImage(message.imagePrompt, message.image.prompt, [])}
+                        regenerating={loading && loadingMode === "image"}
+                      />
+                    </div>
+                  </div>
+                );
+              }
+
               if (message.mode === "diagram") {
                 return (
                   <div
@@ -2861,14 +3300,14 @@ export function StudyChat({
                   className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg border ${
                     loadingMode === "deep_research"
                       ? "border-sky-300/25 bg-sky-300/10 text-sky-200"
-                      : loadingMode === "diagram"
-                        ? "border-pink-300/25 bg-pink-300/10 text-pink-200"
+                      : loadingMode === "diagram" || loadingMode === "image"
+                        ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-200"
                         : "border-emerald-400/20 bg-emerald-400/10 text-xs font-bold text-emerald-300"
                   }`}
                 >
                   {loadingMode === "deep_research" ? (
                     <IconSearch size={15} />
-                  ) : loadingMode === "diagram" ? (
+                  ) : loadingMode === "diagram" || loadingMode === "image" ? (
                     <IconImage size={15} />
                   ) : (
                     "SP"
@@ -2877,11 +3316,11 @@ export function StudyChat({
                 <div className="min-w-0 flex-1">
                   <div className="mb-1">
                     <span
-                      className={`text-xs font-semibold ${loadingMode === "deep_research" ? "text-sky-200" : loadingMode === "diagram" ? "text-pink-200" : "text-slate-300"}`}
+                      className={`text-xs font-semibold ${loadingMode === "deep_research" ? "text-sky-200" : loadingMode === "diagram" || loadingMode === "image" ? "text-emerald-200" : "text-slate-300"}`}
                     >
                       {loadingMode === "deep_research"
                         ? "StudyPilot Research"
-                        : loadingMode === "diagram"
+                        : loadingMode === "diagram" || loadingMode === "image"
                           ? "StudyPilot Visuals"
                           : "StudyPilot AI"}
                     </span>
@@ -2907,6 +3346,8 @@ export function StudyChat({
                             ? "Searching the web…"
                             : loadingMode === "diagram"
                               ? "Generating a grounded diagram…"
+                              : loadingMode === "image"
+                                ? "Generating your study image…"
                               : loadingMode === LEARN_STEP_BY_STEP_MODE
                                 ? `${chatProgressCues[chatProgressIndex]}…`
                                 : `${chatProgressCues[chatProgressIndex]}…`
@@ -3333,7 +3774,13 @@ export function StudyChat({
                 <textarea
                   ref={textareaRef}
                   value={question}
-                  onChange={(event) => setQuestion(event.target.value)}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setQuestion(value);
+                    const draftConversationId =
+                      activeConversation?.id ?? activeId ?? requestedConversationId;
+                    if (draftConversationId && !legacyActive) scheduleDraftPersistence(draftConversationId, value);
+                  }}
                   onKeyDown={(event) => {
                     if (
                       event.key === "Enter" &&

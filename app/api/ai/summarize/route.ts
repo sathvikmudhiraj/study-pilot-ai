@@ -6,7 +6,7 @@ import {
   validateCnsExtractionCoverage,
   type StructuredSummary,
 } from "@/backend/lib/aiSummary";
-import { sanitizeSummaryForDisplay } from "@/shared/summarySanitizer";
+import { sanitizeSummaryForDisplay, isPlaceholderSummary } from "@/shared/summarySanitizer";
 import { estimateChunks } from "@/backend/lib/pdfText";
 import {
   buildDocumentProcessingMetadata,
@@ -30,6 +30,7 @@ import {
   SUMMARY_TIMEOUT_MESSAGE,
 } from "@/backend/lib/aiProvider";
 import { isSupportedLanguageCode, type SupportedLanguageCode } from "@/shared/languages";
+import { hasCompletePageCoverage } from "@/shared/fileExtractionCoverage";
 
 export const runtime = "nodejs";
 
@@ -39,6 +40,7 @@ export const runtime = "nodejs";
 // the platform/serverless ceiling so our finally block still gets to write a
 // terminal status before the function is killed.
 const SUMMARY_ORCHESTRATION_TIMEOUT_MS = 110_000;
+const SUMMARY_LOCK_STALE_MS = 150_000;
 const SUMMARY_IN_PROGRESS_MESSAGE = "A summary is already being generated for this file. Please wait for it to finish.";
 
 type SummarizeBody = {
@@ -293,7 +295,7 @@ type ReExtractOutcome =
   | { ok: true; text: string; contentType: string; processingNotes: string[]; pageMetadata?: StudyPageMetadata; documentMetadata?: DocumentProcessingMetadata }
   | {
       ok: false;
-      reason: "no-storage-path" | "download-failed" | "no-text";
+      reason: "no-storage-path" | "download-failed" | "no-text" | "incomplete";
       message: string;
       processingNotes: string[];
       pageMetadata?: StudyPageMetadata;
@@ -375,6 +377,21 @@ async function downloadAndReprocess(
       };
     }
 
+    if (processed.extractionFailure || !hasCompletePageCoverage(processed.pageMetadata)) {
+      return {
+        ok: false,
+        reason: "incomplete",
+        message: FULL_EXTRACTION_INCOMPLETE_MESSAGE,
+        processingNotes: [
+          ...processed.processingNotes,
+          processed.extractionFailure?.message ?? "Some PDF pages could not be extracted.",
+        ],
+        pageMetadata: processed.pageMetadata,
+        documentMetadata: processed.documentMetadata,
+        details: { failureCode: processed.extractionFailure?.code ?? "incomplete-pages" },
+      };
+    }
+
     return {
       ok: true,
       text: processed.extractedText.trim(),
@@ -451,13 +468,14 @@ async function handlePost(request: Request) {
   let sourceFileId: string | null = null;
   let sourceNoteId: string | null = null;
   let sourceName = "Study material";
+  let summaryClaimed = false;
 
   try {
     if (fileId) {
       sourceFileId = fileId;
       const { data: file, error } = await supabase
         .from("files")
-        .select("id, user_id, file_name, mime_type, storage_path, extracted_text, processing_status")
+        .select("id, user_id, file_name, mime_type, storage_path, extracted_text, extracted_metadata, processing_notes, processing_status, status, updated_at")
         .eq("id", fileId)
         .eq("user_id", user.id)
         .maybeSingle();
@@ -475,29 +493,20 @@ async function handlePost(request: Request) {
       // info logged for observability. (Re-extraction sets "extracting" and is
       // handled separately below.)
       const currentStatus = file.processing_status;
-      if (!reextractOnly && currentStatus === "summarizing") {
-        const runtime = getAIProviderRuntimeInfo("summary");
-        logSummaryEvent({
-          fileId,
-          provider: runtime.configuredProvider,
-          model: runtime.primaryModel,
-          fallbackProvider: runtime.fallbackProvider,
-          fallbackModel: runtime.fallbackModel,
-          status: "deduplicated",
-        });
-        return NextResponse.json(
-          {
-            error: SUMMARY_IN_PROGRESS_MESSAGE,
-          },
-          { status: 409 },
-        );
+      const lockStale = currentStatus === "summarizing" && Boolean(file.updated_at) &&
+        Date.now() - new Date(file.updated_at).getTime() > SUMMARY_LOCK_STALE_MS;
+      if (!reextractOnly && (currentStatus === "extracting" || file.status === "extracting")) {
+        return errorResponse("Complete file extraction before generating a summary.", 409, debug);
       }
-
       const storedText = (file.extracted_text ?? "").trim();
 
       let coverage = analyzeCnsCoverage(storedText);
       const strictCoverage = validateCnsExtractionCoverage(storedText, file.file_name);
-      const savedCoverageValid = strictCoverage.required ? strictCoverage.valid : storedText.length >= 40;
+      const metadata = file.extracted_metadata && typeof file.extracted_metadata === "object" && !Array.isArray(file.extracted_metadata)
+        ? file.extracted_metadata as Record<string, unknown> : null;
+      const savedCoverageValid = storedText.length >= 40 &&
+        (!strictCoverage.required || strictCoverage.valid) && metadata?.extractionValidated !== false &&
+        hasCompletePageCoverage(metadata);
       debug.coverageFromStoredText = {
         isLikelyCns: coverage.isLikelyCns,
         topicCount: coverage.topicCount,
@@ -510,22 +519,40 @@ async function handlePost(request: Request) {
 
       if (!reextractOnly && !savedCoverageValid) {
         const validationNotes = [
+          ...(Array.isArray(file.processing_notes)
+            ? file.processing_notes.filter((note: string) => !note.toLowerCase().includes("coverage validated successfully"))
+            : []),
           FULL_EXTRACTION_INCOMPLETE_MESSAGE,
           ...(strictCoverage.missingTopics.length
             ? [`Missing required topics: ${strictCoverage.missingTopics.join(", ")}.`]
             : []),
         ];
-        const savedSummaryExists = await hasSavedSummary(supabase, { userId: user.id, fileId, noteId: null });
         await updateFileStatus(supabase, {
           fileId: file.id,
           userId: user.id,
           values: {
-            processing_status: savedSummaryExists ? "completed" : "failed",
-            status: savedSummaryExists ? "completed" : "failed",
+            processing_status: "failed",
+            status: "failed",
             processing_notes: validationNotes,
           },
         });
         return errorResponse(FULL_EXTRACTION_INCOMPLETE_MESSAGE, 409, debug);
+      }
+
+      if (!reextractOnly && currentStatus === "summarizing" && !lockStale) {
+        const runtime = getAIProviderRuntimeInfo("summary");
+        logSummaryEvent({
+          fileId,
+          provider: runtime.configuredProvider,
+          model: runtime.primaryModel,
+          fallbackProvider: runtime.fallbackProvider,
+          fallbackModel: runtime.fallbackModel,
+          status: "deduplicated",
+        });
+        return errorResponse(SUMMARY_IN_PROGRESS_MESSAGE, 409, debug);
+      }
+      if (reextractOnly && currentStatus === "summarizing" && !lockStale) {
+        return errorResponse(SUMMARY_IN_PROGRESS_MESSAGE, 409, debug);
       }
 
       const needsReextract = reextractOnly;
@@ -570,7 +597,6 @@ async function handlePost(request: Request) {
             failureCode: outcome.details?.failureCode ?? null,
           });
 
-          const savedSummaryExists = await hasSavedSummary(supabase, { userId: user.id, fileId, noteId: null });
           const freshFailureNotes = Array.from(new Set([
             ...outcome.processingNotes.filter(Boolean),
             ...(strictCoverage.required ? [FULL_EXTRACTION_INCOMPLETE_MESSAGE] : []),
@@ -579,8 +605,8 @@ async function handlePost(request: Request) {
             fileId: file.id,
             userId: user.id,
             values: {
-              processing_status: savedSummaryExists ? "completed" : "failed",
-              status: savedSummaryExists ? "completed" : "failed",
+              processing_status: "failed",
+              status: "failed",
               processing_notes: freshFailureNotes,
               extracted_metadata: {
                 ...(outcome.documentMetadata ?? {}),
@@ -603,13 +629,12 @@ async function handlePost(request: Request) {
         coverage = analyzeCnsCoverage(sourceText);
         const freshStrictCoverage = validateCnsExtractionCoverage(sourceText, file.file_name);
         if (freshStrictCoverage.required && !freshStrictCoverage.valid) {
-          const savedSummaryExists = await hasSavedSummary(supabase, { userId: user.id, fileId, noteId: null });
           await updateFileStatus(supabase, {
             fileId: file.id,
             userId: user.id,
             values: {
-              processing_status: savedSummaryExists ? "completed" : "failed",
-              status: savedSummaryExists ? "completed" : "failed",
+              processing_status: "failed",
+              status: "failed",
               processing_notes: [
                 FULL_EXTRACTION_INCOMPLETE_MESSAGE,
                 `Missing required topics: ${freshStrictCoverage.missingTopics.join(", ")}.`,
@@ -714,7 +739,16 @@ async function handlePost(request: Request) {
       debug.detectedCoverageKeywords = coverage.detectedKeywords;
       devLog("source text resolved", { fileId, sourceOrigin, textLength: sourceText.length, chunkCount: estimateChunks(sourceText) });
 
-      await updateFileStatus(supabase, { fileId: file.id, userId: user.id, values: { processing_status: "summarizing", status: "summarizing" } });
+      let claim = supabase.from("files")
+        .update({ processing_status: "summarizing", status: "summarizing" })
+        .eq("id", file.id)
+        .eq("user_id", user.id);
+      claim = currentStatus === null ? claim.is("processing_status", null) : claim.eq("processing_status", currentStatus);
+      if (currentStatus === "summarizing") claim = claim.eq("updated_at", file.updated_at);
+      const claimed = await claim.select("id").maybeSingle();
+      if (claimed.error) throw claimed.error;
+      if (!claimed.data) return errorResponse(SUMMARY_IN_PROGRESS_MESSAGE, 409, debug);
+      summaryClaimed = true;
       const runtimeInfo = getAIProviderRuntimeInfo("summary");
       devLog("summary provider/model started", {
         fileId,
@@ -882,6 +916,18 @@ async function handlePost(request: Request) {
 
     const sanitizedSummary = sanitizeSummaryForDisplay(summary);
 
+    // Reject placeholder summaries - don't save them to the database
+    if (isPlaceholderSummary(sanitizedSummary)) {
+      devLog("placeholder summary detected, rejecting", {
+        suggestedTitle: sanitizedSummary.suggested_title,
+        shortSummary: sanitizedSummary.short_summary?.slice(0, 100),
+        coveredTopics: sanitizedSummary.covered_topics,
+        suggestedTags: sanitizedSummary.suggested_tags,
+        generationMetadata: sanitizedSummary.generation_metadata,
+      });
+      throw new Error("Generated summary was a placeholder. Please try regenerating.");
+    }
+
     const payload = {
       user_id: user.id,
       file_id: sourceFileId,
@@ -938,7 +984,7 @@ async function handlePost(request: Request) {
       fileId: sourceFileId,
       noteId: sourceNoteId,
     });
-    if (sourceFileId) {
+    if (sourceFileId && summaryClaimed) {
       // Regeneration failed. Do NOT mark the file as "completed": this would
       // mask the fact that the displayed summary is a stale saved row from a
       // previous run. Keep it as "extracted" (a valid, supported status that
