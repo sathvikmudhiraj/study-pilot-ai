@@ -34,6 +34,12 @@ describe("NVIDIA request budget", () => {
     expect(getAIProviderRuntimeInfo("default").fallbackModel).toBe("nvidia/nemotron-3-super-120b-a12b");
   });
 
+  it("honors the configured structured summary timeout", () => {
+    vi.stubEnv("SUMMARY_AI_TIMEOUT_MS", "120000");
+
+    expect(getAIProviderRuntimeInfo("summary").timeoutMs).toBe(120_000);
+  });
+
   it("does not retry NVIDIA 429 responses inside the bounded fallback window", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response("rate limited", {

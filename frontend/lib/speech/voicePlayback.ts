@@ -55,3 +55,51 @@ export function splitSpeechText(text: string, maxChars = DEFAULT_MAX_CHARS): str
   if (current) chunks.push(current);
   return chunks;
 }
+
+function cleanStreamSentence(value: string) {
+  return value
+    .replace(/https?:\/\/\S+/giu, "")
+    .replace(/\[([^\]]+)\]\((?:https?:\/\/)?[^)]+\)/gu, "$1")
+    .replace(/[`*_#>]+/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function lastSafeBoundary(text: string) {
+  for (let index = text.length - 1; index >= 0; index -= 1) {
+    if (!/[.!?]/u.test(text[index])) continue;
+    if (text[index] === "." && /\d/u.test(text[index - 1] ?? "") && /\d/u.test(text[index + 1] ?? "")) continue;
+    if (index + 1 < text.length && !/\s/u.test(text[index + 1])) continue;
+    const candidate = text.slice(0, index + 1);
+    if (text[index] === "." && NON_TERMINAL_ABBREVIATIONS.test(candidate.trim())) continue;
+    if ((candidate.match(/\[/g)?.length ?? 0) !== (candidate.match(/\]/g)?.length ?? 0)) continue;
+    return index + 1;
+  }
+  return -1;
+}
+
+export class SentenceStreamBuffer {
+  private pending = "";
+
+  push(delta: string): string[] {
+    this.pending += delta;
+    const boundary = lastSafeBoundary(this.pending);
+    if (boundary < 0) return [];
+    const complete = this.pending.slice(0, boundary);
+    this.pending = this.pending.slice(boundary);
+    if (/^\s*[\[{]/u.test(complete)) return [];
+    return splitSpeechText(cleanStreamSentence(complete)).filter(Boolean);
+  }
+
+  reset() {
+    this.pending = "";
+  }
+
+  flush(): string[] {
+    const remaining = this.pending;
+    this.pending = "";
+    if (!remaining.trim() || /^\s*[\[{]/u.test(remaining)) return [];
+    if ((remaining.match(/\[/g)?.length ?? 0) !== (remaining.match(/\]/g)?.length ?? 0)) return [];
+    return splitSpeechText(cleanStreamSentence(remaining)).filter(Boolean);
+  }
+}

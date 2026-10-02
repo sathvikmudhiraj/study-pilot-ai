@@ -251,6 +251,37 @@ export type ChatAnswerWithMetadata = StructuredChatAnswer & {
   _providerMeta?: AIProviderMetadata;
 };
 
+export function buildStreamingStudyPrompt({
+  question,
+  context,
+  language = DEFAULT_LANGUAGE,
+  grounded = false,
+  allowedSourceIds = [],
+}: {
+  question: string;
+  context: string;
+  language?: SupportedLanguageCode;
+} & StudyQuestionOptions) {
+  const sourceRule = grounded
+    ? `Use only STUDY_CONTEXT. The allowed citation IDs are: ${allowedSourceIds.join(", ") || "none"}. If the context does not support the answer, say that the topic was not found. Do not use outside knowledge.`
+    : "Use the supplied context when relevant. You may answer from general knowledge when no study material is selected.";
+  return `${languageInstruction(language)}
+
+${STUDYPILOT_TUTOR_INSTRUCTION}
+
+Give a concise, natural tutor response as plain text or simple Markdown.
+Do not output JSON, XML, tool calls, hidden reasoning, or a schema.
+Start with the useful answer immediately. Use short paragraphs and complete sentences.
+Do not include raw URLs. Cite only the allowed citation IDs in square brackets when they support a claim.
+${sourceRule}
+
+STUDY_CONTEXT:
+${context || "No study context was supplied."}
+
+STUDENT_QUESTION:
+${question}`;
+}
+
 function assertUsableChatResponse(result: AIProviderResult) {
   if (result.responseMode === "ai" && result.text.trim()) return;
   if (result.providerFailureCategory === "timeout") {

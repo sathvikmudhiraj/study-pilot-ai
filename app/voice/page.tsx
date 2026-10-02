@@ -13,6 +13,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 type VoicePageProps = {
   searchParams?: Promise<{
     conversationId?: string | string[];
+    fileId?: string | string[];
   }>;
 };
 
@@ -36,6 +37,7 @@ export default async function VoicePage({ searchParams }: VoicePageProps) {
 
   const resolvedSearchParams = await searchParams;
   const requestedConversationId = firstParam(resolvedSearchParams?.conversationId)?.trim() ?? "";
+  const requestedFileId = firstParam(resolvedSearchParams?.fileId)?.trim() ?? "";
   let conversationError = "";
   let conversation: Conversation | null = null;
   let messages: ConversationMessage[] = [];
@@ -93,9 +95,16 @@ export default async function VoicePage({ searchParams }: VoicePageProps) {
 
   const setupError = filesResult.error || notesResult.error;
 
-  const selectedCommandFileId = Array.isArray(conversation?.active_file_ids) && conversation.active_file_ids.length > 0
-    ? conversation.active_file_ids[0]
+  const ownedRequestedFile = !requestedConversationId && UUID_RE.test(requestedFileId)
+    ? (filesResult.data ?? []).find((file) => file.id === requestedFileId) ?? null
     : null;
+  if (requestedFileId && !requestedConversationId && !ownedRequestedFile) {
+    conversationError = "That study file is unavailable or does not belong to this account. Voice Tutor opened safely without it.";
+  }
+  const selectedCommandFileId = ownedRequestedFile?.id
+    ?? (Array.isArray(conversation?.active_file_ids) && conversation.active_file_ids.length > 0
+      ? conversation.active_file_ids[0]
+      : null);
   const selectedCommandFileName = selectedCommandFileId
     ? (filesResult.data ?? []).find((file) => file.id === selectedCommandFileId)?.file_name ?? null
     : null;

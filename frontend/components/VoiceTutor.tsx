@@ -95,15 +95,18 @@ import {
 import type { SupportedLanguageCode } from "@/shared/languages";
 import { requestedStudyLanguage } from "@/shared/studyIntent";
 import { measureIntent } from "@/frontend/lib/intentTiming";
-import { splitSpeechText } from "@/frontend/lib/speech/voicePlayback";
+import { SentenceStreamBuffer, splitSpeechText } from "@/frontend/lib/speech/voicePlayback";
+import { consumeAskResponse, type AskStreamEvent } from "@/frontend/lib/aiStream";
 import {
   inferJarvisTask,
   inferJarvisTopic,
   matchJarvisFiles,
+  resolveJarvisRuntimeState,
   resolveJarvisControlIntent,
   type JarvisSessionState,
   type JarvisTask,
   type JarvisToolCall,
+  type JarvisRuntimeState,
 } from "@/frontend/lib/speech/jarvisAgent";
 import { detectSpokenLanguage, voiceLocale } from "@/shared/voiceLanguage";
 import { createConversationResult, readConversationResult, withConversationResult } from "@/shared/conversationResults";
@@ -476,6 +479,11 @@ export function VoiceTutor({
   const [notesLoading, setNotesLoading] = useState(false);
   const [noteDraft, setNoteDraft] = useState<StudyNoteDraft | null>(null);
   const [speaking, setSpeaking] = useState(false);
+  const [streaming, setStreaming] = useState(false);
+  const [interrupted, setInterrupted] = useState(false);
+  const [microphonePermission, setMicrophonePermission] = useState<PermissionState | "unsupported">("unsupported");
+  const [diagnosticEvents, setDiagnosticEvents] = useState<Array<{ id: number; at: string; event: string; detail: string }>>([]);
+  const [currentVoiceRequestId, setCurrentVoiceRequestId] = useState("");
   const [hasSpokenText, setHasSpokenText] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState(initialConversationError ?? "");
@@ -506,6 +514,9 @@ export function VoiceTutor({
   const diagramAbortRef = useRef<AbortController | null>(null);
   const lastSpokenTextRef = useRef<string>("");
   const speechRunRef = useRef(0);
+  const streamSpeechRunRef = useRef(0);
+  const streamSpeechPendingRef = useRef(0);
+  const streamSentenceBufferRef = useRef(new SentenceStreamBuffer());
   const jarvisModeRef = useRef(false);
   const jarvisPausedRef = useRef(false);
   const detectedLanguageRef = useRef<SupportedLanguageCode>(initialConversation?.language_code ?? preferredLanguage);
@@ -528,6 +539,15 @@ export function VoiceTutor({
   const titledConversationIdsRef = useRef<Set<string>>(
     new Set(initialConversation?.title ? [initialConversation.id] : []),
   );
+  const diagnosticEventIdRef = useRef(0);
+
+  function recordVoiceDiagnostic(event: string, detail = "") {
+    diagnosticEventIdRef.current += 1;
+    setDiagnosticEvents((current) => [
+      ...current.slice(-11),
+      { id: diagnosticEventIdRef.current, at: new Date().toISOString(), event, detail: detail.slice(0, 180) },
+    ]);
+  }
   const requestIdRef = useRef<string>("");
   const contextRevisionRef = useRef(0);
   const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
@@ -542,6 +562,26 @@ export function VoiceTutor({
     () => isSpeechSynthesisSupported(),
     () => false,
   );
+
+  useEffect(() => {
+    let active = true;
+    let status: PermissionStatus | null = null;
+    const update = () => {
+      if (active && status) setMicrophonePermission(status.state);
+    };
+    void navigator.permissions?.query({ name: "microphone" as PermissionName }).then((result) => {
+      if (!active) return;
+      status = result;
+      update();
+      result.addEventListener("change", update);
+    }).catch(() => {
+      if (active) setMicrophonePermission("unsupported");
+    });
+    return () => {
+      active = false;
+      status?.removeEventListener("change", update);
+    };
+  }, []);
 
   const selectedVoiceLanguage = useMemo(() => findVoiceLanguage(language), [language]);
   const activeLanguage = useMemo(
@@ -731,6 +771,7 @@ export function VoiceTutor({
     askAbortRef.current = null;
     active.abort();
     setLoading(false);
+    setStreaming(false);
   }
 
   async function ensureConversationForQuestion(question: string) {
@@ -860,6 +901,7 @@ export function VoiceTutor({
     // late-resolving prior request cannot append stale content. Abort the
     // active controller (if any) before issuing the new one.
     const epoch = invalidateVoiceTurnEpoch();
+    setInterrupted(false);
     abortActiveAskRequest();
     const toolCallId = beginToolCall("ask");
 
@@ -875,6 +917,13 @@ export function VoiceTutor({
 
     const controller = new AbortController();
     askAbortRef.current = controller;
+    const streamingTurnId = nextTurnId("assistant-stream");
+    let streamedText = "";
+    let receivedStreamDelta = false;
+    streamSentenceBufferRef.current.reset();
+    stopSpeaking();
+    streamSpeechRunRef.current = speechRunRef.current;
+    streamSpeechPendingRef.current = 0;
 
     // Client-side hard timeout (25s) slightly above server interactive budget (20s).
     // If exceeded, abort the request and show a concise retry message.
@@ -902,6 +951,7 @@ export function VoiceTutor({
           noteIds: activeNoteIdsRef.current,
           conversationId: activeConversation.id,
           language: answerLanguage,
+          stream: true,
         }),
         signal: controller.signal,
       });
@@ -909,9 +959,51 @@ export function VoiceTutor({
       window.clearTimeout(clientTimeoutId);
 
       telemetryStartStage(requestId, "response_parsing");
-      const data = await response.json();
+      const data = await consumeAskResponse(response, {
+        onEvent: (event: AskStreamEvent) => {
+          if (event.type === "start") {
+            requestIdRef.current = event.requestId;
+            setCurrentVoiceRequestId(event.requestId);
+            recordVoiceDiagnostic("request-start", event.requestId);
+          }
+          if (event.type === "provider") {
+            recordVoiceDiagnostic("provider", `${event.provider}:${event.model}${event.fallback ? ":fallback" : ""}`);
+            telemetrySetMetadata(requestId, { provider: event.provider, providerModel: event.model, fallback: event.fallback });
+          }
+        },
+        onDelta: (delta) => {
+          if (askAbortRef.current !== controller || voiceTurnEpochRef.current !== epoch) return;
+          if (!receivedStreamDelta) recordVoiceDiagnostic("first-stream-text", `${delta.length} chars`);
+          receivedStreamDelta = true;
+          setStreaming(true);
+          streamedText += delta;
+          const partial = normalizeAnswer({ short_answer: streamedText, simple_explanation: streamedText, response_mode: "ai" });
+          setTurns((current) => {
+            const nextTurn: Turn = { id: streamingTurnId, role: "assistant", answer: partial };
+            return current.some((turn) => turn.id === streamingTurnId)
+              ? current.map((turn) => turn.id === streamingTurnId ? nextTurn : turn)
+              : [...current, nextTurn];
+          });
+          const speechChunks = streamSentenceBufferRef.current.push(delta);
+          if (speechChunks.length) queueStreamingSpeech(speechChunks, voiceLocale(answerLanguage));
+        },
+        onReset: () => {
+          recordVoiceDiagnostic("stream-reset", "provider fallback");
+          streamedText = "";
+          receivedStreamDelta = false;
+          streamSentenceBufferRef.current.reset();
+          stopSpeaking();
+          streamSpeechRunRef.current = speechRunRef.current;
+          streamSpeechPendingRef.current = 0;
+          setTurns((current) => current.filter((turn) => turn.id !== streamingTurnId));
+        },
+      }) as {
+        chat: { id: string | null; answer: Answer; created_at: string };
+        mode?: string;
+        debug?: { timings?: unknown };
+      };
+      setStreaming(false);
       telemetryEndStage(requestId, "response_parsing");
-      if (!response.ok) throw new Error(data?.error || "AI request failed.");
       telemetrySetMetadata(requestId, {
         mode: "ask",
         serverTimings: data?.debug?.timings ?? null,
@@ -951,6 +1043,8 @@ export function VoiceTutor({
         return;
       }
 
+      setTurns((current) => current.filter((turn) => turn.id !== streamingTurnId));
+
       if (answerId && !loadedAssistantIdsRef.current.has(answerId)) {
         loadedAssistantIdsRef.current.add(answerId);
         setTurns((current) => [
@@ -984,11 +1078,21 @@ export function VoiceTutor({
       setCurrentArtifact("answer");
       setLastAssistantIntent("answer");
       finishToolCall(toolCallId, "success");
-      if (spokenAnswer) speakText(spokenAnswer, voiceLocale(answerLanguage));
+      if (receivedStreamDelta) {
+        const tail = streamSentenceBufferRef.current.flush();
+        if (tail.length) queueStreamingSpeech(tail, voiceLocale(answerLanguage));
+        lastSpokenTextRef.current = spokenAnswer;
+        setHasSpokenText(Boolean(spokenAnswer));
+      } else if (spokenAnswer) {
+        speakText(spokenAnswer, voiceLocale(answerLanguage));
+      }
 
       void maybeAutoTitleConversation(activeConversation.id, displayQuestion);
       void touchConversationUpdatedAt(activeConversation.id);
     } catch (err) {
+      setStreaming(false);
+      setTurns((current) => current.filter((turn) => turn.id !== streamingTurnId));
+      streamSentenceBufferRef.current.reset();
       finishToolCall(toolCallId, isAbortError(err) ? "cancelled" : "failed");
       window.clearTimeout(clientTimeoutId);
       if (!isAbortError(err) && voiceTurnEpochRef.current === epoch) {
@@ -1005,6 +1109,7 @@ export function VoiceTutor({
       if (askAbortRef.current === controller && voiceTurnEpochRef.current === epoch) {
         askAbortRef.current = null;
         setLoading(false);
+        setStreaming(false);
       }
       if (endTelemetryInFinally) {
         telemetryEndRequest(requestId, { completed: false });
@@ -1267,6 +1372,7 @@ export function VoiceTutor({
       askAbortRef.current.abort();
       askAbortRef.current = null;
       setLoading(false);
+      setStreaming(false);
       stopped = true;
     }
     if (searchAbortRef.current) {
@@ -1584,6 +1690,7 @@ export function VoiceTutor({
 
   // Resolve recognized text -> command, navigation, or free-form question.
   async function handleSpokenText(spoken: string) {
+    setInterrupted(false);
     if (autoLanguage) {
       const decision = detectSpokenLanguage(spoken, detectedLanguageRef.current);
       if (decision.language && decision.confidence >= 0.7) {
@@ -1920,7 +2027,7 @@ export function VoiceTutor({
       stopSpeaking();
     }
 
-    if (loading || notesLoading || searching || researching || visualizing) {
+    if ((loading || notesLoading || searching || researching || visualizing) && !bargeIn) {
       setNotice("Please wait for the current StudyPilot action to finish before listening again.");
       return;
     }
@@ -1967,6 +2074,7 @@ export function VoiceTutor({
       silenceMs: VOICE_RECORDING_SILENCE_MS,
       onSilence: () => {
         if (recognitionRef.current !== recognition) return;
+        recordVoiceDiagnostic("silence-stop", `session ${sessionToken}`);
         try {
           recognition.stop();
         } catch {
@@ -1996,6 +2104,7 @@ export function VoiceTutor({
     recognitionCleanupRef.current = cleanupRecognitionListeners;
 
     recognition.onstart = () => {
+      recordVoiceDiagnostic("recognition-start", `${recognition.lang}; session ${sessionToken}`);
       telemetryStartStage(currentRequestId, "speech_start");
       setListening(true);
       silenceTimer.start();
@@ -2033,8 +2142,13 @@ export function VoiceTutor({
       }
       latestTranscript = [finalTranscript, interimText].filter(Boolean).join(" ").trim();
       latestInterimTranscript = interimText.trim();
+      if (interimText) recordVoiceDiagnostic("interim-transcript", interimText);
       if (bargeIn && latestTranscript && !interruptedSpeech) {
         interruptedSpeech = true;
+        setInterrupted(true);
+        recordVoiceDiagnostic("interruption", `session ${sessionToken}`);
+        invalidateVoiceTurnEpoch();
+        abortActiveAskRequest();
         stopSpeaking();
       }
       // Interim transcripts are shown live but never persisted — only the
@@ -2092,6 +2206,7 @@ export function VoiceTutor({
       const spoken = finalTranscript.trim() || latestInterimTranscript.trim() || latestTranscript.trim();
       setInterim("");
       if (spoken) {
+        recordVoiceDiagnostic("final-transcript", spoken);
         telemetryEndStage(currentRequestId, "final_transcript");
         // Final-transcript duplicate protection within this single session:
         // if a browser emits two final events for identical text, the second
@@ -2123,6 +2238,43 @@ export function VoiceTutor({
   // -------------------------------------------------------------------------
   // Speech synthesis: read aloud / replay / stop speaking
   // -------------------------------------------------------------------------
+
+  function queueStreamingSpeech(chunks: string[], locale: string) {
+    if (!isSpeechSynthesisSupported() || !chunks.length) return;
+    const run = streamSpeechRunRef.current;
+    const requestId = requestIdRef.current;
+    if (streamSpeechPendingRef.current === 0) telemetryStartStage(requestId, "tts_start");
+    setSpeaking(true);
+    setHasSpokenText(true);
+    for (const chunk of chunks) {
+      if (!chunk.trim()) continue;
+      streamSpeechPendingRef.current += 1;
+      const utterance = new SpeechSynthesisUtterance(chunk);
+      const voice = pickVoiceForLocale(locale, availableVoices);
+      if (voice && voice.lang.toLowerCase().startsWith(locale.slice(0, 2).toLowerCase())) {
+        utterance.voice = voice;
+        utterance.lang = voice.lang;
+      } else {
+        utterance.lang = locale;
+      }
+      const chunkIndex = streamSpeechPendingRef.current;
+      const voiceName = utterance.voice?.name ?? `browser-default:${utterance.lang}`;
+      recordVoiceDiagnostic("tts-queued", `${chunkIndex}:${voiceName}`);
+      utterance.onstart = () => {
+        recordVoiceDiagnostic("tts-start", `${chunkIndex}:${voiceName}`);
+        telemetryEndStage(requestId, "tts_start");
+      };
+      const finish = () => {
+        if (streamSpeechRunRef.current !== run) return;
+        recordVoiceDiagnostic("tts-end", `${chunkIndex}:${voiceName}`);
+        streamSpeechPendingRef.current = Math.max(0, streamSpeechPendingRef.current - 1);
+        if (streamSpeechPendingRef.current === 0) setSpeaking(false);
+      };
+      utterance.onend = finish;
+      utterance.onerror = finish;
+      window.speechSynthesis.speak(utterance);
+    }
+  }
 
   function speakText(text: string, localeOverride?: string) {
     if (!isSpeechSynthesisSupported()) {
@@ -2202,6 +2354,9 @@ export function VoiceTutor({
 
   function stopSpeaking() {
     speechRunRef.current += 1;
+    streamSpeechRunRef.current = speechRunRef.current;
+    streamSpeechPendingRef.current = 0;
+    streamSentenceBufferRef.current.reset();
     if (isSpeechSynthesisSupported()) {
       window.speechSynthesis.cancel();
     }
@@ -2218,6 +2373,17 @@ export function VoiceTutor({
     .reverse()
     .find((turn) => turn.role === "assistant" && (turn.answer || turn.webSearch || turn.researchReport || turn.diagram || turn.generatedImage));
   const lastStudyAssistant = [...turns].reverse().find((turn) => turn.role === "assistant" && turn.answer);
+  const jarvisRuntimeState: JarvisRuntimeState = resolveJarvisRuntimeState({
+    error: Boolean(error),
+    paused: jarvisMode && jarvisPaused,
+    interrupted,
+    userSpeaking: listening && Boolean(interim.trim()),
+    listening,
+    toolRunning: notesLoading || searching || researching || visualizing,
+    streaming,
+    processing: loading,
+    speaking,
+  });
 
   // Orb visual state is driven by real recognition, search, AI, and speech work.
   const orbState: VoiceOrbState = error
@@ -2236,32 +2402,26 @@ export function VoiceTutor({
                 ? "speaking"
                 : "idle";
 
-  const stateLabel = error
-    ? "Error"
-    : jarvisMode && jarvisPaused
-      ? "Paused"
-    : listening
-      ? "Listening"
-      : visualizing
-        ? "Visualizing"
-        : researching
-          ? "Researching"
-          : searching
-            ? "Searching"
-            : loading || notesLoading
-              ? "Thinking"
-              : speaking
-                ? "Speaking"
-                : micBlocked
-                  ? "Microphone unavailable"
-                  : "Ready";
+  const stateLabel = micBlocked && jarvisRuntimeState === "IDLE"
+    ? "Microphone unavailable"
+    : jarvisRuntimeState === "TOOL_RUNNING"
+      ? visualizing ? "Visualizing" : researching ? "Researching" : searching ? "Searching" : "Running tool"
+      : jarvisRuntimeState === "USER_SPEAKING"
+        ? "Hearing you"
+        : jarvisRuntimeState === "PROCESSING"
+          ? "Thinking"
+          : jarvisRuntimeState.charAt(0) + jarvisRuntimeState.slice(1).toLowerCase();
 
   const stateSublabel = error
     ? "Something went wrong. Try again."
     : jarvisMode && jarvisPaused
       ? "Resume Jarvis mode when you are ready."
+    : interrupted
+      ? "The previous response was cancelled. Listening for your new request."
     : listening
       ? "Speak now, then tap Stop listening."
+      : streaming
+        ? "Showing the answer as the provider generates it."
       : visualizing
         ? activeDiagramPrompt ? `Generating a grounded diagram from ${activeDiagramPrompt}...` : "Generating your diagram..."
         : researching
@@ -2322,7 +2482,7 @@ export function VoiceTutor({
       window.clearTimeout(autoListenTimerRef.current);
       autoListenTimerRef.current = null;
     }
-    if (!jarvisMode || jarvisPaused || micBlocked || error || listening || working) return;
+    if (!jarvisMode || jarvisPaused || micBlocked || error || listening || (working && !speaking)) return;
 
     autoListenTimerRef.current = window.setTimeout(() => {
       autoListenTimerRef.current = null;
@@ -2880,6 +3040,24 @@ export function VoiceTutor({
             ))}
           </div>
         </div>
+
+        <details className="border-t border-white/8 pt-3 text-xs">
+          <summary className="cursor-pointer font-semibold uppercase text-slate-400">Voice diagnostics</summary>
+          <dl className="mt-3 grid grid-cols-2 gap-2 text-slate-400">
+            <div><dt>Runtime state</dt><dd className="mt-0.5 font-medium text-slate-200">{jarvisRuntimeState}</dd></div>
+            <div><dt>Microphone permission</dt><dd className="mt-0.5 font-medium text-slate-200">{microphonePermission}</dd></div>
+            <div><dt>Recognition locale</dt><dd className="mt-0.5 font-medium text-slate-200">{activeLanguage.recognitionLocale}</dd></div>
+            <div><dt>TTS locale</dt><dd className="mt-0.5 font-medium text-slate-200">{activeLanguage.speechLocale}</dd></div>
+            <div className="col-span-2"><dt>Request ID</dt><dd className="mt-0.5 break-all font-mono text-[10px] text-slate-300">{currentVoiceRequestId || "None"}</dd></div>
+          </dl>
+          <ol className="mt-3 grid max-h-40 gap-1 overflow-y-auto border-t border-white/8 pt-2 font-mono text-[10px] text-slate-500">
+            {diagnosticEvents.length ? diagnosticEvents.map((entry) => (
+              <li key={entry.id} className="break-words">
+                {entry.at.slice(11, 19)} {entry.event}{entry.detail ? `: ${entry.detail}` : ""}
+              </li>
+            )) : <li>No voice events recorded yet.</li>}
+          </ol>
+        </details>
       </aside>
       </div>
 

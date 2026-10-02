@@ -1,5 +1,6 @@
 import type { SourceCitation } from "./sourceCitations";
 import type { StructuredChatAnswer } from "./aiChat";
+import { localizedRuntimeCopy } from "@/shared/runtimeMessages";
 import type { GeneratedQuiz, QuizOptions, QuizQuestion } from "./aiQuiz";
 import type { RevisionPlan, StudyContext } from "./aiRevisionPlan";
 import { canonicalTopicId } from "@/shared/languages";
@@ -125,18 +126,21 @@ export function buildLocalChatAnswer(args: { question: string; sources: LocalSou
   const isExam = isViva || /exam questions?|practice questions?/.test(query);
   const beginner = /beginner|simply|simple terms|easy words|like a child/.test(query);
   const topicWise = /topic.wise|by topic|topics separated/.test(query);
-  const telugu = args.language === "te";
+  const copy = localizedRuntimeCopy(args.language);
   const excluded = new Set(args.excludedIds ?? []);
   const selected = selectDiverse(beginner ? [...all.filter((fact) => fact.kind === "definition" && fact.text.length < 180), ...all] : all, args.count ?? (isExam ? 5 : beginner ? 3 : 6), excluded);
   const citations = [...new Map(selected.map((fact) => [fact.source.citation?.id, fact.source.citation]).filter((pair): pair is [string, SourceCitation] => Boolean(pair[0] && pair[1]))).values()];
   const cite = (fact: LocalFact) => fact.source.citation ? ` [${fact.source.citation.id}]` : "";
-  const topic = (fact: LocalFact) => telugu ? `విషయం: ${fact.topic}\nమూల పత్రం: ${fact.text}${cite(fact)}` : `${fact.topic}: ${fact.text}${cite(fact)}`;
-  const questionFor = (fact: LocalFact) => telugu ? `ఈ పత్రం ప్రకారం ${fact.topic} గురించి ఏమి చెప్పబడింది?` : fact.kind === "definition" ? `How does the material define ${fact.topic}?` : `What key point does the material give about ${fact.topic}?`;
+  const localized = args.language && args.language !== "en";
+  const topic = (fact: LocalFact) => localized ? `${copy.topicLabel}: ${fact.topic}\n${copy.sourceLabel}: ${fact.text}${cite(fact)}` : `${fact.topic}: ${fact.text}${cite(fact)}`;
+  const questionFor = (fact: LocalFact) => localized
+    ? `${copy.topicLabel}: ${fact.topic}?`
+    : fact.kind === "definition" ? `How does the material define ${fact.topic}?` : `What key point does the material give about ${fact.topic}?`;
   const steps = isExam
-    ? selected.map((fact, index) => `${index + 1}. ${questionFor(fact)}${isViva ? `\n   ${telugu ? "జవాబు" : "Short answer"}: ${fact.text}${cite(fact)}` : `\n   ${telugu ? "జవాబు" : "Answer"}: ${fact.text}${cite(fact)}`}`)
+    ? selected.map((fact, index) => `${index + 1}. ${questionFor(fact)}${isViva ? `\n   ${copy.shortAnswerLabel}: ${fact.text}${cite(fact)}` : `\n   ${copy.answerLabel}: ${fact.text}${cite(fact)}`}`)
     : selected.map((fact) => topic(fact));
-  const opening = telugu ? (isExam ? "పత్రం ఆధారంగా ప్రశ్నలు మరియు జవాబులు:" : "ఈ పత్రంలోని ముఖ్యమైన అంశాలు:") : isExam ? "Questions from the selected material:" : topicWise ? "Topic-wise points from the selected material:" : beginner ? "Here are the main ideas in simpler steps:" : "Important points from the selected material:";
-  const noMore = telugu ? "ఈ పత్రంలో వేరే అంశాలు కనిపించలేదు." : "No more distinct points were found in the selected material.";
+  const opening = isExam ? copy.sourceQuestions : topicWise ? copy.topicWisePoints : beginner ? copy.simplerPoints : copy.importantPoints;
+  const noMore = copy.noMorePoints;
   return {
     short_answer: selected.length ? opening : noMore,
     simple_explanation: selected.length ? `${opening}\n\n${steps.join("\n\n")}` : noMore,
@@ -147,7 +151,7 @@ export function buildLocalChatAnswer(args: { question: string; sources: LocalSou
     exam_viva_answer: isViva ? steps.join("\n\n") : "",
     practice_question: selected[0] && !isExam ? questionFor(selected[0]) : "",
     related_files_notes: [...new Set(selected.map((fact) => fact.source.label))],
-    next_step: selected.length ? (telugu ? "మరిన్ని అంశాల కోసం next అని టైప్ చేయండి." : "Type next for more from this file.") : "",
+    next_step: selected.length ? copy.nextForMore : "",
     found_in_notes: selected.length > 0,
     source_ids: citations.map((citation) => citation.id),
     fallback_item_ids: selected.map((fact) => fact.id),

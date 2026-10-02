@@ -77,6 +77,7 @@ import {
   shortTitleFromQuestion,
 } from "@/frontend/lib/conversations";
 import { createConversationResult, readConversationResult, withConversationResult } from "@/shared/conversationResults";
+import { consumeAskResponse } from "@/frontend/lib/aiStream";
 import {
   assistantIdsFromRows,
   isComposerReadOnly,
@@ -2580,6 +2581,8 @@ export function StudyChat({
 
     const controller = new AbortController();
     setAbortController(controller);
+    const streamingAssistantId = nextMessageId("assistant-stream");
+    let streamedText = "";
 
     try {
       const response = await fetch("/api/ai/ask", {
@@ -2595,26 +2598,40 @@ export function StudyChat({
             .filter((attachment) => attachment.type === "note")
             .map((attachment) => attachment.id),
           language: requestedLanguage ?? language,
+          stream: true,
           ...(sendConversationId ? { conversationId: sendConversationId } : {}),
         }),
         signal: controller.signal,
       });
-      const data = await response.json();
-
-      if (!response.ok) {
-        const errorMessage =
-          typeof data.error === "string" && data.error
-            ? data.error
-            : "AI request failed.";
-        throw new Error(errorMessage);
-      }
+      const data = await consumeAskResponse(response, {
+        onDelta: (delta) => {
+          if (currentConversationVersion() !== conversationVersion || controller.signal.aborted) return;
+          streamedText += delta;
+          const partial = normalizeAnswer({ short_answer: streamedText, simple_explanation: streamedText, response_mode: "ai" });
+          setMessages((current) => {
+            const existing = current.findIndex((message) => message.id === streamingAssistantId);
+            const nextMessage: UiMessage = { id: streamingAssistantId, role: "assistant", mode: "study", answer: partial };
+            if (existing < 0) return [...current, nextMessage];
+            return current.map((message, index) => index === existing ? nextMessage : message);
+          });
+          markNearBottom();
+        },
+        onReset: () => {
+          streamedText = "";
+          setMessages((current) => current.filter((message) => message.id !== streamingAssistantId));
+        },
+      }) as {
+        chat: { id: string; answer: Answer; created_at: string };
+        mode?: string;
+      };
 
       const answer = normalizeAnswer({
         ...(data.chat.answer ?? {}),
-        response_mode: data.mode ?? data.chat.answer?.response_mode,
+        response_mode: (data.chat.answer as Answer | undefined)?.response_mode ?? data.mode,
       });
 
       if (currentConversationVersion() !== conversationVersion) return;
+      setMessages((current) => current.filter((message) => message.id !== streamingAssistantId));
 
       if (answer.response_mode === "offline_fallback") {
         setAttachments(currentAttachments);
@@ -2657,6 +2674,7 @@ export function StudyChat({
       );
     } catch (err) {
       if (currentConversationVersion() !== conversationVersion) return;
+      setMessages((current) => current.filter((message) => message.id !== streamingAssistantId));
       // User stopped generation; no error, keep the user bubble.
       if (err instanceof DOMException && err.name === "AbortError") {
         return;

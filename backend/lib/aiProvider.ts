@@ -207,8 +207,8 @@ function getNvidiaTextModel(profile: AIProviderProfile) {
 
 function getRuntimeConfig(profile: AIProviderProfile): ProviderRuntimeConfig {
   if (profile === "summary") {
-    const timeoutMs = Math.min(
-      configuredTimeout(process.env.SUMMARY_AI_TIMEOUT_MS, DEFAULT_STRUCTURED_TIMEOUT_MS),
+    const timeoutMs = configuredTimeout(
+      process.env.SUMMARY_AI_TIMEOUT_MS,
       DEFAULT_STRUCTURED_TIMEOUT_MS,
     );
     return {

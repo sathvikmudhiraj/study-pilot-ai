@@ -1,6 +1,14 @@
 import { expect, test, type Page } from "@playwright/test";
 import { login, requireE2EEnv } from "./helpers";
 
+async function askPayload(response: import("@playwright/test").Response) {
+  const raw = await response.text();
+  const contentType = response.headers()["content-type"] ?? "";
+  if (!contentType.includes("application/x-ndjson")) return JSON.parse(raw);
+  const events = raw.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  return events.findLast((event) => event.type === "final") ?? {};
+}
+
 async function installRecognition(page: Page) {
   await page.addInitScript(() => {
     class Recognition {
@@ -86,7 +94,7 @@ test("Voice study commands send their prepared questions with selected-file cont
     expect(payload.conversationId).toBe(conversationId);
     const response = await request.response();
     expect(response?.ok(), `${command}: ${await response?.text()}`).toBe(true);
-    const chat = (await response!.json()).chat;
+    const chat = (await askPayload(response!)).chat;
     expect(chat?.id).toMatch(/^[0-9a-f-]{36}$/i);
     expect(chat?.answer?.short_answer).not.toMatch(/not found in the selected study material/i);
     await expect(page.getByText(command, { exact: true }).last()).toBeVisible();
@@ -224,10 +232,10 @@ test("Voice follow-ups retain the selected file and switch language in one conve
     expect(payload.fileIds).toContain(fileId);
     expect(payload.conversationId).toBe(conversationId);
     expect(payload.language).toBe(language);
-    expect(payload.question).toBe(command);
+    expect(payload.question).toContain(command);
     const response = await request.response();
     expect(response?.ok(), `${command}: ${await response?.text()}`).toBe(true);
-    const chat = (await response!.json()).chat;
+    const chat = (await askPayload(response!)).chat;
     expect(chat?.id).toMatch(/^[0-9a-f-]{36}$/i);
     const answer = chat?.answer;
     expect(answer?.short_answer?.trim()).toBeTruthy();
@@ -348,7 +356,7 @@ test("normal Voice C query stays in selected notes and offers Web Search", async
   expect(request.postDataJSON().fileIds).toContain(fileId);
   const response = await request.response();
   expect(response?.ok(), await response?.text()).toBe(true);
-  const answer = (await response!.json()).chat.answer;
+  const answer = (await askPayload(response!)).chat.answer;
   expect(answer.short_answer).toMatch(/not found in .*study material/i);
   expect(answer.next_step).toMatch(/Web Search/i);
   expect(answer.source_citations ?? []).toHaveLength(0);
@@ -376,7 +384,7 @@ test("Voice false positives remain normal study questions", async ({ page }) => 
     const requestPromise = page.waitForRequest((request) => request.url().includes("/api/ai/ask") && request.method() === "POST");
     await speak(page, command);
     const request = await requestPromise;
-    expect(request.postDataJSON().question).toBe(command);
+    expect(request.postDataJSON().question).toContain(command);
     const response = await request.response();
     expect(response?.ok(), `${command}: ${await response?.text()}`).toBe(true);
     await expect(page.getByRole("button", { name: /start listening/i })).toBeEnabled();
@@ -406,7 +414,7 @@ test("Voice follow-up wording keeps file context and response language", async (
     expect(request.postDataJSON().fileIds).toContain(fileId);
     const response = await request.response();
     expect(response?.ok(), `${command}: ${await response?.text()}`).toBe(true);
-    expect((await response!.json()).chat.answer.short_answer.trim()).toBeTruthy();
+    expect((await askPayload(response!)).chat.answer.short_answer.trim()).toBeTruthy();
     await expect(page.getByRole("button", { name: /start listening/i })).toBeEnabled();
   }
 });

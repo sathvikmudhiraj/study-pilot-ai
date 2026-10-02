@@ -1,4 +1,6 @@
 import { uniqueSourceCitations, type SourceCitation } from "./sourceCitations";
+import { localizedRuntimeCopy } from "@/shared/runtimeMessages";
+import type { SupportedLanguageCode } from "@/shared/languages";
 
 export type GroundedChatAnswer = {
   response_mode?: "ai" | "cache" | "offline_fallback";
@@ -22,10 +24,11 @@ export type GroundedChatAnswer = {
   }>;
 };
 
-export function unsupportedSelectedMaterialAnswer(): GroundedChatAnswer {
+export function unsupportedSelectedMaterialAnswer(language: SupportedLanguageCode = "en"): GroundedChatAnswer {
+  const copy = localizedRuntimeCopy(language);
   return {
     response_mode: "ai",
-    short_answer: "This topic was not found in the selected study material.",
+    short_answer: copy.topicNotFound,
     simple_explanation: "",
     step_by_step: [],
     example: "",
@@ -34,7 +37,7 @@ export function unsupportedSelectedMaterialAnswer(): GroundedChatAnswer {
     exam_viva_answer: "",
     practice_question: "",
     related_files_notes: [],
-    next_step: "Try selecting another file, asking a more specific question, or use Search outside my notes.",
+    next_step: copy.topicNotFoundNextStep,
     found_in_notes: false,
     source_ids: [],
     source_citations: [],
@@ -45,6 +48,7 @@ export function unsupportedSelectedMaterialAnswer(): GroundedChatAnswer {
 export function applyGroundingValidation(
   answer: GroundedChatAnswer,
   allowedCitations: SourceCitation[],
+  language: SupportedLanguageCode = "en",
 ): GroundedChatAnswer {
   const byId = new Map(allowedCitations.map((citation) => [citation.id, citation]));
   const requestedIds = Array.isArray(answer.source_ids) ? answer.source_ids : [];
@@ -56,7 +60,7 @@ export function applyGroundingValidation(
   );
 
   if (answer.found_in_notes === false || matched.length === 0) {
-    return unsupportedSelectedMaterialAnswer();
+    return unsupportedSelectedMaterialAnswer(language);
   }
 
   return {

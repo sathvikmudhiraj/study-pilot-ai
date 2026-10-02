@@ -17,6 +17,41 @@ export type JarvisTask =
 
 export type JarvisToolStatus = "queued" | "running" | "success" | "failed" | "cancelled";
 
+export type JarvisRuntimeState =
+  | "IDLE"
+  | "LISTENING"
+  | "USER_SPEAKING"
+  | "PROCESSING"
+  | "STREAMING"
+  | "SPEAKING"
+  | "TOOL_RUNNING"
+  | "INTERRUPTED"
+  | "PAUSED"
+  | "ERROR";
+
+export function resolveJarvisRuntimeState(input: {
+  error: boolean;
+  paused: boolean;
+  interrupted: boolean;
+  userSpeaking: boolean;
+  listening: boolean;
+  toolRunning: boolean;
+  streaming: boolean;
+  processing: boolean;
+  speaking: boolean;
+}): JarvisRuntimeState {
+  if (input.error) return "ERROR";
+  if (input.paused) return "PAUSED";
+  if (input.interrupted) return "INTERRUPTED";
+  if (input.userSpeaking) return "USER_SPEAKING";
+  if (input.listening) return "LISTENING";
+  if (input.toolRunning) return "TOOL_RUNNING";
+  if (input.streaming) return "STREAMING";
+  if (input.processing) return "PROCESSING";
+  if (input.speaking) return "SPEAKING";
+  return "IDLE";
+}
+
 export type JarvisToolCall = {
   id: string;
   tool: string;

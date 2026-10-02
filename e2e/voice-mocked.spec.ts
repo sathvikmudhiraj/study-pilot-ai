@@ -122,14 +122,20 @@ test.describe("voice tutor mocked-speech pipeline (real AI backend)", () => {
 
     // --- Real backend response --------------------------------------------
     const askResponse = await askResponsePromise;
-    expect(askResponse.ok(), `ask failed: ${askResponse.status()} ${await askResponse.text()}`).toBeTruthy();
-    const payload = await askResponse.json();
+    expect(askResponse.ok(), `ask failed: ${askResponse.status()}`).toBeTruthy();
+    const contentType = askResponse.headers()["content-type"] ?? "";
+    const raw = await askResponse.text();
+    const payload = contentType.includes("application/x-ndjson")
+      ? JSON.parse(raw.trim().split(/\r?\n/).reverse().find((line) => JSON.parse(line).type === "final") ?? "{}")
+      : JSON.parse(raw);
+    expect(contentType).toContain("application/x-ndjson");
 
     // `chat.answer.response_mode === "ai"` proves a real AI provider generated
     // the answer (Gemini, or NVIDIA fallback). Top-level `mode` carries the
     // context strategy ("keyword-context" / "selected-context" / "ai").
     expect(payload.chat?.answer?.response_mode).toBe("ai");
     expect(payload.mode).not.toBe("offline_fallback");
+    console.log(`[voice-mocked] stream metrics=${JSON.stringify(payload.providerMeta ?? {})}`);
 
     const shortAnswer = String(payload.chat?.answer?.short_answer ?? "");
     expect(shortAnswer.trim().length).toBeGreaterThan(0);

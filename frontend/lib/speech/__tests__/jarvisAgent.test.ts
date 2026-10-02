@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   inferJarvisTask,
+  resolveJarvisRuntimeState,
   inferJarvisTopic,
   matchJarvisFiles,
   resolveJarvisControlIntent,
@@ -34,5 +35,21 @@ describe("Jarvis agent routing", () => {
     expect(inferJarvisTask("Explain deadlocks from this file")).toBe("explain");
     expect(inferJarvisTopic("Explain deadlocks from this file")).toBe("deadlocks");
     expect(inferJarvisTask("Give me viva questions")).toBe("viva");
+  });
+});
+
+describe("Jarvis runtime state", () => {
+  const base = { error: false, paused: false, interrupted: false, userSpeaking: false, listening: false, toolRunning: false, streaming: false, processing: false, speaking: false };
+  it("uses deterministic priority for interruption and speech", () => {
+    expect(resolveJarvisRuntimeState({ ...base, speaking: true })).toBe("SPEAKING");
+    expect(resolveJarvisRuntimeState({ ...base, speaking: true, userSpeaking: true, interrupted: true })).toBe("INTERRUPTED");
+    expect(resolveJarvisRuntimeState({ ...base, listening: true, userSpeaking: true })).toBe("USER_SPEAKING");
+  });
+  it("distinguishes processing, streaming, tools, pause, and errors", () => {
+    expect(resolveJarvisRuntimeState({ ...base, processing: true })).toBe("PROCESSING");
+    expect(resolveJarvisRuntimeState({ ...base, processing: true, streaming: true })).toBe("STREAMING");
+    expect(resolveJarvisRuntimeState({ ...base, streaming: true, toolRunning: true })).toBe("TOOL_RUNNING");
+    expect(resolveJarvisRuntimeState({ ...base, paused: true })).toBe("PAUSED");
+    expect(resolveJarvisRuntimeState({ ...base, paused: true, error: true })).toBe("ERROR");
   });
 });

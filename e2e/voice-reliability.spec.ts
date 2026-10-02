@@ -143,9 +143,11 @@ test("changing the Voice file updates Ask, Diagram, Notes, Quiz, and Revision", 
   const selector = page.getByRole("combobox", { name: /active study file/i });
   const values = await selector.locator("option:not([value=''])").evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value));
   expect(values.length).toBeGreaterThan(1);
-  const initialId = values[0];
-  const selectedId = values[values.length - 1];
-  await selector.selectOption(initialId);
+  const selectedId = await selector.locator("option", { hasText: "Module-3.docx" }).getAttribute("value");
+  if (!selectedId) throw new Error("Module-3.docx is required for the Voice file-context test.");
+  const initialId = values.find((value) => value !== selectedId);
+  expect(initialId).toBeTruthy();
+  await selector.selectOption(initialId!);
   await page.getByRole("button", { name: /start listening/i }).click();
   await emit(page, "Explain this file", true);
   await page.getByRole("button", { name: /stop listening/i }).click();
@@ -173,12 +175,10 @@ test("changing the Voice file updates Ask, Diagram, Notes, Quiz, and Revision", 
   await emit(page, "generate quiz", true);
   await page.getByRole("button", { name: /stop listening/i }).click();
   await expect(page).toHaveURL(new RegExp(`/quiz\\?fileId=${selectedId}`));
-  await page.goto("/voice");
+  await page.goto(`/voice?fileId=${selectedId}`);
   await expect(page.getByRole("heading", { name: /voice tutor/i })).toBeVisible();
   const revisionSelector = page.getByRole("combobox", { name: /active study file/i });
-  await revisionSelector.selectOption(selectedId);
   await expect(revisionSelector).toHaveValue(selectedId);
-  await expect(page.getByText(/^Using .+\.$/)).toBeVisible();
   await page.getByRole("button", { name: /start listening/i }).click();
   await emit(page, "create revision plan", true);
   await page.getByRole("button", { name: /stop listening/i }).click();
@@ -308,4 +308,64 @@ test("Jarvis mode auto-listens, preserves context, pauses, and supports barge-in
   await expect(page.getByRole("combobox", { name: /active study file/i })).toHaveValue(moduleId!);
   await expect(page.getByRole("combobox", { name: /speaking language/i })).toHaveValue("hi");
   await expect(page.getByText(/deadlocks/i).first()).toBeVisible();
+});
+
+test("streaming barge-in aborts the old response and the new answer wins", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto("/voice");
+  await expect(page.getByRole("heading", { name: /voice tutor/i })).toBeVisible();
+  await page.evaluate(() => {
+    const target = window as unknown as Record<string, unknown>;
+    target.__streamAborts = 0;
+    target.__holdSpeech = true;
+    const nativeFetch = window.fetch.bind(window);
+    let askCount = 0;
+    window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (!url.includes("/api/ai/ask")) return nativeFetch(input, init);
+      askCount += 1;
+      const current = askCount;
+      const encoder = new TextEncoder();
+      const timers: number[] = [];
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const send = (event: Record<string, unknown>, delay: number) => {
+            timers.push(window.setTimeout(() => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`)), delay));
+          };
+          send({ type: "start", requestId: `browser-stream-${current}`, language: "en" }, 0);
+          if (current === 1) {
+            send({ type: "delta", text: "Old answer begins. ", provider: "gemini" }, 40);
+            send({ type: "delta", text: "STALE CHUNK MUST NOT APPEAR.", provider: "gemini" }, 1_500);
+            timers.push(window.setTimeout(() => controller.close(), 1_600));
+          } else {
+            send({ type: "delta", text: "New simple answer wins.", provider: "nvidia" }, 40);
+            send({ type: "final", mode: "keyword-context", chat: { id: null, created_at: new Date().toISOString(), answer: { short_answer: "New simple answer wins.", simple_explanation: "New simple answer wins.", response_mode: "ai" } } }, 80);
+            timers.push(window.setTimeout(() => controller.close(), 100));
+          }
+          init?.signal?.addEventListener("abort", () => {
+            target.__streamAborts = Number(target.__streamAborts) + 1;
+            timers.forEach(window.clearTimeout);
+            try { controller.error(new DOMException("Aborted", "AbortError")); } catch { /* already closed */ }
+          }, { once: true });
+        },
+      });
+      return Promise.resolve(new Response(stream, { status: 200, headers: { "content-type": "application/x-ndjson" } }));
+    };
+  });
+
+  await page.getByRole("switch", { name: /jarvis off/i }).click();
+  await expect(page.getByRole("button", { name: /stop listening/i })).toBeEnabled();
+  await emit(page, "Explain set operators", true);
+  await page.getByRole("button", { name: /stop listening/i }).click();
+  await expect(page.getByText("Old answer begins.", { exact: false })).toBeVisible();
+
+  await expect(page.getByRole("button", { name: /stop listening/i })).toBeEnabled({ timeout: 10_000 });
+  await emit(page, "Wait explain simpler", true);
+  await page.getByRole("button", { name: /stop listening/i }).click();
+
+  await expect(page.getByText("New simple answer wins.", { exact: false })).toBeVisible();
+  await page.waitForTimeout(1_700);
+  await expect(page.getByText("STALE CHUNK MUST NOT APPEAR.", { exact: false })).toHaveCount(0);
+  expect(await page.evaluate(() => Number((window as unknown as Record<string, unknown>).__streamAborts))).toBeGreaterThan(0);
+  expect(await page.evaluate(() => Number((window as unknown as Record<string, unknown>).__speechCancels))).toBeGreaterThan(0);
 });

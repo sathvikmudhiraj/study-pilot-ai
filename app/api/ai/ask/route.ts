@@ -1,6 +1,6 @@
 import { after, NextResponse } from "next/server";
 import { requireUser } from "@/backend/lib/auth";
-import { answerLearnStepByStep, answerStudyQuestion, type StructuredChatAnswer, type ChatAnswerWithMetadata } from "@/backend/lib/aiChat";
+import { answerLearnStepByStep, answerStudyQuestion, buildStreamingStudyPrompt, type StructuredChatAnswer, type ChatAnswerWithMetadata } from "@/backend/lib/aiChat";
 import { chunkDocument, selectRelevantChunks, type DocumentChunk } from "@/backend/lib/documentProcessing";
 import { processStudyMaterial } from "@/backend/lib/studyMaterial";
 import {
@@ -15,7 +15,7 @@ import { withRequestObservability } from "@/backend/lib/observability";
 import { getAiUserMessage, isAiBusyError, isAiQuotaError } from "@/backend/lib/aiProvider";
 import { isGreeting, greetingResponse } from "@/backend/lib/greetingDetector";
 import { buildLearnerProfile, buildPersonalizedChatContext, recommendWeakTopic } from "@/backend/lib/learnerProfile";
-import { isSupportedLanguageCode, languageDetails, type SupportedLanguageCode } from "@/shared/languages";
+import { isSupportedLanguageCode, languageDetails, responseUsesExpectedScript, type SupportedLanguageCode } from "@/shared/languages";
 import { enforceAiRateLimit } from "@/backend/lib/rateLimit";
 import { applyGroundingValidation, unsupportedSelectedMaterialAnswer } from "@/backend/lib/ragGrounding";
 import { requestedStudyLanguage, stripConversationalPrefix, suggestedWebTopic } from "@/shared/studyIntent";
@@ -24,6 +24,8 @@ import { buildLocalChatAnswer, readLocalDocxParagraphs } from "@/backend/lib/loc
 import { learningRecommendation, loadLearningMemory, recordExplicitLearningEvidence } from "@/backend/lib/learningMemory";
 import { learningMemoryIntent, type LearningState } from "@/shared/learningMemory";
 import { createConversationResult, withConversationResult } from "@/shared/conversationResults";
+import { streamAIText, type AITextStreamMetadata } from "@/backend/lib/aiStreaming";
+import { localizedRuntimeCopy } from "@/shared/runtimeMessages";
 
 export const runtime = "nodejs";
 
@@ -37,6 +39,7 @@ type AskBody = {
   /** Voice Tutor can speak from the response immediately while persistence runs after response. */
   deferPersistence?: boolean;
   language?: SupportedLanguageCode;
+  stream?: boolean;
 };
 
 const CONVERSATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -98,6 +101,71 @@ function apiError(message: string, status = 500, debug?: Record<string, unknown>
     },
     { status },
   );
+}
+
+function streamedAnswer(text: string, citations: SourceCitation[], selectedMaterialMode: boolean): ChatAnswerWithMode {
+  const normalized = text.trim();
+  const firstParagraph = normalized.split(/\n\s*\n/).find(Boolean)?.trim() ?? normalized;
+  return {
+    short_answer: firstParagraph.slice(0, 900),
+    simple_explanation: normalized,
+    step_by_step: [],
+    example: "",
+    memory_line: "",
+    common_mistake: "",
+    exam_viva_answer: "",
+    practice_question: "",
+    related_files_notes: [],
+    next_step: "",
+    found_in_notes: selectedMaterialMode ? true : undefined,
+    source_ids: citations.map((citation) => citation.id),
+    source_citations: citations,
+    response_mode: "ai",
+  };
+}
+
+function ndjsonResponse(
+  request: Request,
+  run: (send: (event: Record<string, unknown>) => void, signal: AbortSignal) => Promise<void>,
+) {
+  const encoder = new TextEncoder();
+  const streamAbort = new AbortController();
+  const onRequestAbort = () => streamAbort.abort(request.signal.reason);
+  request.signal.addEventListener("abort", onRequestAbort, { once: true });
+  let closed = false;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const send = (event: Record<string, unknown>) => {
+        if (closed || streamAbort.signal.aborted) return;
+        controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      };
+      void run(send, streamAbort.signal)
+        .catch((error) => {
+          if (!streamAbort.signal.aborted) {
+            send({ type: "error", error: normalizeError(error) });
+          }
+        })
+        .finally(() => {
+          request.signal.removeEventListener("abort", onRequestAbort);
+          if (!closed) {
+            closed = true;
+            controller.close();
+          }
+        });
+    },
+    cancel(reason) {
+      closed = true;
+      streamAbort.abort(reason);
+      request.signal.removeEventListener("abort", onRequestAbort);
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no",
+    },
+  });
 }
 
 function normalizeError(error: unknown) {
@@ -1668,7 +1736,7 @@ async function handlePost(request: Request) {
 
     // If no supporting context found after all search strategies, return not-found without calling AI.
     if (selectedMaterialMode && (!preparedContext.citations.length || focusedTopicMissingFromTexts(resolvedQuestion, contextItems.map((item) => item.text)))) {
-      const answer = unsupportedSelectedMaterialAnswer();
+      const answer = unsupportedSelectedMaterialAnswer(language);
       answer.next_step = `Use Web Search for "${suggestedWebTopic(question)}".`;
       return NextResponse.json({
         chat: { id: null, question, answer, related_file_ids: [], related_note_ids: [], created_at: new Date().toISOString() },
@@ -1686,6 +1754,129 @@ async function handlePost(request: Request) {
     debug.contextLength = promptContext.length;
     debug.citationCount = preparedContext.citations.length;
     devLog("question context prepared", debug);
+
+    const conversationalIntent = resolvedIntent ?? classifyIntent(resolvedQuestion);
+    const streamEligible = body.stream === true
+      && requestMode === "study"
+      && (conversationalIntent === "explain" || conversationalIntent === "general_qa");
+
+    if (streamEligible) {
+      const relatedFileIds = Array.from(new Set(contextItems.filter((item) => item.type === "file").map((item) => item.id)));
+      const relatedNoteIds = Array.from(new Set(contextItems.filter((item) => item.type === "note").map((item) => item.id)));
+      const related = contextItems.map((item) => ({ id: item.id, label: item.label, type: item.type }));
+      const prompt = buildStreamingStudyPrompt({
+        question: resolvedQuestion,
+        context: promptContext,
+        language,
+        grounded: selectedMaterialMode,
+        allowedSourceIds: preparedContext.citations.map((citation) => citation.id),
+      });
+
+      return ndjsonResponse(request, async (send, signal) => {
+        let finalText = "";
+        let providerMetadata: AITextStreamMetadata | null = null;
+        let answer: ChatAnswerWithMode;
+        let responseMode: "selected-context" | "keyword-context" | "offline_fallback" = selectedContext.length ? "selected-context" : "keyword-context";
+        const copy = localizedRuntimeCopy(language);
+        send({ type: "start", requestId: crypto.randomUUID(), language, related });
+
+        try {
+          for await (const event of streamAIText(prompt, {
+            signal,
+            timeoutMs: 15_000,
+            primaryTimeoutMs: 6_000,
+            fallbackTimeoutMs: 9_000,
+            temperature: 0.2,
+            maxOutputTokens: 900,
+          })) {
+            if (signal.aborted) return;
+            if (event.type === "delta") {
+              finalText += event.text;
+              send({ type: "delta", text: event.text, provider: event.provider });
+            } else if (event.type === "reset") {
+              finalText = "";
+              send({ type: "reset", reason: event.reason });
+            } else if (event.type === "provider") {
+              send(event);
+            } else {
+              providerMetadata = event.metadata;
+            }
+          }
+          if (!finalText.trim()) throw new Error("AI providers returned an empty stream.");
+          if (!responseUsesExpectedScript(finalText, language)) {
+            throw new Error(`The provider response did not preserve the requested ${languageDetails(language).promptName} language.`);
+          }
+          answer = streamedAnswer(finalText, preparedContext.citations, selectedMaterialMode);
+        } catch (error) {
+          if (signal.aborted || (error instanceof Error && error.name === "AbortError")) return;
+          const fallbackContext = [...contextItems, ...previousContext];
+          const local = buildLocalChatAnswer({
+            question: resolvedQuestion,
+            sources: fallbackContext.filter((item) => item.type !== "previous_answer").map((item) => ({
+              id: ("citation" in item ? item.citation?.id : undefined) ?? item.id,
+              label: item.label,
+              text: item.text,
+              citation: "citation" in item ? item.citation : undefined,
+            })),
+            excludedIds: continuationFallbackItemIds,
+            language,
+            count: requestedCount ?? undefined,
+          });
+          answer = {
+            ...local,
+            response_mode: OFFLINE_FALLBACK_MODE,
+            fallback_notice: copy.providerFallbackNotice,
+            source_chips: sourceChipsForItems(fallbackContext),
+          };
+          responseMode = OFFLINE_FALLBACK_MODE;
+          send({ type: "reset", reason: "provider_fallback" });
+        }
+
+        if (signal.aborted) return;
+        const persistencePayload = {
+          user_id: user.id,
+          question,
+          answer,
+          related_file_ids: relatedFileIds,
+          related_note_ids: relatedNoteIds,
+          mode: responseMode,
+          status: "answered",
+          language_code: language,
+          ...(conversationId ? { conversation_id: conversationId } : {}),
+        };
+        const saved = await supabase
+          .from("assistant_questions")
+          .insert(persistencePayload)
+          .select("id, question, answer, related_file_ids, related_note_ids, created_at")
+          .single();
+        if (saved.error) throw saved.error;
+
+        if (conversationId) {
+          const activeTopic = topicFromQuestion(resolvedQuestion)
+            || (typeof conversationStudyState.active_topic === "string" ? conversationStudyState.active_topic : "");
+          await supabase.from("conversations").update({
+            study_state: {
+              ...conversationStudyState,
+              active_topic: activeTopic,
+              active_task: conversationalIntent,
+              last_meaningful_intent: conversationalIntent,
+              unfinished_task: null,
+              updated_at: new Date().toISOString(),
+            },
+          }).eq("id", conversationId).eq("user_id", user.id);
+        }
+
+        send({
+          type: "final",
+          chat: saved.data,
+          related,
+          mode: responseMode,
+          providerMeta: providerMetadata,
+          usedGlobalFallback: false,
+          ...(isDev() ? { debug: { ...debug, timings: timingDebug() } } : {}),
+        });
+      });
+    }
 
     let answer: ChatAnswerWithMode;
     let mode: "selected-context" | "keyword-context" | "offline_fallback" = selectedContext.length ? "selected-context" : "keyword-context";
@@ -1709,7 +1900,7 @@ async function handlePost(request: Request) {
         source_citations: preparedContext.citations,
       };
       if (selectedMaterialMode && requestMode !== "learn_step_by_step") {
-        answer = applyGroundingValidation(answer, preparedContext.citations);
+        answer = applyGroundingValidation(answer, preparedContext.citations, language);
       }
       const generatedIntent = resolvedIntent ?? classifyIntent(resolvedQuestion);
       if (
@@ -1777,7 +1968,7 @@ async function handlePost(request: Request) {
       answer = {
         ...local,
         response_mode: OFFLINE_FALLBACK_MODE,
-        fallback_notice: "Generated from your selected study material while AI providers are unavailable.",
+        fallback_notice: localizedRuntimeCopy(language).providerFallbackNotice,
         source_chips: sourceChipsForItems(fallbackContext),
       };
       mode = OFFLINE_FALLBACK_MODE;
